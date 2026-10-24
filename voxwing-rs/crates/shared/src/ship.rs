@@ -1,4 +1,5 @@
 use crate::analysis::{Stats, compute_stats, occupancy};
+use crate::balance::balance;
 use crate::blocks::{BlockType, Design};
 use crate::grid::{DIRS6, Occupancy, raycast};
 use glam::{IVec3, Quat, Vec3};
@@ -18,6 +19,8 @@ pub struct ShipBody {
     /// blocks fall off, so transforms never jump.
     pub com0: Vec3,
     pub stats: Stats,
+    /// Each block's full hit points (a cockpit's depend on what the whole ship cost).
+    pub block_max: Vec<f32>,
     pub max_hp: f32,
     pub cockpit: Option<usize>,
     pub engines0: usize,
@@ -33,11 +36,13 @@ impl ShipBody {
         let n = design.blocks.len();
         let alive = vec![true; n];
         let full = compute_stats(&design.blocks, &alive);
+        let block_max: Vec<f32> = design.blocks.iter().map(|b| balance().block_hp(b.ty, full.cost)).collect();
         let mut body = ShipBody {
-            hp: design.blocks.iter().map(|b| b.ty.info().hp).collect(),
+            hp: block_max.clone(),
+            max_hp: block_max.iter().sum(),
+            block_max,
             occ: Occupancy::default(),
             com0: full.com,
-            max_hp: full.hp,
             engines0: full.engines.len(),
             stats: full,
             alive,
@@ -72,9 +77,7 @@ impl ShipBody {
 
     pub fn repair(&mut self) {
         self.alive.iter_mut().for_each(|a| *a = true);
-        for (h, b) in self.hp.iter_mut().zip(&self.design.blocks) {
-            *h = b.ty.info().hp;
-        }
+        self.hp.clone_from(&self.block_max);
         self.rebuild();
     }
 
@@ -105,7 +108,7 @@ impl ShipBody {
     }
 
     pub fn hp_frac(&self, i: usize) -> f32 {
-        (self.hp[i] / self.design.blocks[i].ty.info().hp).clamp(0.0, 1.0)
+        (self.hp[i] / self.block_max[i]).clamp(0.0, 1.0)
     }
 
     /// First alive block hit by the segment a->b, with the world-space hit point.

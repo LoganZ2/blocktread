@@ -3,6 +3,7 @@
 //! navigation and design-picking actions, the settings overlay and the FPS readout.
 
 pub mod lobby;
+pub mod matching;
 pub mod menu;
 
 use crate::art::BlockArt;
@@ -20,37 +21,40 @@ use bevy::light::Skybox;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use voxwing_shared::analysis::analyze;
-use voxwing_shared::presets::{PRESETS, preset};
+use voxwing_shared::blocks::Design;
+use voxwing_shared::presets::preset;
 
 pub struct ScreensPlugin;
 
 impl Plugin for ScreensPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((menu::MenuPlugin, lobby::LobbyPlugin, FrameTimeDiagnosticsPlugin::default()))
+        app.add_plugins((menu::MenuPlugin, lobby::LobbyPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
             .init_resource::<Overlays>()
+            .init_resource::<Showcase>()
             .add_systems(OnEnter(Screen::Menu), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
                 spawn_showcase(c, a, s, art, m, h, cam, Screen::Menu)
             })
             .add_systems(OnEnter(Screen::Lobby), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
                 spawn_showcase(c, a, s, art, m, h, cam, Screen::Lobby)
             })
-            .add_systems(Update, showcase_turn.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Lobby)))
-            .add_systems(Update, (global_actions, render_picker, render_settings, display_banner, apply_settings, fps_text));
+            .add_systems(OnEnter(Screen::Match), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
+                spawn_showcase(c, a, s, art, m, h, cam, Screen::Match)
+            })
+            .add_systems(Update, showcase_turn.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Lobby | Screen::Match)))
+            .add_systems(Update, (global_actions, refresh_showcase, render_settings, display_banner, apply_settings, fps_text));
     }
 }
 
 /// Which shared overlays are open.
 #[derive(Resource, Default)]
 pub struct Overlays {
-    pub picker: bool,
     pub settings: bool,
-    picker_dirty: bool,
 }
 
 impl Overlays {
     /// True when something modal covers the screen and screens should ignore their hotkeys.
     pub fn any(&self, modal: &ModalReq) -> bool {
-        self.picker || self.settings || modal.open()
+        self.settings || modal.open()
     }
 }
 
@@ -58,6 +62,10 @@ impl Overlays {
 
 #[derive(Component)]
 struct ShowcaseShip(f32);
+
+/// A ship to show instead of the hangar's current one (another player's pick).
+#[derive(Resource, Default)]
+pub struct Showcase(pub Option<Design>);
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_showcase(
@@ -76,12 +84,36 @@ fn spawn_showcase(
         p.fov = 38f32.to_radians();
     }
     env::spawn_env(&mut commands, &env_assets, screen.clone(), Vec3::ZERO);
-    let a = analyze(&hangar.design);
+    spawn_showcase_ship(&mut commands, &mut art, &mut mats, &hangar.design, screen);
+}
+
+fn spawn_showcase_ship(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<StandardMaterial>, design: &Design, screen: Screen) {
+    let a = analyze(design);
     let com = a.stats.com;
     let root = commands.spawn((Transform::default(), Visibility::default(), ShowcaseShip(a.stats.radius), DespawnOnExit(screen))).id();
-    for b in &hangar.design.blocks {
-        art.spawn_block(&mut commands, &mut mats, root, b, b.pos().as_vec3() - com, 3);
+    for b in &design.blocks {
+        art.spawn_block(commands, mats, root, b, b.pos().as_vec3() - com, 3);
     }
+}
+
+/// Flipping through ships (or looking at another player's pick) swaps the one on display.
+#[allow(clippy::too_many_arguments)]
+fn refresh_showcase(
+    mut commands: Commands,
+    hangar: Res<Hangar>,
+    over: Res<Showcase>,
+    state: Res<State<Screen>>,
+    old: Query<Entity, With<ShowcaseShip>>,
+    mut art: ResMut<BlockArt>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+) {
+    if !(hangar.is_changed() || over.is_changed()) || old.is_empty() {
+        return;
+    }
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    spawn_showcase_ship(&mut commands, &mut art, &mut mats, over.0.as_ref().unwrap_or(&hangar.design), state.get().clone());
 }
 
 fn showcase_turn(time: Res<Time>, state: Res<State<Screen>>, mut ship: Query<(&mut Transform, &ShowcaseShip), Without<MainCamera>>, mut cam: Single<&mut Transform, With<MainCamera>>) {
@@ -116,10 +148,7 @@ fn global_actions(
     let now = time.elapsed_secs_f64();
     for m in msgs.read() {
         match m.clone() {
-            UiAction::Goto(s) => {
-                overlays.picker = false;
-                next.set(s);
-            }
+            UiAction::Goto(s) => next.set(s),
             UiAction::Quit => modal.show("退出游戏？", "正在运行的房间会一起关闭。", vec![("取消", UiAction::CloseModal, Kind::Normal), ("退出", UiAction::QuitConfirmed, Kind::Danger)], None),
             UiAction::QuitConfirmed => {
                 exit.write(AppExit::Success);
@@ -153,27 +182,22 @@ fn global_actions(
                 revert.revert(&mut settings);
                 settings::save_settings(&settings);
             }
-            UiAction::OpenLoad => {
-                overlays.picker = !overlays.picker;
-                overlays.picker_dirty = true;
+            // the ship carousel, wherever it shows (hangar, menu, ship pick)
+            UiAction::ShipPrev => hangar.step(-1),
+            UiAction::ShipNext => hangar.step(1),
+            UiAction::NewShip => {
+                hangar.add_ship(Design { name: String::new(), blocks: preset("blank").blocks });
+                toasts.push(format!("新建了「{}」", hangar.design.name), ToastKind::Ok);
             }
-            UiAction::Preset(k) => {
-                let d = preset(k);
-                toasts.push(format!("已换上「{}」", d.name), ToastKind::Ok);
-                hangar.load_design(d);
-                overlays.picker = false;
+            UiAction::DeleteShip => {
+                let n = hangar.design.name.clone();
+                modal.show(format!("删除「{n}」？"), "这架机体会从机库里移除，无法撤销。", vec![("取消", UiAction::CloseModal, Kind::Normal), ("删除", UiAction::DeleteShipConfirmed, Kind::Danger)], None);
             }
-            UiAction::LoadSaved(n) => {
-                if let Some(d) = settings::saved_designs().remove(&n) {
-                    hangar.load_design(d);
-                    toasts.push(format!("已换上「{n}」"), ToastKind::Ok);
-                }
-                overlays.picker = false;
-            }
-            UiAction::DeleteSaved(n) => {
-                settings::delete_design(&n);
+            UiAction::DeleteShipConfirmed => {
+                modal.0 = None;
+                let n = hangar.design.name.clone();
+                hangar.delete_current();
                 toasts.push(format!("已删除「{n}」"), ToastKind::Info);
-                overlays.picker_dirty = true;
             }
             UiAction::Set(k, v) => {
                 let on = v > 0.5;
@@ -186,70 +210,11 @@ fn global_actions(
                     SetKey::Vsync => settings.vsync = on,
                     SetKey::ShowFps => settings.show_fps = on,
                     SetKey::ShowHelp => settings.show_help = on,
-                    SetKey::Bots => settings.bots = v.round() as u32,
                 }
             }
             _ => {}
         }
     }
-}
-
-// ---------------------------------------------------------------- design picker
-
-#[derive(Component)]
-struct PickerRoot;
-
-fn render_picker(mut commands: Commands, mut overlays: ResMut<Overlays>, roots: Query<Entity, With<PickerRoot>>, font: Res<UiFont>, keys: Res<ButtonInput<KeyCode>>, hangar: Res<Hangar>) {
-    if overlays.picker && keys.just_pressed(KeyCode::Escape) {
-        overlays.picker = false;
-    }
-    if !overlays.is_changed() && !overlays.picker_dirty {
-        return;
-    }
-    let open = overlays.picker;
-    overlays.picker_dirty = false;
-    let exists = !roots.is_empty();
-    if exists && open && !overlays.is_changed() {
-        // only content refresh requested
-    }
-    for e in &roots {
-        commands.entity(e).despawn();
-    }
-    if !open {
-        return;
-    }
-    let f = &*font;
-    let (o, p) = spawn_overlay(&mut commands, f, "选择机体", 640.0);
-    commands.entity(o).insert(PickerRoot);
-    commands.spawn((text(f, format!("当前：{}（会被替换，可在机库里撤销）", hangar.design.name), 13.0, MUTED), ChildOf(p)));
-    let templates = spawn_section(&mut commands, f, p, "模板|TEMPLATES");
-    let grid = commands.spawn((Node { display: Display::Grid, grid_template_columns: RepeatedGridTrack::flex(2, 1.0), column_gap: px(GAP_S), row_gap: px(GAP_S), ..default() }, ChildOf(templates))).id();
-    for pr in PRESETS {
-        let s = analyze(&preset(pr.key)).stats;
-        let card = spawn_btn(&mut commands, f, grid, Kind::Card, pr.name, UiAction::Preset(pr.key), None);
-        commands.spawn((text(f, pr.desc, 12.0, MUTED), Pickable::IGNORE, ChildOf(card)));
-        commands.spawn((
-            tech(f, format!("{:.0} m/s  ·  {:.0} 度/秒  ·  {:.0} DPS", s.max_speed, s.pitch_rate.to_degrees(), s.dps), 12.0, INK.with_alpha(0.8)),
-            Pickable::IGNORE,
-            ChildOf(card),
-        ));
-    }
-    let mine = spawn_section(&mut commands, f, p, "我的设计|SAVED");
-    let saved = settings::saved_designs();
-    if saved.is_empty() {
-        commands.spawn((text(f, "还没有保存的设计。在机库里点「保存」就会出现在这里。", 13.0, MUTED), ChildOf(mine)));
-    }
-    for (name, d) in saved {
-        let a = analyze(&d);
-        let r = commands.spawn((row(GAP_S), ChildOf(mine))).id();
-        let b = spawn_btn(&mut commands, f, r, Kind::Normal, name.clone(), UiAction::LoadSaved(name.clone()), None);
-        commands.entity(b).insert(Node { height: px(H_MD), flex_grow: 1.0, padding: UiRect::horizontal(px(16)), justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, ..default() });
-        let status = if a.ok() { format!("{} 块 · 可以出击", d.blocks.len()) } else { format!("{} 块 · {} 项检查未通过", d.blocks.len(), a.errors) };
-        commands.spawn((text(f, status, 12.0, if a.ok() { OK } else { WARN }), Pickable::IGNORE, ChildOf(b)));
-        spawn_btn(&mut commands, f, r, Kind::Danger, "删除", UiAction::DeleteSaved(name), None);
-    }
-    let foot = commands.spawn((Node { justify_content: JustifyContent::FlexEnd, ..default() }, ChildOf(p))).id();
-    spawn_btn(&mut commands, f, foot, Kind::Normal, "关闭", UiAction::OpenLoad, Some("Esc"));
 }
 
 // ---------------------------------------------------------------- settings overlay

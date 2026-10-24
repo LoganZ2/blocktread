@@ -1,22 +1,15 @@
+use crate::balance::balance;
 use crate::blocks::{Block, BlockType, Design};
 use crate::grid::{DIRS6, Occupancy, in_grid};
 use glam::{IVec3, Vec2, Vec3};
 
 pub const MAX_BLOCKS: usize = 380;
-/// One active wing carries this much mass.
-pub const LIFT_PER_WING: f32 = 6.0;
 
 // Turning. Each axis turns at a rate set by its control torque over its moment of inertia, so
 // where blocks sit matters: weight far from the centre of mass makes that axis sluggish, wings
 // steer harder the longer their lever arm, gyros push the same wherever they are.
 
-/// Control torque of a gyro, on every axis.
-const GYRO_TORQUE: f32 = 10.0;
-/// Control torque of an attitude thruster per metre of lever arm (on each axis, the distance
-/// from that axis).
-const RCS_TORQUE: f32 = 4.0;
-/// Energy one capacitor stores.
-const CAPACITOR_ENERGY: f32 = 90.0;
+
 /// Turn-rate curve: `scale * (0.6 + 0.55 * sqrt(AGILITY * torque / inertia))`. The square root
 /// gives diminishing returns, the 0.6 keeps even sluggish ships flyable.
 const AGILITY: f32 = 11.0;
@@ -40,6 +33,8 @@ pub struct Stats {
     pub n: usize,
     pub mass: f32,
     pub hp: f32,
+    /// Build cost (see `balance.ron`): the blocks' costs, weapons dearer the more there are.
+    pub cost: f32,
     pub counts: [u16; BlockType::ALL.len()],
     pub com: Vec3,
     pub cockpits: Vec<usize>,
@@ -185,10 +180,8 @@ pub fn compute_stats(blocks: &[Block], alive: &[bool]) -> Stats {
     s.radius = r + 0.9;
     s.thrust = s.engines.iter().map(|&e| blocks[e].ty.thrust()).sum();
     s.twr = if s.mass > 0.0 { s.thrust / s.mass } else { 0.0 };
-    let gyros = s.count(BlockType::Gyro) as f32;
-    let reactors = s.count(BlockType::Reactor) as f32;
-    let shields = s.count(BlockType::Shield) as f32;
-    s.lift_ratio = if s.mass > 0.0 { s.wings.len() as f32 * LIFT_PER_WING / s.mass } else { 0.0 };
+    let lift: f32 = s.wings.iter().map(|&w| blocks[w].ty.info().lift).sum();
+    s.lift_ratio = if s.mass > 0.0 { lift / s.mass } else { 0.0 };
 
     // every block a solid unit cube: point mass at its centre plus its own m/6 about each axis
     for (i, b) in blocks.iter().enumerate() {
@@ -200,7 +193,8 @@ pub fn compute_stats(blocks: &[Block], alive: &[bool]) -> Stats {
     }
     // wings: a base share each, plus their fore-aft arm for pitch and yaw (tails steer) and their
     // sideways arm for roll (long wings roll)
-    s.control = Vec3::splat(gyros * GYRO_TORQUE);
+    // gyros: the same torque wherever they sit
+    s.control = Vec3::splat(blocks.iter().enumerate().filter(|&(i, _)| alive[i]).map(|(_, b)| b.ty.info().gyro).sum());
     for &w in &s.wings {
         let r = blocks[w].pos().as_vec3() - s.com;
         s.control += Vec3::new(1.0 + r.z.abs(), 1.0 + r.z.abs(), 1.0 + r.x.abs());
@@ -212,9 +206,10 @@ pub fn compute_stats(blocks: &[Block], alive: &[bool]) -> Stats {
     }
     // attitude thrusters push by their distance from each axis: the farther out, the stronger
     for (i, b) in blocks.iter().enumerate() {
-        if alive[i] && b.ty == BlockType::Rcs {
+        let rcs = b.ty.info().rcs;
+        if alive[i] && rcs > 0.0 {
             let r = b.pos().as_vec3() - s.com;
-            s.control += RCS_TORQUE * Vec3::new(r.y.hypot(r.z), r.x.hypot(r.z), r.x.hypot(r.y));
+            s.control += rcs * Vec3::new(r.y.hypot(r.z), r.x.hypot(r.z), r.x.hypot(r.y));
         }
     }
     let rate = |axis: usize| AXIS_SCALE[axis] * (0.6 + 0.55 * (AGILITY * s.control[axis] / s.inertia[axis].max(0.5)).sqrt());
@@ -230,21 +225,43 @@ pub fn compute_stats(blocks: &[Block], alive: &[bool]) -> Stats {
         s.thrust_torque = torque / Vec2::new(s.control.x, s.control.y).max(Vec2::ONE);
     }
 
-    // every wing lifts the same; lift centred right of the centre of mass raises the right side,
-    // rolling the ship left (and the heavy side drops). No symmetry rule: it just flies that way.
-    if !s.wings.is_empty() {
-        let lift = s.wings.len() as f32 * LIFT_PER_WING;
-        let side = s.wings.iter().map(|&w| blocks[w].x as f32).sum::<f32>() / s.wings.len() as f32 - s.com.x;
+    // lift centred right of the centre of mass raises the right side, rolling the ship left (and
+    // the heavy side drops). No symmetry rule: it just flies that way.
+    if lift > 0.0 {
+        let side = s.wings.iter().map(|&w| blocks[w].x as f32 * blocks[w].ty.info().lift).sum::<f32>() / lift - s.com.x;
         let off = (side.abs() - AUTO_TRIM).max(0.0).copysign(side);
         let share = (-off * lift * LIFT_LEVER / s.control.z.max(1.0)).clamp(-MAX_ROLL_DRIFT, MAX_ROLL_DRIFT);
         s.roll_drift = share * s.roll_rate;
     }
     s.max_speed = if s.thrust > 0.0 { (28.0 + 52.0 * s.twr.sqrt()).min(125.0) } else { 0.0 };
     s.accel = (18.0 + 30.0 * s.twr).min(90.0);
-    s.energy_cap = 60.0 + reactors * 60.0 + s.count(BlockType::Capacitor) as f32 * CAPACITOR_ENERGY;
-    s.energy_regen = 10.0 + reactors * 12.0;
-    s.shield_cap = shields * 40.0;
-    s.shield_regen = shields * 5.0;
+    let bal = balance();
+    let (mut energy_cap, mut energy_regen, mut shield_cap, mut shield_regen) = (bal.base_energy_cap, bal.base_energy_regen, 0.0, 0.0);
+    for (i, b) in blocks.iter().enumerate() {
+        if alive[i] {
+            let info = b.ty.info();
+            energy_cap += info.energy_cap;
+            energy_regen += info.energy_regen;
+            shield_cap += info.shield_cap;
+            shield_regen += info.shield_regen;
+        }
+    }
+    (s.energy_cap, s.energy_regen, s.shield_cap, s.shield_regen) = (energy_cap, energy_regen, shield_cap, shield_regen);
+    // cost: each weapon beyond the first makes all of them `weapon_cost_growth` dearer
+    let (mut plain, mut guns, mut n_guns) = (0.0, 0.0, 0u32);
+    for (i, b) in blocks.iter().enumerate() {
+        if alive[i] {
+            let c = b.ty.info().cost;
+            if b.ty.weapon().is_some() {
+                guns += c;
+                n_guns += 1;
+            } else {
+                plain += c;
+            }
+        }
+    }
+    s.cost = plain + guns * (1.0 + bal.weapon_cost_growth * n_guns.saturating_sub(1) as f32);
+    s.hp += s.cockpits.len() as f32 * bal.cockpit_hp_per_cost * s.cost;
     let mut energy_dps = 0.0;
     for &w in &s.weapons {
         let spec = blocks[w].ty.weapon().unwrap();
@@ -444,7 +461,7 @@ pub fn analyze(design: &Design) -> Analysis {
         add(Level::Warn, "机翼", format!("{} 片机翼上下都被包住，不产生升力", s.wings_buried.len()), s.wings_buried.clone());
     }
     if !s.wings.is_empty() {
-        let need = (s.mass / LIFT_PER_WING).ceil() as usize;
+        let need = (s.mass / BlockType::Wing.info().lift).ceil() as usize;
         if s.wings.len() < need {
             add(Level::Err, "升力", format!("升力不足：质量 {} 至少需要 {} 片有效机翼（现有 {}）", fmt(s.mass), need, s.wings.len()), vec![]);
         } else {

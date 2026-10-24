@@ -537,6 +537,13 @@ pub struct Choice {
     arrows: [Entity; 2],
 }
 
+/// A square button showing one of the vector icons (the ‹ › of a carousel, say).
+pub fn spawn_icon_btn(commands: &mut Commands, f: &UiFont, parent: Entity, image: Handle<Image>, action: UiAction) -> Entity {
+    let b = spawn_btn(commands, f, parent, Kind::Icon, "", action, None);
+    commands.spawn((ImageNode { image, color: INK, ..default() }, Node { width: px(16), height: px(16), ..default() }, Pickable::IGNORE, ChildOf(b)));
+    b
+}
+
 /// A settings row: label on the left, selector on the right. `enabled: false` shows the value
 /// greyed out with both arrows off (for a setting the current mode decides).
 #[allow(clippy::too_many_arguments)]

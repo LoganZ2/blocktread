@@ -89,15 +89,20 @@ fn losing_an_engine_yaws_towards_the_dead_side() {
 #[test]
 fn reactors_decide_how_long_the_guns_keep_firing() {
     let s = stats(&preset("falcon"));
-    assert!(s.dps_sustained < s.dps, "two lasers outrun one battery");
+    assert!(s.dps_sustained < s.dps, "four guns outrun the ship's own battery");
     let lasts = s.fire_endurance.expect("falcon should run dry at full fire");
-    assert!((lasts - 12.0).abs() < 0.5, "battery lasts {lasts}");
+    assert!((lasts - s.energy_cap / (s.energy_draw - s.energy_regen)).abs() < 1e-3);
+    // a few seconds of full fire before the guns slow down, not a moment
+    assert!((5.0..20.0).contains(&lasts), "battery lasts {lasts} s");
     let fed = stats(&with(preset("falcon"), &[(0, -1, 1, BlockType::Reactor)]));
     assert!(fed.fire_endurance.is_none());
     assert!((fed.dps_sustained - fed.dps).abs() < 1e-3);
-    // missiles and cannons need no energy
-    let s = stats(&preset("stinger"));
-    assert!((s.dps_sustained - s.dps).abs() < 1e-3);
+    // every weapon draws energy, so reactors matter to every loadout
+    for t in BlockType::ALL {
+        if let Some(w) = t.weapon() {
+            assert!(w.energy > 0.0, "{} fires for free", t.info().name);
+        }
+    }
 }
 
 #[test]

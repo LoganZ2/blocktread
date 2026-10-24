@@ -69,6 +69,12 @@ pub fn step_weapons(k: &mut Kin, body: &ShipBody, ws: &mut WeaponState, inp: &In
     if inp.has(BTN_MISSILE) && ws.missile_cd <= 0.0 {
         if let Some(&i) = body.stats.weapons.iter().find(|&&i| blocks[i].ty.weapon().unwrap().homing && ws.cds[i] <= 0.0) {
             let spec = blocks[i].ty.weapon().unwrap();
+            if !free_energy {
+                if k.energy < spec.energy {
+                    return;
+                }
+                k.energy -= spec.energy;
+            }
             ws.cds[i] = 1.0 / spec.rate;
             ws.missile_cd = 0.22;
             let speed = k.vel.length() + 40.0;

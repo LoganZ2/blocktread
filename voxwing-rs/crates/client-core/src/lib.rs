@@ -68,9 +68,38 @@ pub enum CoreEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConnState {
     Connecting,
+    /// Connected, between matches (queueing, picking, reading results).
+    Lobby,
     InGame,
     Rejected(String),
     Closed(String),
+}
+
+/// Where the player is in the match cycle: queue, ship pick, match, results.
+#[derive(Clone, Debug)]
+pub enum Phase {
+    Idle,
+    /// `waited`: seconds in the queue; `players`: how many wait for this mode; `fill_in`: seconds
+    /// until AI fills the match.
+    Queued { mode: Mode, tier: Option<String>, waited: f32, players: u32, fill_in: f32 },
+    Picking(Pick),
+    Playing,
+    /// The match ended: who won, and the final scoreboard.
+    Over { winner: String, rows: Vec<ScoreRow> },
+}
+
+/// The ship pick: every seat, the ship each has chosen so far, and who has locked in.
+#[derive(Clone, Debug)]
+pub struct Pick {
+    pub mode: Mode,
+    pub tier: Option<String>,
+    /// This player's seat.
+    pub you: usize,
+    pub slots: Vec<SlotInfo>,
+    pub ships: Vec<Option<Design>>,
+    pub ready: Vec<bool>,
+    /// Seconds until the match starts anyway.
+    pub left: f32,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -85,6 +114,11 @@ pub struct ClientCore {
     /// Joined as a spectator: never gets a ship.
     pub watching: bool,
     pub state: ConnState,
+    pub phase: Phase,
+    /// The last queue joined (mode, tier), for "play again".
+    pub queued_for: Option<(Mode, Option<String>)>,
+    /// A message from the server to show (a pick refused, say); the screen takes it.
+    pub notice: Option<String>,
     pub pid: Option<u16>,
     pub mode: Option<Mode>,
     pub my_ship: Option<u16>,
@@ -96,19 +130,23 @@ pub struct ClientCore {
     pub scores: Vec<ScoreRow>,
     pub wave: u32,
     pub enemies: u32,
+    /// Kills that win the match (0 = none) and seconds left on its clock (0 = no clock).
+    pub limit: u32,
+    pub left: f32,
     pub events: Vec<CoreEvent>,
     pub stats: NetStats,
     shots: Vec<Shot>,
 }
 
 impl ClientCore {
-    pub fn connect(addr: &str, name: &str, design: Design, latency: Duration) -> Self {
-        Self::start(addr, ClientMsg::Hello { version: PROTOCOL_VERSION, name: name.to_string(), design }, latency)
+    /// Connect to play: then `queue`, `pick` and `ready` take the player into a match.
+    pub fn connect(addr: &str, name: &str, latency: Duration) -> Self {
+        Self::start(addr, ClientMsg::Hello { version: PROTOCOL_VERSION, name: name.to_string(), balance: voxwing_shared::balance::hash() }, latency)
     }
 
     /// Join to watch instead of fly.
     pub fn watch(addr: &str, name: &str, latency: Duration) -> Self {
-        Self::start(addr, ClientMsg::Watch { version: PROTOCOL_VERSION, name: name.to_string() }, latency)
+        Self::start(addr, ClientMsg::Watch { version: PROTOCOL_VERSION, name: name.to_string(), balance: voxwing_shared::balance::hash() }, latency)
     }
 
     fn start(addr: &str, hello: ClientMsg, latency: Duration) -> Self {
@@ -116,6 +154,9 @@ impl ClientCore {
             watching: matches!(hello, ClientMsg::Watch { .. }),
             net: NetClient::connect(addr.to_string(), hello, latency),
             state: ConnState::Connecting,
+            phase: Phase::Idle,
+            queued_for: None,
+            notice: None,
             pid: None,
             mode: None,
             my_ship: None,
@@ -127,6 +168,8 @@ impl ClientCore {
             scores: Vec::new(),
             wave: 0,
             enemies: 0,
+            limit: 0,
+            left: 0.0,
             events: Vec::new(),
             stats: NetStats::default(),
             shots: Vec::new(),
@@ -139,6 +182,61 @@ impl ClientCore {
 
     pub fn leave(&self) {
         self.net.leave();
+    }
+
+    /// Look for a match. Ignored unless idle (or reading the last match's results).
+    pub fn queue(&mut self, mode: Mode, tier: Option<String>) {
+        if !matches!(self.phase, Phase::Idle | Phase::Over { .. }) || self.watching {
+            return;
+        }
+        self.net.send(ClientMsg::Queue { mode, tier: tier.clone() });
+        self.queued_for = Some((mode, tier.clone()));
+        self.phase = Phase::Queued { mode, tier, waited: 0.0, players: 1, fill_in: 0.0 };
+    }
+
+    pub fn unqueue(&mut self) {
+        if matches!(self.phase, Phase::Queued { .. }) {
+            self.net.send(ClientMsg::Unqueue);
+            self.phase = Phase::Idle;
+        }
+    }
+
+    /// During the ship pick: the ship to fly (everyone sees it; it can change until `ready`).
+    pub fn pick(&mut self, design: Design) {
+        if let Phase::Picking(p) = &self.phase
+            && !p.ready[p.you]
+        {
+            self.net.send(ClientMsg::Pick { design });
+        }
+    }
+
+    /// Lock in the picked ship (sent after a `pick`, the server takes them in order).
+    pub fn ready(&mut self) {
+        if let Phase::Picking(p) = &self.phase
+            && !p.ready[p.you]
+        {
+            self.net.send(ClientMsg::Ready);
+        }
+    }
+
+    /// A spectator whose match ended: watch the next one.
+    pub fn watch_again(&mut self) {
+        if self.watching && matches!(self.phase, Phase::Over { .. }) {
+            self.net.send(ClientMsg::Watch { version: PROTOCOL_VERSION, name: String::new(), balance: voxwing_shared::balance::hash() });
+            self.phase = Phase::Idle;
+        }
+    }
+
+    /// Forget the last match's world (ships, missiles, prediction, scores).
+    fn reset_world(&mut self) {
+        self.ships.clear();
+        self.missiles.clear();
+        self.my_ship = None;
+        self.pred = None;
+        self.scores.clear();
+        self.clock = ServerClock::default();
+        self.limit = 0;
+        self.left = 0.0;
     }
 
     pub fn my(&self) -> Option<&CoreShip> {
@@ -176,6 +274,15 @@ impl ClientCore {
                 }
             }
         }
+        match &mut self.phase {
+            Phase::Queued { waited, fill_in, .. } => {
+                *waited += dt;
+                *fill_in = (*fill_in - dt).max(0.0);
+            }
+            Phase::Picking(p) => p.left = (p.left - dt).max(0.0),
+            _ => {}
+        }
+        self.left = (self.left - dt).max(0.0);
         self.clock.advance(dt);
         let render_tick = self.clock.render_tick();
 
@@ -260,14 +367,45 @@ impl ClientCore {
     fn on_msg(&mut self, msg: ServerMsg) {
         match msg {
             ServerMsg::Welcome { pid, tick, mode, asteroid_seed } => {
+                self.reset_world();
                 self.pid = Some(pid);
                 self.mode = Some(mode);
                 self.rocks = generate_asteroids(asteroid_seed);
                 self.clock.sync(tick);
                 self.state = ConnState::InGame;
+                self.phase = Phase::Playing;
                 self.events.push(CoreEvent::Welcome);
             }
             ServerMsg::Reject { reason } => self.state = ConnState::Rejected(reason),
+            ServerMsg::Connected { pid } => {
+                self.pid = Some(pid);
+                self.state = ConnState::Lobby;
+            }
+            ServerMsg::Queued { players, fill_in: f } => {
+                if let Phase::Queued { players: p, fill_in, .. } = &mut self.phase {
+                    *p = players;
+                    *fill_in = f;
+                }
+            }
+            ServerMsg::MatchFound { mode, tier, you, slots, pick_secs } => {
+                let n = slots.len();
+                self.phase = Phase::Picking(Pick { mode, tier, you: you as usize, slots, ships: vec![None; n], ready: vec![false; n], left: pick_secs });
+            }
+            ServerMsg::SlotPick { slot, design, ready } => {
+                if let Phase::Picking(p) = &mut self.phase
+                    && (slot as usize) < p.slots.len()
+                {
+                    p.ships[slot as usize] = design;
+                    p.ready[slot as usize] = ready;
+                }
+            }
+            ServerMsg::MatchOver { winner, rows } => {
+                self.reset_world();
+                self.events.clear();
+                self.state = ConnState::Lobby;
+                self.phase = Phase::Over { winner, rows };
+            }
+            ServerMsg::Notice { text } => self.notice = Some(text),
             ServerMsg::ShipSpawn { id, team, name, owner, design, kin } => {
                 let body = ShipBody::new(Arc::new(design));
                 let mut interp = Interp::default();
@@ -308,7 +446,7 @@ impl ClientCore {
                     for (i, f) in hits {
                         let i = i as usize;
                         if i < s.body.hp.len() && s.body.alive[i] {
-                            s.body.hp[i] = s.body.design.blocks[i].ty.info().hp * f as f32 / 255.0;
+                            s.body.hp[i] = s.body.block_max[i] * f as f32 / 255.0;
                             blocks.push(i);
                         }
                     }
@@ -334,10 +472,12 @@ impl ClientCore {
             ServerMsg::Crash { pos } => self.events.push(CoreEvent::Crash { pos }),
             ServerMsg::Announce { title, sub } => self.events.push(CoreEvent::Announce { title, sub }),
             ServerMsg::Feed { text, bad } => self.events.push(CoreEvent::Feed { text, bad }),
-            ServerMsg::Scores { rows, wave, enemies } => {
+            ServerMsg::Scores { rows, wave, enemies, limit, left } => {
                 self.scores = rows;
                 self.wave = wave;
                 self.enemies = enemies;
+                self.limit = limit;
+                self.left = left;
             }
         }
     }

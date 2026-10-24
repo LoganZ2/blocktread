@@ -1,0 +1,96 @@
+// Every number that decides how strong a block is, and the global balance knobs.
+//
+// Built into the program. To try changes without rebuilding, point VOXWING_BALANCE at a copy of
+// this file (client, server and the duel simulator all read it). Clients and servers must agree:
+// the file's hash is checked when a player joins.
+(
+    // ---- global knobs ----
+    // multiplies every weapon's damage and every block's hit points (time-to-kill tuning)
+    damage_scale: 1.1,
+    hp_scale: 1.0,
+    // a ship's own energy before reactors and capacitors
+    base_energy_cap: 60.0,
+    base_energy_regen: 15.0,
+    // damage left after a piercing round goes through a block
+    pierce_falloff: 0.7,
+
+    // ---- damage ----
+    // a cockpit's hit points grow with what the ship cost, so big ships aren't one lucky shot
+    cockpit_hp_per_cost: 0.6,
+    // a ship falls apart when its blocks have less than this share of their hit points left
+    collapse_below: 0.25,
+    // what shields take from each kind of hit
+    shield_vs: { Energy: 0.5, Kinetic: 1.0, Pierce: 1.0, Explosive: 1.5 },
+    // how much of a block's armour each kind of hit meets; armour comes off every hit
+    armor_vs: { Energy: 0.0, Kinetic: 1.0, Pierce: 0.2, Explosive: 0.0 },
+    // armour never takes a hit below this share of its damage
+    min_damage_share: 0.3,
+    // an explosion deals at most this many times its damage, shared over the blocks it reaches
+    splash_total: 2.0,
+
+    // ---- build budget ----
+    // a ship's cost is the sum of its blocks' costs; each further weapon makes every weapon on
+    // the ship this much dearer, so walls of guns cost more than the guns
+    weapon_cost_growth: 0.04,
+    // rooms can be limited to a tier: ships over its budget can't join
+    tiers: [
+        (key: "light", name: "轻型", budget: 80.0),
+        (key: "medium", name: "中型", budget: 160.0),
+        (key: "heavy", name: "重型", budget: 350.0),
+    ],
+
+    blocks: {
+        Cockpit: (name: "驾驶舱", cat: Core, mass: 2.0, hp: 45.0, cost: 0.0, color: 0xe6ebf1,
+            info: "必需，只能有 1 个。顶部或正前方至少一个方向视野通畅。被打掉就坠毁。"),
+        Wing: (name: "机翼", cat: Core, mass: 0.5, hp: 14.0, cost: 1.5, color: 0xc4ccd6, lift: 6.0,
+            info: "必需。托起机身，也提供转向力：离重心越远，翻滚（左右）或俯仰（前后）越有力。不用对称，但两侧升力不平衡会让飞机一直侧滚。上下不能都被包住。"),
+        Engine: (name: "引擎", cat: Core, mass: 2.0, hp: 28.0, cost: 6.0, color: 0x6b7380, thrust: 26.0,
+            info: "必需。尾喷口正后方必须空着。推力线要对准重心，否则全速时机头会被拉偏。"),
+        Hull: (name: "船体", cat: Structure, mass: 1.0, hp: 22.0, cost: 1.0, color: 0xb9c3cf,
+            info: "轻型结构块，用来连接和塑形。"),
+        Armor: (name: "装甲", cat: Structure, mass: 3.0, hp: 75.0, cost: 4.0, color: 0x59626d, armor: 3.0,
+            info: "很耐打，每次被动能武器（机炮、霰弹）击中还能挡掉几点伤害；但很重：拖慢速度，离重心越远越拖慢转向。"),
+        Laser: (name: "激光炮", cat: Weapon, mass: 1.5, hp: 18.0, cost: 11.0, color: 0x8a939e,
+            info: "弹速快、射速高，每发消耗能量。正前方必须空着。",
+            weapon: Some((kind: Energy, rate: 5.0, dmg: 8.0, speed: 520.0, life: 1.25, energy: 1.5,
+                color: 0xff3344, len: 3.4, width: 0.2, spread: 0.002, sfx: Laser))),
+        Cannon: (name: "机炮", cat: Weapon, mass: 2.0, hp: 22.0, cost: 10.0, color: 0x7c7468,
+            info: "高射速散布弹幕。正前方必须空着。",
+            weapon: Some((kind: Kinetic, rate: 9.0, dmg: 4.0, speed: 420.0, life: 1.45, energy: 0.4,
+                color: 0xffd040, len: 1.8, width: 0.15, spread: 0.012, sfx: Cannon))),
+        Plasma: (name: "等离子炮", cat: Weapon, mass: 3.0, hp: 26.0, cost: 11.5, color: 0x6d7f74,
+            info: "弹速慢、伤害高，命中后小范围爆炸。很耗能量。",
+            weapon: Some((kind: Energy, rate: 1.1, dmg: 32.0, speed: 300.0, life: 2.3, energy: 9.0,
+                color: 0x44ff99, len: 1.2, width: 1.1, splash: 1.8, sfx: Plasma))),
+        Missile: (name: "导弹舱", cat: Weapon, mass: 2.5, hp: 24.0, cost: 13.0, color: 0x8c8f96,
+            info: "锁定目标后右键发射追踪导弹，范围伤害。",
+            weapon: Some((kind: Explosive, rate: 0.45, dmg: 32.0, speed: 150.0, life: 6.0, energy: 8.0,
+                color: 0xfff2e0, len: 1.6, width: 0.36, splash: 2.4, homing: true, sfx: Missile))),
+        Reactor: (name: "反应堆", cat: System, mass: 3.0, hp: 30.0, cost: 8.0, color: 0x6e6a5c, energy_cap: 60.0, energy_regen: 12.0,
+            info: "提高能量上限和回复速度。"),
+        Shield: (name: "护盾发生器", cat: System, mass: 3.0, hp: 30.0, cost: 10.0, color: 0x5f6e86, shield_cap: 40.0, shield_regen: 5.0,
+            info: "3 秒未受伤后自动回复，先于船体吸收伤害。"),
+        Gyro: (name: "陀螺仪", cat: Mobility, mass: 2.0, hp: 24.0, cost: 5.0, color: 0x6f6684, gyro: 10.0,
+            info: "提供俯仰、偏航、翻滚三个方向的转向力，放哪都一样有效；但它也重，靠近重心放最划算。"),
+        Frame: (name: "骨架", cat: Structure, mass: 0.4, hp: 10.0, cost: 0.5, color: 0x9aa4b0,
+            info: "很轻的空心骨架：拉长机身、把尾翼和推进器伸远时几乎不增加转动惯量，但不耐打。"),
+        Lamp: (name: "灯块", cat: Structure, mass: 0.3, hp: 8.0, cost: 0.5, color: 0x7fe0ff,
+            info: "装饰用，按涂装颜色发光。很轻，也很脆。"),
+        Fin: (name: "尾翼", cat: Mobility, mass: 0.3, hp: 10.0, cost: 1.0, color: 0xc4ccd6,
+            info: "竖直的舵面，不产生升力，主要加强偏航（左右甩机头）；离重心的前后距离越远越有力。左右两侧不能都被挡住。"),
+        Thruster: (name: "小推进器", cat: Mobility, mass: 0.8, hp: 12.0, cost: 2.5, color: 0x6b7380, thrust: 10.0,
+            info: "小号引擎，也算引擎；尾喷口正后方必须空着。适合补一点推力，或把推力中心调正。"),
+        Rcs: (name: "姿态推进器", cat: Mobility, mass: 0.8, hp: 12.0, cost: 3.0, color: 0x7d8794, rcs: 4.0,
+            info: "三个方向都提供转向力，离重心越远越有力，和陀螺仪正相反。适合装在翼尖、机头、机尾。"),
+        Railgun: (name: "轨道炮", cat: Weapon, mass: 3.0, hp: 24.0, cost: 13.0, color: 0x6e7a88,
+            info: "弹速极快、射程最远的穿甲弹，一发能连穿几个方块（伤害依次递减）。射速慢，很耗能量。正前方必须空着。",
+            weapon: Some((kind: Pierce, rate: 0.6, dmg: 45.0, speed: 1000.0, life: 0.95, energy: 15.0,
+                color: 0x9fe8ff, len: 7.0, width: 0.12, pierce: 3, sfx: Rail))),
+        Flak: (name: "霰弹炮", cat: Weapon, mass: 2.0, hp: 22.0, cost: 10.0, color: 0x7a6e60,
+            info: "一次打出一把散开的弹丸，贴脸威力大，射程短。正前方必须空着。",
+            weapon: Some((kind: Kinetic, rate: 1.5, dmg: 4.0, speed: 380.0, life: 0.7, energy: 3.0,
+                color: 0xffb060, len: 0.9, width: 0.16, spread: 0.06, pellets: 7, sfx: Flak))),
+        Capacitor: (name: "电容", cat: System, mass: 1.5, hp: 18.0, cost: 4.0, color: 0x5c6f78, energy_cap: 90.0,
+            info: "提高能量上限，但不回复能量。让武器和加速能连续用得更久。"),
+    },
+)

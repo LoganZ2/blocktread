@@ -12,7 +12,7 @@ use bevy::text::LetterSpacing;
 use bevy::window::PrimaryWindow;
 use voxwing_client_core::ConnState;
 use voxwing_shared::blocks::BlockType;
-use voxwing_shared::protocol::Mode;
+use voxwing_shared::protocol::{Mode, ScoreRow};
 use voxwing_shared::weapons::intercept;
 
 pub const LOCK_T: f32 = 0.9;
@@ -336,24 +336,31 @@ pub fn update_hud(
         match *el {
             El::Instruments => show(&mut vis, in_game),
             El::Gauges => show(&mut vis, in_game && (view.is_some() || !core.watching)),
-            El::Mode => set_text(
-                kids,
-                ent,
-                format!(
-                    "{}{}",
-                    if core.watching { "观战 · " } else { "" },
-                    match core.mode {
-                        Some(Mode::Coop) => format!("合作波次 · 第 {} 波", core.wave),
-                        Some(Mode::Ffa) => "自由混战".into(),
-                        None => "连接中".into(),
-                    }
-                ),
-                None,
-            ),
+            El::Mode => {
+                let mine = core.scores.iter().find(|r| Some(r.pid) == core.pid);
+                let mode = match core.mode {
+                    Some(Mode::Coop) => format!("合作波次 · 第 {} 波", core.wave),
+                    Some(Mode::Teams) => format!("2v2 团队战{}", mine.map_or(String::new(), |r| format!(" · {}", team_label(r.team)))),
+                    Some(Mode::Ffa) => "自由混战".into(),
+                    None => "连接中".into(),
+                };
+                let clock = if core.left > 0.0 { format!(" · 剩余 {}:{:02}", core.left as u32 / 60, core.left as u32 % 60) } else { String::new() };
+                set_text(kids, ent, format!("{}{mode}{clock}", if core.watching { "观战 · " } else { "" }), None);
+            }
             El::Score => {
                 // spectating: the watched ship's line (score rows carry names, not ship ids)
                 let row = if core.watching { view.and_then(|v| core.scores.iter().find(|r| r.name == v.name)) } else { core.scores.iter().find(|r| Some(r.pid) == core.pid) };
-                set_text(kids, ent, row.map_or("0 分".into(), |r| format!("{} 分  ·  击毁 {}  ·  阵亡 {}", r.score, r.kills, r.deaths)), None);
+                let line = match (core.mode, row) {
+                    // the race between the teams, then your own part in it
+                    (Some(Mode::Teams), Some(r)) => {
+                        let kills = |t: u16| core.scores.iter().filter(|o| o.team == t).map(|o| o.kills).sum::<u32>();
+                        format!("蓝队 {} : {} 红队  ·  击毁 {}  ·  阵亡 {}", kills(1), kills(2), r.kills, r.deaths)
+                    }
+                    (_, Some(r)) if core.limit > 0 => format!("击毁 {}/{}  ·  阵亡 {}  ·  {} 分", r.kills, core.limit, r.deaths, r.score),
+                    (_, Some(r)) => format!("{} 分  ·  击毁 {}  ·  阵亡 {}", r.score, r.kills, r.deaths),
+                    (_, None) => "0 分".into(),
+                };
+                set_text(kids, ent, line, None);
             }
             El::Watch => show(&mut vis, in_game && core.watching),
             El::WatchName => {
@@ -729,7 +736,7 @@ pub fn flight_overlays(mut commands: Commands, session: Res<Session>, keys: Res<
             commands.spawn((spinner(), ChildOf(r)));
             commands.spawn((col(2.0), ChildOf(r), children![text(f, session.addr.clone(), 16.0, INK), text(f, "QUIC · UDP · 5 秒无响应会自动放弃", 12.0, MUTED)]));
             let foot = commands.spawn((Node { justify_content: JustifyContent::FlexEnd, ..default() }, ChildOf(p))).id();
-            spawn_btn(&mut commands, f, foot, Kind::Normal, "取消", UiAction::CancelConnect, Some("Esc"));
+            spawn_btn(&mut commands, f, foot, Kind::Normal, "取消", UiAction::LeaveFlight, Some("Esc"));
         }
         Shown::Paused => {
             let (o, p) = spawn_overlay(&mut commands, f, "已暂停", 400.0);
@@ -740,7 +747,7 @@ pub fn flight_overlays(mut commands: Commands, session: Res<Session>, keys: Res<
             let resume = spawn_btn(&mut commands, f, c, Kind::Primary, "继续", UiAction::Resume, Some("Esc"));
             commands.entity(resume).insert(bevy::input_focus::AutoFocus);
             spawn_btn(&mut commands, f, c, Kind::Normal, "设置", UiAction::OpenSettings, None);
-            spawn_btn(&mut commands, f, c, Kind::Normal, "返回出击准备", UiAction::LeaveFlight, None);
+            spawn_btn(&mut commands, f, c, Kind::Normal, if core.watching { "停止观战" } else { "退出对局" }, UiAction::LeaveFlight, None);
             spawn_btn(&mut commands, f, c, Kind::Danger, "退出游戏", UiAction::Quit, None);
         }
         Shown::Dead => {
@@ -753,6 +760,7 @@ pub fn flight_overlays(mut commands: Commands, session: Res<Session>, keys: Res<
             }
             let rule = match core.mode {
                 Some(Mode::Ffa) => "4 秒后在随机位置重生。",
+                Some(Mode::Teams) => "4 秒后在己方一侧重生。",
                 _ => "本波结束后和队友一起重生；全员阵亡则从第 1 波重新开始。",
             };
             commands.spawn((text(f, rule, 13.0, MUTED), ChildOf(p)));
@@ -763,26 +771,58 @@ pub fn flight_overlays(mut commands: Commands, session: Res<Session>, keys: Res<
             // refreshed twice a second while open: no entrance motion, and keep the game visible
             commands.entity(o).insert((OverlayRoot, DespawnOnExit(Screen::Flight), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.3))));
             commands.entity(p).remove::<SlideIn>();
-            let grid = commands
-                .spawn((Node { display: Display::Grid, grid_template_columns: vec![GridTrack::px(36.0), GridTrack::flex(1.0), GridTrack::px(64.0), GridTrack::px(64.0), GridTrack::px(72.0)], row_gap: px(GAP_S), column_gap: px(12), ..default() }, ChildOf(p)))
-                .id();
-            // numeric columns are right-aligned
-            let num = || Node { justify_self: JustifySelf::End, ..default() };
-            for (i, h) in ["#", "飞行员", "击毁", "阵亡", "得分"].into_iter().enumerate() {
-                let c = commands.spawn((strong(f, h, 12.0, MUTED), ChildOf(grid))).id();
-                if i >= 2 {
-                    commands.entity(c).insert(num());
-                }
-            }
-            for (i, r) in core.scores.iter().enumerate() {
-                let mine = Some(r.pid) == core.pid;
-                let c = if mine { ACCENT } else if r.is_bot() { MUTED.mix(&INK, 0.45) } else { INK };
-                commands.spawn((tech(f, format!("{:02}", i + 1), 15.0, MUTED), ChildOf(grid)));
-                commands.spawn((text(f, format!("{}{}", r.name, if r.alive { "" } else { "  · 阵亡中" }), 15.0, c), ChildOf(grid)));
-                commands.spawn((tech(f, r.kills.to_string(), 16.0, c), num(), ChildOf(grid)));
-                commands.spawn((tech(f, r.deaths.to_string(), 16.0, c), num(), ChildOf(grid)));
-                commands.spawn((tech(f, r.score.to_string(), 16.0, c), num(), ChildOf(grid)));
-            }
+            spawn_score_table(&mut commands, f, p, &core.scores, core.mode, core.pid);
+        }
+    }
+}
+
+/// A team's name and colour (2v2: team 1 blue, team 2 red).
+pub fn team_label(team: u16) -> &'static str {
+    if team == 1 { "蓝队" } else { "红队" }
+}
+
+pub fn team_color(team: u16) -> Color {
+    if team == 1 { Color::srgb(0.4, 0.62, 1.0) } else { DANGER }
+}
+
+/// The scoreboard table (in flight and in the results): one row per pilot, grouped by team in
+/// 2v2 with each team's kills in its header.
+pub fn spawn_score_table(commands: &mut Commands, f: &UiFont, parent: Entity, rows: &[ScoreRow], mode: Option<Mode>, me: Option<u16>) {
+    let grid = commands
+        .spawn((Node { display: Display::Grid, grid_template_columns: vec![GridTrack::px(36.0), GridTrack::flex(1.0), GridTrack::px(64.0), GridTrack::px(64.0), GridTrack::px(72.0)], row_gap: px(GAP_S), column_gap: px(12), ..default() }, ChildOf(parent)))
+        .id();
+    // numeric columns are right-aligned
+    let num = || Node { justify_self: JustifySelf::End, ..default() };
+    for (i, h) in ["#", "飞行员", "击毁", "阵亡", "得分"].into_iter().enumerate() {
+        let c = commands.spawn((strong(f, h, 12.0, MUTED), ChildOf(grid))).id();
+        if i >= 2 {
+            commands.entity(c).insert(num());
+        }
+    }
+    let groups: Vec<(Option<u16>, Vec<&ScoreRow>)> = if mode == Some(Mode::Teams) {
+        let mut teams: Vec<u16> = rows.iter().map(|r| r.team).collect();
+        teams.sort();
+        teams.dedup();
+        teams.into_iter().map(|t| (Some(t), rows.iter().filter(|r| r.team == t).collect())).collect()
+    } else {
+        vec![(None, rows.iter().collect())]
+    };
+    for (team, list) in groups {
+        if let Some(t) = team {
+            let kills: u32 = list.iter().map(|r| r.kills).sum();
+            commands.spawn((Node { grid_column: GridPlacement::span(5), margin: UiRect::top(px(4)), column_gap: px(8), align_items: AlignItems::Center, ..default() }, ChildOf(grid), children![
+                (Node { width: px(3), height: px(14), ..default() }, BackgroundColor(team_color(t))),
+                strong(f, format!("{}  ·  击毁 {kills}", team_label(t)), 13.0, team_color(t)),
+            ]));
+        }
+        for (i, r) in list.into_iter().enumerate() {
+            let mine = Some(r.pid) == me;
+            let c = if mine { ACCENT } else if r.is_bot() { MUTED.mix(&INK, 0.45) } else { INK };
+            commands.spawn((tech(f, format!("{:02}", i + 1), 15.0, MUTED), ChildOf(grid)));
+            commands.spawn((text(f, format!("{}{}", r.name, if r.alive { "" } else { "  · 阵亡中" }), 15.0, c), ChildOf(grid)));
+            commands.spawn((tech(f, r.kills.to_string(), 16.0, c), num(), ChildOf(grid)));
+            commands.spawn((tech(f, r.deaths.to_string(), 16.0, c), num(), ChildOf(grid)));
+            commands.spawn((tech(f, r.score.to_string(), 16.0, c), num(), ChildOf(grid)));
         }
     }
 }

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use voxwing_shared::blocks::{Block, BlockType, Design};
+use voxwing_shared::presets::{PRESETS, preset};
 use voxwing_shared::grid::in_grid;
 
 #[derive(Resource, Clone, Debug, Serialize, Deserialize)]
@@ -15,9 +16,12 @@ use voxwing_shared::grid::in_grid;
 pub struct Settings {
     pub name: String,
     pub server: String,
-    /// "coop" or "ffa", used when this client hosts a room.
+    /// The mode to queue for: "ffa" or "2v2".
     pub host_mode: String,
-    pub bots: u32,
+    /// Budget tier to queue in (`balance.ron` key); empty = no limit.
+    pub host_budget: String,
+    /// Play on the server at `server` instead of on this machine.
+    pub online: bool,
     pub invert_y: bool,
     pub sound: bool,
     pub volume: f32,
@@ -45,7 +49,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { name: "飞行员".into(), server: format!("127.0.0.1:{}", voxwing_shared::DEFAULT_PORT), host_mode: "coop".into(), bots: 4, invert_y: false, sound: true, volume: 0.8, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true, recent: Vec::new() }
+        Settings { name: "飞行员".into(), server: format!("127.0.0.1:{}", voxwing_shared::DEFAULT_PORT), host_mode: "ffa".into(), host_budget: String::new(), online: false, invert_y: false, sound: true, volume: 0.8, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true, recent: Vec::new() }
     }
 }
 
@@ -90,11 +94,6 @@ impl Settings {
     }
 }
 
-pub fn delete_design(name: &str) {
-    let mut all: BTreeMap<String, Packed> = read("designs.json").unwrap_or_default();
-    all.remove(name);
-    write("designs.json", &all);
-}
 
 /// Compact design format shared with the web version: {"n": name, "b": [[x,y,z,type,color],...]}
 #[derive(Serialize, Deserialize)]
@@ -119,22 +118,49 @@ fn unpack(p: Packed) -> Design {
     Design { name: p.n, blocks }
 }
 
-pub fn load_current() -> Option<Design> {
-    read::<Packed>("current.json").map(unpack)
+/// Your ships in the order the hangar shows them, and which one is selected (`ships.json`).
+#[derive(Clone, Debug)]
+pub struct Fleet {
+    pub ships: Vec<Design>,
+    pub current: usize,
 }
 
-pub fn save_current(d: &Design) {
-    write("current.json", &pack(d));
+#[derive(Serialize, Deserialize)]
+struct FleetFile {
+    current: usize,
+    ships: Vec<Packed>,
 }
 
-pub fn saved_designs() -> BTreeMap<String, Design> {
-    read::<BTreeMap<String, Packed>>("designs.json").unwrap_or_default().into_iter().map(|(k, v)| (k, unpack(v))).collect()
+pub fn load_fleet() -> Fleet {
+    let mut fleet = match read::<FleetFile>("ships.json") {
+        Some(f) => Fleet { ships: f.ships.into_iter().map(unpack).collect(), current: f.current },
+        None => old_fleet(),
+    };
+    if fleet.ships.is_empty() {
+        fleet.ships = PRESETS.iter().map(|p| preset(p.key)).collect();
+    }
+    fleet.current = fleet.current.min(fleet.ships.len() - 1);
+    fleet
 }
 
-pub fn save_design(d: &Design) {
-    let mut all: BTreeMap<String, Packed> = read("designs.json").unwrap_or_default();
-    all.insert(d.name.clone(), pack(d));
-    write("designs.json", &all);
+pub fn save_fleet(f: &Fleet) {
+    write("ships.json", &FleetFile { current: f.current, ships: f.ships.iter().map(pack).collect() });
+}
+
+/// Before ships.json: named saves (designs.json) plus the ship last on the bench (current.json).
+fn old_fleet() -> Fleet {
+    let mut ships: Vec<Design> = read::<BTreeMap<String, Packed>>("designs.json").unwrap_or_default().into_values().map(unpack).collect();
+    let mut current = 0;
+    if let Some(c) = read::<Packed>("current.json").map(unpack).filter(|d| !d.blocks.is_empty()) {
+        match ships.iter().position(|s| s.name == c.name) {
+            Some(i) => {
+                ships[i] = c;
+                current = i;
+            }
+            None => ships.insert(0, c),
+        }
+    }
+    Fleet { ships, current }
 }
 
 pub fn encode_share(d: &Design) -> String {

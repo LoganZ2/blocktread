@@ -17,15 +17,20 @@ use bevy::audio::Volume;
 use bevy::light::Skybox;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use voxwing_client_core::{ClientCore, ConnState};
+use voxwing_client_core::{ClientCore, ConnState, Phase};
+use voxwing_shared::protocol::Mode;
 use voxwing_shared::ai::{AiPilot, Contact, Skill};
 use voxwing_shared::flight::{BTN_BOOST, BTN_FIRE, BTN_MISSILE, InputCmd, NO_LOCK, q_axis};
 use voxwing_shared::weapons::intercept;
 
+/// A connection to a server, from the mode select until the player goes back to it: it lives
+/// through matchmaking, any number of matches and their results.
 #[derive(Resource)]
 pub struct Session {
     pub core: ClientCore,
     pub addr: String,
+    /// The queue to join once connected.
+    pub want: Option<(Mode, Option<String>)>,
     pub killer: Option<String>,
     pub target: Option<u16>,
     pub lock: f32,
@@ -50,10 +55,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(core: ClientCore, addr: String) -> Self {
+    pub fn new(core: ClientCore, addr: String, want: Option<(Mode, Option<String>)>) -> Self {
         Session {
             core,
             addr,
+            want,
             killer: None,
             target: None,
             lock: 0.0,
@@ -73,6 +79,22 @@ impl Session {
             spectate: None,
             wreck: None,
         }
+    }
+
+    /// Forget the last flight (camera, target, death) before the next match.
+    fn reset_flight(&mut self) {
+        self.killer = None;
+        self.target = None;
+        self.lock = 0.0;
+        self.locked = false;
+        self.throttle = 0.7;
+        self.cam_init = false;
+        self.paused = false;
+        self.death = None;
+        self.shake = 0.0;
+        self.ai = None;
+        self.spectate = None;
+        self.wreck = None;
     }
 
     /// The ship being watched, while spectating and not between ships.
@@ -112,6 +134,11 @@ impl Plugin for FlightPlugin {
             .add_systems(Startup, setup_assets)
             .add_systems(OnEnter(Screen::Flight), (enter_flight, hud::spawn_hud))
             .add_systems(OnExit(Screen::Flight), exit_flight)
+            // back at the mode select (or further): the session ends
+            .add_systems(OnEnter(Screen::Lobby), end_session)
+            .add_systems(OnEnter(Screen::Menu), end_session)
+            .add_systems(OnEnter(Screen::Hangar), end_session)
+            .add_systems(Update, step_core.run_if(in_state(Screen::Match)).run_if(resource_exists::<Session>))
             .add_systems(
                 Update,
                 (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, exhaust::update_exhaust, fx::update_fx, env::orient_rocks, hud::update_hud, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum)
@@ -150,22 +177,26 @@ fn enter_flight(
     }
     env::spawn_env(&mut commands, &env_assets, Screen::Flight, Vec3::ZERO);
     fx::spawn_dust(&mut commands, &mut fx, &mut mats);
-    if let Some(s) = session.as_mut()
-        && dev.autopilot
-    {
-        s.ai = Some(AiPilot::new(Skill { aim_err: 0.012, cone: 0.05, react: 7.0, dmg_mul: 1.0 }, 1));
+    if let Some(s) = session.as_mut() {
+        s.reset_flight();
+        if dev.autopilot {
+            s.ai = Some(AiPilot::new(Skill { aim_err: 0.012, cone: 0.05, react: 7.0, dmg_mul: 1.0 }, 1));
+        }
     }
     if sounds.enabled {
         commands.spawn((AudioPlayer(sounds.hum.clone()), PlaybackSettings::LOOP.with_volume(Volume::Linear(0.0)), Hum, DespawnOnExit(Screen::Flight)));
     }
 }
 
-fn exit_flight(mut commands: Commands, session: Option<Res<Session>>, mut vis: ResMut<ships::ShipVisuals>) {
+fn exit_flight(mut vis: ResMut<ships::ShipVisuals>) {
+    vis.0.clear();
+}
+
+fn end_session(mut commands: Commands, session: Option<Res<Session>>) {
     if let Some(s) = session {
         s.core.leave();
+        commands.remove_resource::<Session>();
     }
-    commands.remove_resource::<Session>();
-    vis.0.clear();
 }
 
 fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>>, window: Single<&Window, With<PrimaryWindow>>, mut session: ResMut<Session>, time: Res<Time>, settings: Res<Settings>) {
@@ -219,7 +250,9 @@ fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButto
     s.buttons = b;
 }
 
-fn step_core(mut session: ResMut<Session>, time: Res<Time>, mut next: ResMut<NextState<Screen>>, mut last_err: ResMut<LastError>) {
+/// Run the client core one frame (in flight and on the match screen); leave flight when the match
+/// is over, and the session when the connection fails.
+fn step_core(mut session: ResMut<Session>, time: Res<Time>, screen: Res<State<Screen>>, mut next: ResMut<NextState<Screen>>, mut last_err: ResMut<LastError>) {
     let dt = time.delta_secs().min(0.1);
     let s = &mut *session;
     let (pitch, yaw, roll, throttle, buttons, target, locked) = (s.pitch, s.yaw, s.roll, s.throttle, s.buttons, s.target, s.locked);
@@ -253,6 +286,8 @@ fn step_core(mut session: ResMut<Session>, time: Res<Time>, mut next: ResMut<Nex
         warn!("session ended: {}", e.1);
         last_err.0 = Some(e);
         next.set(Screen::Lobby);
+    } else if *screen.get() == Screen::Flight && matches!(s.core.phase, Phase::Over { .. }) {
+        next.set(Screen::Match);
     }
 }
 
@@ -470,7 +505,7 @@ fn flight_actions(
                 session.paused = false;
                 focus.clear();
             }
-            UiAction::LeaveFlight | UiAction::CancelConnect => next.set(Screen::Lobby),
+            UiAction::LeaveFlight => next.set(Screen::Lobby),
             _ => {}
         }
     }

@@ -3,6 +3,7 @@
 use super::Overlays;
 use crate::Screen;
 use crate::hangar::Hangar;
+use crate::ui::icons::Icons;
 use crate::ui::kit::*;
 use crate::ui::*;
 use bevy::input_focus::{InputFocus, FocusCause};
@@ -14,20 +15,24 @@ pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(Screen::Menu), spawn_menu).add_systems(Update, menu_keys.run_if(in_state(Screen::Menu)));
+        app.add_systems(OnEnter(Screen::Menu), spawn_menu).add_systems(Update, (menu_keys, refresh_ship_card).run_if(in_state(Screen::Menu)));
     }
 }
 
 #[derive(Component)]
 struct MenuItem(usize);
+#[derive(Component)]
+struct MenuRoot;
+#[derive(Component)]
+struct ShipCard;
 
 /// Left edge of the title column.
 const COLUMN_X: f32 = 96.0;
 
-fn spawn_menu(mut commands: Commands, font: Res<UiFont>, hangar: Res<Hangar>) {
+fn spawn_menu(mut commands: Commands, font: Res<UiFont>, icons: Res<Icons>, hangar: Res<Hangar>) {
     let f = &*font;
     let scope = DespawnOnExit(Screen::Menu);
-    let root = commands.spawn((Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() }, Pickable::IGNORE, IgnoreHover, scope)).id();
+    let root = commands.spawn((Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() }, Pickable::IGNORE, IgnoreHover, MenuRoot, scope)).id();
 
     let left = commands
         .spawn((Node { position_type: PositionType::Absolute, left: px(COLUMN_X), top: px(0), bottom: px(0), flex_direction: FlexDirection::Column, justify_content: JustifyContent::Center, ..default() }, IgnoreHover, ChildOf(root)))
@@ -44,7 +49,7 @@ fn spawn_menu(mut commands: Commands, font: Res<UiFont>, hangar: Res<Hangar>) {
     commands.spawn((Node { flex_grow: 1.0, height: px(1), margin: UiRect::top(px(1)), ..default() }, BackgroundColor(LINE_HI), ChildOf(rule)));
 
     let items: [(&str, &str, UiAction, &str); 4] = [
-        ("出击", "SORTIE", UiAction::Goto(Screen::Lobby), "Enter"),
+        ("开始游戏", "PLAY", UiAction::Goto(Screen::Lobby), "Enter"),
         ("机库", "HANGAR", UiAction::Goto(Screen::Hangar), "H"),
         ("设置", "SETTINGS", UiAction::OpenSettings, "S"),
         ("退出", "EXIT", UiAction::Quit, "Esc"),
@@ -63,14 +68,25 @@ fn spawn_menu(mut commands: Commands, font: Res<UiFont>, hangar: Res<Hangar>) {
         ChildOf(root),
     ));
 
-    // current ship card
+    spawn_ship_card(&mut commands, f, &icons, root, &hangar, true);
+}
+
+/// The current ship: name (with ‹ › to flip through your ships), readiness, headline numbers.
+fn spawn_ship_card(commands: &mut Commands, f: &UiFont, icons: &Icons, root: Entity, hangar: &Hangar, slide: bool) {
     let a = &hangar.analysis;
     let s = &a.stats;
-    let card = spawn_panel(&mut commands, Some(root), Node { position_type: PositionType::Absolute, right: px(2.0 * EDGE), bottom: px(2.0 * EDGE), width: px(344), padding: px(PAD).all(), flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() });
-    commands.entity(card).insert(SlideIn::new(0.25, 40.0, 0.0));
-    let sec = spawn_section(&mut commands, f, card, "当前机体|CURRENT SHIP");
+    let card = spawn_panel(commands, Some(root), Node { position_type: PositionType::Absolute, right: px(2.0 * EDGE), bottom: px(2.0 * EDGE), width: px(344), padding: px(PAD).all(), flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() });
+    commands.entity(card).insert(ShipCard);
+    if slide {
+        commands.entity(card).insert(SlideIn::new(0.25, 40.0, 0.0));
+    }
+    let sec = spawn_section(commands, f, card, "当前机体|CURRENT SHIP");
     let r = commands.spawn((Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, ..default() }, ChildOf(sec))).id();
-    commands.spawn((heading(f, hangar.design.name.clone(), 22.0, INK), ChildOf(r)));
+    // ‹ name ›: flip through your ships right here
+    let pick = commands.spawn((row(GAP_S), ChildOf(r))).id();
+    spawn_icon_btn(commands, f, pick, icons.left.clone(), UiAction::ShipPrev);
+    commands.spawn((heading(f, hangar.design.name.clone(), 22.0, INK), ChildOf(pick)));
+    spawn_icon_btn(commands, f, pick, icons.right.clone(), UiAction::ShipNext);
     if a.ok() {
         commands.spawn((chip(f, "可以出击", OK), ChildOf(r)));
     } else {
@@ -94,8 +110,18 @@ fn spawn_menu(mut commands: Commands, font: Res<UiFont>, hangar: Res<Hangar>) {
         }
     }
     let br = commands.spawn((row(GAP_S), ChildOf(card))).id();
-    spawn_btn(&mut commands, f, br, Kind::Normal, "编辑机体", UiAction::Goto(Screen::Hangar), None);
-    spawn_btn(&mut commands, f, br, Kind::Ghost, "换一架…", UiAction::OpenLoad, None);
+    spawn_btn(commands, f, br, Kind::Normal, "编辑机体", UiAction::Goto(Screen::Hangar), None);
+}
+
+/// Rebuild the card when the ship changes (flipping with ‹ ›).
+fn refresh_ship_card(mut commands: Commands, hangar: Res<Hangar>, font: Res<UiFont>, icons: Res<Icons>, cards: Query<Entity, With<ShipCard>>, root: Single<Entity, With<MenuRoot>>) {
+    if !hangar.is_changed() || cards.is_empty() {
+        return;
+    }
+    for e in &cards {
+        commands.entity(e).despawn();
+    }
+    spawn_ship_card(&mut commands, &font, &icons, *root, &hangar, false);
 }
 
 #[allow(clippy::too_many_arguments)]

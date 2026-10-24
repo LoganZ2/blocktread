@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const ALPN: &[u8] = b"voxwing/1";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mode {
     /// Everyone against waves of AI ships.
     Coop,
     /// Free-for-all, topped up with bots.
     Ffa,
+    /// Two teams of two.
+    Teams,
 }
 
 impl Mode {
@@ -21,16 +23,47 @@ impl Mode {
         match self {
             Mode::Coop => "合作波次",
             Mode::Ffa => "自由混战",
+            Mode::Teams => "2v2 团队战",
+        }
+    }
+
+    /// Seats in a match of this mode; AI fills the ones players don't.
+    pub fn slots(self) -> usize {
+        match self {
+            Mode::Ffa => 6,
+            Mode::Teams | Mode::Coop => 4,
         }
     }
 }
 
+/// One seat in a match, as everyone sees it during the ship pick.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SlotInfo {
+    pub name: String,
+    pub team: u16,
+    pub bot: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMsg {
-    Hello { version: u32, name: String, design: Design },
+    /// The first message on a connection. `balance` is `balance::hash()`: both sides must
+    /// simulate with the same numbers.
+    Hello { version: u32, name: String, balance: u64 },
     Leave,
-    /// Join to watch: no ship, every ship in the snapshots.
-    Watch { version: u32, name: String },
+    /// Instead of `Hello`: watch a match (no ship, every ship in the snapshots).
+    Watch { version: u32, name: String, balance: u64 },
+    /// Look for a match of this mode, optionally limited to a budget tier (`balance.ron` key).
+    Queue { mode: Mode, tier: Option<String> },
+    Unqueue,
+    /// During the ship pick: the ship this player would fly (can change until `Ready`).
+    Pick { design: Design },
+    Ready,
+}
+
+/// The version in a hello this build can't otherwise read (an older client's), so the server can
+/// still tell it why it can't join. Every hello starts with its variant and the version.
+pub fn hello_version(b: &[u8]) -> Option<u32> {
+    postcard::take_from_bytes::<(u32, u32)>(b).ok().map(|((_, v), _)| v)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +74,7 @@ pub struct ScoreRow {
     pub deaths: u32,
     pub score: u32,
     pub alive: bool,
+    pub team: u16,
 }
 
 /// Score rows for free-for-all bots use pids from here up (player pids are small).
@@ -54,8 +88,21 @@ impl ScoreRow {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMsg {
+    /// The game starts (or a spectator is let in): the client's simulation begins here.
     Welcome { pid: u16, tick: u32, mode: Mode, asteroid_seed: u64 },
     Reject { reason: String },
+    /// The connection is accepted; this is the player's id.
+    Connected { pid: u16 },
+    /// In the queue: how many are waiting for this mode, and seconds until AI fills the rest.
+    Queued { players: u32, fill_in: f32 },
+    /// A match is made: its seats (`you` is this player's) and how long the ship pick lasts.
+    MatchFound { mode: Mode, tier: Option<String>, you: u8, slots: Vec<SlotInfo>, pick_secs: f32 },
+    /// A seat's ship during the pick, and whether it's locked in.
+    SlotPick { slot: u8, design: Option<Design>, ready: bool },
+    /// The match ended: who won, and the final scoreboard.
+    MatchOver { winner: String, rows: Vec<ScoreRow> },
+    /// Something to tell the player (a pick refused, say).
+    Notice { text: String },
     ShipSpawn { id: u16, team: u16, name: String, owner: Option<u16>, design: Design, kin: Kin },
     /// Which ship this client controls (None while dead or spectating).
     YourShip { id: Option<u16> },
@@ -71,7 +118,8 @@ pub enum ServerMsg {
     Crash { pos: Vec3 },
     Announce { title: String, sub: String },
     Feed { text: String, bad: bool },
-    Scores { rows: Vec<ScoreRow>, wave: u32, enemies: u32 },
+    /// `limit`: kills that win the match (0 = none); `left`: seconds until it ends (0 = no clock).
+    Scores { rows: Vec<ScoreRow>, wave: u32, enemies: u32, limit: u32, left: f32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

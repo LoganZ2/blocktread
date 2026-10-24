@@ -7,8 +7,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use voxwing_net::{read_frame, write_frame};
 use voxwing_shared::PROTOCOL_VERSION;
-use voxwing_shared::analysis::analyze;
-use voxwing_shared::protocol::{ClientMsg, InputPacket, ServerMsg, decode, encode};
+use voxwing_shared::protocol::{ClientMsg, InputPacket, ServerMsg, decode, encode, hello_version};
 
 pub async fn handle(inc: quinn::Incoming, tx: Sender<NetEvent>, next_pid: Arc<AtomicU16>) {
     let remote = inc.remote_address();
@@ -21,16 +20,22 @@ async fn handle_inner(inc: quinn::Incoming, tx: Sender<NetEvent>, next_pid: Arc<
     let conn = inc.await?;
     let (mut send, mut recv) = tokio::time::timeout(Duration::from_secs(5), conn.accept_bi()).await??;
     let Some(frame) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut recv)).await?? else { return Ok(()) };
-    let (version, name, design) = match decode::<ClientMsg>(&frame) {
-        Some(ClientMsg::Hello { version, name, design }) => (version, name, Some(design)),
-        Some(ClientMsg::Watch { version, name }) => (version, name, None),
-        _ => bail!("expected Hello"),
+    let (version, name, watch, bal) = match decode::<ClientMsg>(&frame) {
+        Some(ClientMsg::Hello { version, name, balance }) => (version, name, false, balance),
+        Some(ClientMsg::Watch { version, name, balance }) => (version, name, true, balance),
+        // an older client: its hello no longer parses, but its version still says why
+        _ => match hello_version(&frame) {
+            Some(v) => (v, String::new(), false, 0),
+            None => bail!("expected Hello"),
+        },
     };
+    // ships are checked when picked, in the hub
     let reject = if version != PROTOCOL_VERSION {
-        Some(format!("版本不匹配（服务器 {PROTOCOL_VERSION}，客户端 {version}）"))
+        Some(format!("版本不匹配（服务器 {PROTOCOL_VERSION}，客户端 {version}），先把两边更新到同一版本"))
+    } else if bal != voxwing_shared::balance::hash() {
+        Some("数值表不一致：服务器和客户端用的不是同一份平衡数据，先把两边更新到同一版本".into())
     } else {
-        // spectators don't fly, so they have nothing to check
-        design.as_ref().and_then(|d| analyze(d).first_error().map(|c| format!("设计没有通过起飞检查：{}", c.msg)))
+        None
     };
     if let Some(reason) = reject {
         write_frame(&mut send, &encode(&ServerMsg::Reject { reason })).await?;
@@ -40,9 +45,8 @@ async fn handle_inner(inc: quinn::Incoming, tx: Sender<NetEvent>, next_pid: Arc<
     }
     let pid = next_pid.fetch_add(1, Ordering::Relaxed);
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outgoing>();
-    let watching = design.is_none();
-    tx.send(NetEvent::Join { pid, name, design, out: out_tx })?;
-    println!("[server] {} {pid} joined from {}", if watching { "spectator" } else { "player" }, conn.remote_address());
+    tx.send(NetEvent::Connect { pid, name, watch, out: out_tx })?;
+    println!("[server] {} {pid} joined from {}", if watch { "spectator" } else { "player" }, conn.remote_address());
 
     let dconn = conn.clone();
     let writer = async move {
@@ -68,10 +72,13 @@ async fn handle_inner(inc: quinn::Incoming, tx: Sender<NetEvent>, next_pid: Arc<
         #[allow(unreachable_code)]
         Ok::<_, anyhow::Error>(())
     };
+    let rtx = tx.clone();
     let reliable = async move {
         while let Some(f) = read_frame(&mut recv).await? {
-            if let Some(ClientMsg::Leave) = decode::<ClientMsg>(&f) {
-                break;
+            match decode::<ClientMsg>(&f) {
+                Some(ClientMsg::Leave) => break,
+                Some(msg) => rtx.send(NetEvent::Msg { pid, msg })?,
+                None => {}
             }
         }
         Ok::<_, anyhow::Error>(())

@@ -21,6 +21,7 @@ pub enum NetIn {
 
 enum NetOut {
     Input(InputPacket),
+    Msg(ClientMsg),
     Leave,
 }
 
@@ -62,6 +63,11 @@ impl NetClient {
 
     pub fn send_input(&self, pkt: InputPacket) {
         let _ = self.tx.send(NetOut::Input(pkt));
+    }
+
+    /// A message on the reliable stream (queue, pick, ...).
+    pub fn send(&self, msg: ClientMsg) {
+        let _ = self.tx.send(NetOut::Msg(msg));
     }
 
     pub fn leave(&self) {
@@ -163,6 +169,13 @@ async fn run(
                             let _ = c.send_datagram(b);
                         });
                     }
+                }
+                NetOut::Msg(m) => {
+                    // lobby messages are rare: holding the writer for the simulated delay is fine
+                    if !latency.is_zero() {
+                        tokio::time::sleep(latency).await;
+                    }
+                    write_frame(&mut send, &encode(&m)).await?;
                 }
                 NetOut::Leave => {
                     let _ = write_frame(&mut send, &encode(&ClientMsg::Leave)).await;

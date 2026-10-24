@@ -1,11 +1,11 @@
-//! Headless netcode check: AI-flown clients play over real QUIC (with simulated ping) against an
-//! embedded server, then report how well prediction matched the server.
+//! Headless netcode check: AI-flown clients queue, pick a ship, play over real QUIC (with
+//! simulated ping) against an embedded server, then report how well prediction matched the server.
 //!
-//!   cargo run -p voxwing_client_core --example bots -- --clients 4 --secs 40 --latency 50 --mode ffa
+//!   cargo run -p voxwing_client_core --example bots -- --clients 4 --secs 40 --latency 50 --mode 2v2
 
 use std::time::{Duration, Instant};
-use voxwing_client_core::{ClientCore, ConnState, CoreEvent};
-use voxwing_server::{ServerConfig, start};
+use voxwing_client_core::{ClientCore, ConnState, CoreEvent, Phase};
+use voxwing_server::{HubConfig, ServerConfig, start};
 use voxwing_shared::ai::{AiPilot, Contact, Skill};
 use voxwing_shared::flight::InputCmd;
 use voxwing_shared::presets::{PRESETS, preset};
@@ -17,14 +17,16 @@ fn main() -> anyhow::Result<()> {
     let mut latency_ms = 40u64;
     let mut mode = Mode::Ffa;
     let mut server: Option<String> = None;
+    let mut match_secs = 480.0f32;
     let mut a = std::env::args().skip(1);
     while let Some(k) = a.next() {
         match k.as_str() {
             "--clients" => clients = a.next().unwrap().parse()?,
             "--secs" => secs = a.next().unwrap().parse()?,
             "--latency" => latency_ms = a.next().unwrap().parse()?,
-            "--mode" => mode = if a.next().as_deref() == Some("coop") { Mode::Coop } else { Mode::Ffa },
+            "--mode" => mode = if a.next().as_deref() == Some("2v2") { Mode::Teams } else { Mode::Ffa },
             "--server" => server = a.next(),
+            "--match-secs" => match_secs = a.next().unwrap().parse()?,
             _ => anyhow::bail!("unknown arg {k}"),
         }
     }
@@ -32,20 +34,17 @@ fn main() -> anyhow::Result<()> {
     let addr = match server {
         Some(s) => s,
         None => {
-            let h = start(ServerConfig { bind: "127.0.0.1:0".parse()?, mode, bots: 3, verbose: true })?;
+            let hub = HubConfig { queue_wait: 2.0, match_secs, ..HubConfig::default() };
+            let h = start(ServerConfig { bind: "127.0.0.1:0".parse()?, hub, verbose: true })?;
             let addr = h.addr.to_string();
             _handle = h;
             addr
         }
     };
-    println!("server {addr} · {clients} clients · one-way latency {latency_ms} ms · {secs} s");
+    println!("server {addr} · {clients} clients · {} · one-way latency {latency_ms} ms · {secs} s", mode.label());
     let lat = Duration::from_millis(latency_ms);
-    let mut cs: Vec<(ClientCore, AiPilot, u32)> = (0..clients)
-        .map(|i| {
-            let p = &PRESETS[i % PRESETS.len()];
-            (ClientCore::connect(&addr, &format!("bot{i}"), preset(p.key), lat), AiPilot::new(Skill::ffa_bot(), 99 + i as u64), 0)
-        })
-        .collect();
+    let mut cs: Vec<(ClientCore, AiPilot, u32)> = (0..clients).map(|i| (ClientCore::connect(&addr, &format!("bot{i}"), lat), AiPilot::new(Skill::ffa_bot(), 99 + i as u64), 0)).collect();
+    let mut matches_over = 0u32;
     let t0 = Instant::now();
     let mut last = Instant::now();
     let mut kills_seen = 0u32;
@@ -61,6 +60,7 @@ fn main() -> anyhow::Result<()> {
                 println!("t={:.1} pos={:.0?} spd={:.0} near={:?} buttons={} range={:.0} weapons={}", t0.elapsed().as_secs_f32(), p.kin.pos, p.kin.vel.length(), near, cmd.buttons, me.body.gun_range, me.body.stats.weapons.len());
             }
             core.update(dt, &mut |c: &ClientCore, _tick| ai_input(c, ai));
+            lobby(core, ci, mode, &mut matches_over);
             for e in core.events.drain(..) {
                 match e {
                     CoreEvent::ShipKilled { .. } => kills_seen += 1,
@@ -74,6 +74,7 @@ fn main() -> anyhow::Result<()> {
     for (i, (core, _, spawns)) in cs.iter().enumerate() {
         let st = match &core.state {
             ConnState::InGame => "in game".to_string(),
+            ConnState::Lobby => "lobby".to_string(),
             other => format!("{other:?}"),
         };
         let (checks, corr, mean, max, lead, speed) = core
@@ -97,13 +98,38 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some((core, _, _)) = cs.first() {
         println!("\nscores: {:?}", core.scores.iter().map(|r| (r.name.as_str(), r.kills, r.deaths)).collect::<Vec<_>>());
-        println!("ships visible to bot0: {} · kill events seen (all clients): {kills_seen}", core.ships.len());
+        println!("ships visible to bot0: {} · kill events seen (all clients): {kills_seen} · match ends seen: {matches_over}", core.ships.len());
     }
     for (core, _, _) in &cs {
         core.leave();
     }
     std::thread::sleep(Duration::from_millis(300));
     Ok(())
+}
+
+/// The lobby side of a bot: queue, pick a ship (looking at the others' first), lock in, and after
+/// the results queue again.
+fn lobby(core: &mut ClientCore, i: usize, mode: Mode, over: &mut u32) {
+    if core.state != ConnState::Lobby {
+        return;
+    }
+    match core.phase.clone() {
+        Phase::Idle => core.queue(mode, None),
+        Phase::Picking(p) if !p.ready[p.you] => {
+            if p.ships[p.you].is_none() {
+                println!("bot{i} matched: seat {} of {} · {}", p.you, p.slots.len(), p.slots.iter().map(|s| format!("{}{}", s.name, if s.bot { "(AI)" } else { "" })).collect::<Vec<_>>().join(", "));
+                core.pick(preset(PRESETS[i % PRESETS.len()].key));
+            } else {
+                core.ready();
+            }
+        }
+        Phase::Over { winner, rows } => {
+            *over += 1;
+            println!("bot{i} match over: {winner} · {:?}", rows.iter().map(|r| (r.name.as_str(), r.team, r.kills)).collect::<Vec<_>>());
+            core.queue(mode, None);
+        }
+        _ => {}
+    }
 }
 
 fn ai_input(c: &ClientCore, ai: &mut AiPilot) -> InputCmd {

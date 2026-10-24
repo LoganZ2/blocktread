@@ -128,7 +128,6 @@ pub enum SetKey {
     Vsync,
     ShowFps,
     ShowHelp,
-    Bots,
 }
 
 /// Everything a control can ask for. One message type keeps all handlers in plain systems.
@@ -153,30 +152,45 @@ pub enum UiAction {
     Tool(u8),
     Color(u32),
     Layer(i32),
+    /// Move the whole ship by this many cells (x, y, z).
+    Nudge(i8, i8, i8),
     Undo,
     Redo,
     Mirror,
     Clear,
     ClearConfirmed,
-    OpenLoad,
-    Preset(&'static str),
-    LoadSaved(String),
-    DeleteSaved(String),
-    Save,
+    /// The ship carousel: previous / next ship, a new blank one, delete the current one.
+    ShipPrev,
+    ShipNext,
+    NewShip,
+    DeleteShip,
+    DeleteShipConfirmed,
     CopyShare,
     PasteShare,
-    // lobby
-    LobbyTab(u8),
+    // mode select
+    /// The mode to queue for: "ffa" or "2v2".
     HostMode(&'static str),
-    StopHosting,
+    /// Budget tier to queue in (a `balance.ron` key, empty = no limit).
+    HostBudget(String),
+    /// Play online (on a server) rather than on this machine.
+    Online(bool),
     RecentServer(String),
+    /// Start matchmaking.
     Launch,
     /// Like Launch, but to spectate.
     Watch,
+    // matchmaking, ship pick, results
+    CancelQueue,
+    /// Lock in the picked ship.
+    ConfirmPick,
+    /// Show this seat's ship in the showcase (None: your own).
+    ViewSlot(Option<usize>),
+    /// After the results: queue again (or watch the next match).
+    PlayAgain,
     // flight
     Resume,
+    /// Leave the match (and the server) for the mode select.
     LeaveFlight,
-    CancelConnect,
 }
 
 /// Marks a control as currently chosen within its group (tool, tab, palette tile, ...).

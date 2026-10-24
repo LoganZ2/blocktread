@@ -22,19 +22,24 @@ pub enum Screen {
     #[default]
     Boot,
     Menu,
+    /// Mode select: what to play, where.
     Lobby,
     Hangar,
+    /// Connected to a server between flights: matchmaking, ship pick, results.
+    Match,
     Flight,
 }
 
 #[derive(Component)]
 pub struct MainCamera;
 
-/// The room this client is hosting, if any. Kept alive across flights so friends stay connected.
+/// The server this client runs for local play, if any. Kept alive across matches so friends on
+/// the LAN stay connected.
 #[derive(Resource, Default)]
 pub struct Hosted(pub Option<ServerHandle>);
 
-/// (title, message) shown in launch prep after a flight ends unexpectedly (rejected, disconnected).
+/// (title, message) shown in the mode select after a session ends unexpectedly (rejected,
+/// disconnected).
 #[derive(Resource, Default)]
 pub struct LastError(pub Option<(String, String)>);
 
@@ -47,18 +52,20 @@ pub struct DevOpts {
     /// Take this many screenshots, `shot_every` seconds apart (files get _0, _1, ... suffixes).
     pub shot_count: u32,
     pub shot_every: f32,
+    /// Start matchmaking (ffa, 2v2) or spectating (watch) on launch; "-join" plays online.
     pub auto_launch: Option<String>,
+    /// Fly by AI; also locks in the ship pick on its own.
     pub autopilot: bool,
     pub latency_ms: u64,
-    /// Host rooms on 127.0.0.1 only (no LAN access).
+    /// Play locally on 127.0.0.1 only (no LAN access).
     pub local_only: bool,
-    /// Start on this screen: lobby, join, error, hangar, settings or picker.
+    /// Start on this screen: lobby, join, error, hangar or settings.
     pub start: Option<String>,
     /// Render into an image instead of the window (screenshots work with the display locked).
     pub offscreen: bool,
     /// Show a flight overlay (pause or board) from the given second on, for screenshots.
     pub force: Option<(String, f32)>,
-    /// UDP port for rooms hosted from this client (default 4433).
+    /// UDP port for local play (default 4433).
     pub port: Option<u16>,
     /// Log frame pacing stats every 5 seconds.
     pub frame_stats: bool,
@@ -71,7 +78,7 @@ impl DevOpts {
 }
 
 const USAGE: &str = "用法: voxwing-client [--name 名字] [--server 地址:端口]
-开发用: [--launch host|join|watch|watch-join] [--local] [--autopilot] [--latency 毫秒] [--screen lobby|join|error|hangar|settings|picker]
+开发用: [--launch ffa|2v2|watch[-join]] [--local] [--autopilot] [--latency 毫秒] [--screen lobby|join|error|hangar|settings]
        [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|tip|revert:秒] [--frame-stats] [--port 端口]";
 
 fn main() {
@@ -96,7 +103,6 @@ fn main() {
             "--force" => dev.force = a.next().and_then(|v| v.split_once(':').and_then(|(w, t)| Some((w.to_string(), t.parse().ok()?)))),
             "--count" => dev.shot_count = a.next().and_then(|v| v.parse().ok()).unwrap_or(1),
             "--every" => dev.shot_every = a.next().and_then(|v| v.parse().ok()).unwrap_or(5.0),
-            "--mode" => s.host_mode = a.next().unwrap_or_else(|| "coop".into()),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return;
@@ -165,7 +171,6 @@ fn boot(mut next: ResMut<NextState<Screen>>, dev: Res<DevOpts>, mut overlays: Re
         _ => Screen::Menu,
     });
     overlays.settings = dev.start.as_deref() == Some("settings");
-    overlays.picker = dev.start.as_deref() == Some("picker");
 }
 
 fn dev_shot(mut commands: Commands, dev: Res<DevOpts>, off: Option<Res<Offscreen>>, time: Res<Time>, mut taken: Local<u32>, mut exit: MessageWriter<AppExit>) {

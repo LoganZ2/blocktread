@@ -1,13 +1,12 @@
-use crate::{NetEvent, Outgoing};
+use crate::Outgoing;
 use bytes::Bytes;
-use crossbeam_channel::Receiver;
 use glam::{Quat, Vec3};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 use voxwing_shared::ai::{AiPilot, Contact, Skill};
-use voxwing_shared::blocks::{BlockType, Design, PIERCE_FALLOFF};
+use voxwing_shared::analysis::analyze;
+use voxwing_shared::balance::balance;
+use voxwing_shared::blocks::{BlockType, DamageKind, Design};
 use voxwing_shared::flight::{InputCmd, Kin, NO_LOCK, collide_asteroids, look_rotation, step_flight};
 use voxwing_shared::presets::{PRESETS, enemy_colors, preset};
 use voxwing_shared::protocol::*;
@@ -20,6 +19,8 @@ use voxwing_shared::{DT, HISTORY_TICKS, SNAPSHOT_INTERVAL, TICK_RATE};
 pub struct GameConfig {
     pub mode: Mode,
     pub bots: u32,
+    /// The room's build budget, if it has one: free-for-all bots only fly ships that fit.
+    pub budget: Option<f32>,
     pub verbose: bool,
 }
 
@@ -31,6 +32,8 @@ struct Player {
     name: String,
     /// None for a spectator, who never gets a ship.
     design: Option<Arc<Design>>,
+    /// Set by a match (2v2 teams, a fixed seat in free-for-all); otherwise from the mode.
+    team: Option<u16>,
     out: tokio::sync::mpsc::UnboundedSender<Outgoing>,
     ship: Option<u16>,
     inputs: BTreeMap<u32, InputCmd>,
@@ -79,10 +82,12 @@ struct Ship {
     seat: Option<usize>,
 }
 
-/// A free-for-all bot identity. Each respawn flies for the same seat, so its score carries over.
+/// A bot identity. Each respawn flies the same ship for the same seat, so its score carries over.
 struct BotSeat {
     name: String,
-    preset: usize,
+    design: Arc<Design>,
+    /// A match's team for it; otherwise each life gets a team of its own.
+    team: Option<u16>,
     ship: Option<u16>,
     kills: u32,
     deaths: u32,
@@ -97,11 +102,13 @@ impl Ship {
         self.hist[((now - rewind) as usize) % HISTORY_TICKS]
     }
 
-    /// Apply damage to one block. Shields soak hits first; the caller handles shield checks.
-    fn hit_block(&mut self, i: usize, dmg: f32, src: Option<u16>) {
+    /// Apply damage to one block, through its armour. Shields soak hits first; the caller handles
+    /// shield checks.
+    fn hit_block(&mut self, i: usize, dmg: f32, kind: DamageKind, src: Option<u16>) {
         if !self.body.alive[i] {
             return;
         }
+        let dmg = balance().through_armor(dmg, self.body.design.blocks[i].ty.info().armor, kind);
         self.recent_dmg += dmg;
         if src.is_some() {
             self.last_attacker = src;
@@ -115,9 +122,15 @@ impl Ship {
         }
     }
 
-    fn splash(&mut self, pos: Vec3, rot: Quat, p: Vec3, r: f32, dmg: f32, src: Option<u16>) {
-        for (i, d) in self.body.within(pos, rot, p, r) {
-            self.hit_block(i, dmg * (1.0 - 0.65 * d / r), src);
+    /// An explosion: each block in reach takes up to `dmg`, less the farther out it is, but the
+    /// blast as a whole deals at most the balance's `splash_total` times `dmg`, shared out. So a
+    /// solid hull isn't hit many times harder than a thin one.
+    fn splash(&mut self, pos: Vec3, rot: Quat, p: Vec3, r: f32, dmg: f32, kind: DamageKind, src: Option<u16>) {
+        let hit: Vec<(usize, f32)> = self.body.within(pos, rot, p, r).into_iter().map(|(i, d)| (i, 1.0 - 0.65 * d / r)).collect();
+        let weight: f32 = hit.iter().map(|h| h.1).sum();
+        let share = (balance().splash_total / weight.max(1e-3)).min(1.0);
+        for (i, w) in hit {
+            self.hit_block(i, dmg * w * share, kind, src);
         }
     }
 
@@ -169,6 +182,11 @@ pub struct Game {
     scores_dirty: bool,
     joins: u32,
     shots: Vec<Shot>,
+    /// Kills scored by each team (a free-for-all seat is a team of one).
+    team_kills: BTreeMap<u16, u32>,
+    /// Kills that win a match (0 = none) and the tick it ends at: shown on the scoreboard.
+    pub limit: u32,
+    pub ends_at: Option<u32>,
 }
 
 fn secs(s: f32) -> u32 {
@@ -184,7 +202,11 @@ fn seg_sphere(a: Vec3, b: Vec3, c: Vec3, r: f32) -> Option<f32> {
 
 impl Game {
     pub fn new(cfg: GameConfig) -> Self {
-        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7);
+        Self::with_seed(cfg, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7))
+    }
+
+    /// A game whose asteroids and randomness come from `seed` (for reproducible simulations).
+    pub fn with_seed(cfg: GameConfig, seed: u64) -> Self {
         Game {
             cfg,
             tick: 0,
@@ -206,6 +228,29 @@ impl Game {
             scores_dirty: true,
             joins: 0,
             shots: Vec::new(),
+            team_kills: BTreeMap::new(),
+            limit: 0,
+            ends_at: None,
+        }
+    }
+
+    pub fn now(&self) -> u32 {
+        self.tick
+    }
+
+    pub fn team_kills(&self) -> &BTreeMap<u16, u32> {
+        &self.team_kills
+    }
+
+    /// Players still connected (pilots and spectators).
+    pub fn has_players(&self) -> bool {
+        !self.players.is_empty()
+    }
+
+    /// Send a message to everyone in this game.
+    pub fn broadcast(&self, msg: &ServerMsg) {
+        for p in self.players.values() {
+            p.send(msg);
         }
     }
 
@@ -221,34 +266,30 @@ impl Game {
         self.events.push(ServerMsg::Announce { title: title.into(), sub });
     }
 
-    pub fn handle(&mut self, ev: NetEvent) {
-        match ev {
-            NetEvent::Join { pid, name, design, out } => self.join(pid, name, design, out),
-            NetEvent::Input { pid, pkt } => {
-                let now = self.tick;
-                if let Some(p) = self.players.get_mut(&pid) {
-                    for mut c in pkt.cmds {
-                        if c.tick > now && c.tick <= now + 240 {
-                            c.view_lag = c.view_lag.min(MAX_REWIND_TICKS as u8);
-                            p.newest = p.newest.max(c.tick);
-                            p.inputs.insert(c.tick, c);
-                        }
-                    }
-                    while p.inputs.len() > 300 {
-                        p.inputs.pop_first();
-                    }
+    pub fn input(&mut self, pid: u16, pkt: InputPacket) {
+        let now = self.tick;
+        if let Some(p) = self.players.get_mut(&pid) {
+            for mut c in pkt.cmds {
+                if c.tick > now && c.tick <= now + 240 {
+                    c.view_lag = c.view_lag.min(MAX_REWIND_TICKS as u8);
+                    p.newest = p.newest.max(c.tick);
+                    p.inputs.insert(c.tick, c);
                 }
             }
-            NetEvent::Leave { pid } => {
-                if let Some(p) = self.players.remove(&pid) {
-                    if let Some(sid) = p.ship {
-                        self.ships.remove(&sid);
-                        self.events.push(ServerMsg::ShipRemoved { id: sid });
-                    }
-                    self.feed(format!("{} {}", p.name, if p.watching() { "结束了观战" } else { "离开了战场" }), false);
-                    self.scores_dirty = true;
-                }
+            while p.inputs.len() > 300 {
+                p.inputs.pop_first();
             }
+        }
+    }
+
+    pub fn leave(&mut self, pid: u16) {
+        if let Some(p) = self.players.remove(&pid) {
+            if let Some(sid) = p.ship {
+                self.ships.remove(&sid);
+                self.events.push(ServerMsg::ShipRemoved { id: sid });
+            }
+            self.feed(format!("{} {}", p.name, if p.watching() { "结束了观战" } else { "离开了战场" }), false);
+            self.scores_dirty = true;
         }
     }
 
@@ -257,15 +298,20 @@ impl Game {
         self.players.values().filter(|p| !p.watching()).count()
     }
 
-    fn join(&mut self, pid: u16, name: String, design: Option<Design>, out: tokio::sync::mpsc::UnboundedSender<Outgoing>) {
+    /// A player (or with no design, a spectator) enters the game. `team` fixes their side.
+    pub fn join(&mut self, pid: u16, name: String, design: Option<Design>, team: Option<u16>, out: tokio::sync::mpsc::UnboundedSender<Outgoing>) {
         let mut name: String = name.trim().chars().filter(|c| !c.is_control()).take(12).collect();
         if name.is_empty() {
             name = format!("飞行员{pid}");
         }
         self.joins += 1;
+        // what happened before this join goes to those already here: the newcomer gets the world
+        // as it is now (several join between two ticks when a match starts)
+        self.send_events();
         let p = Player {
             name: name.clone(),
             design: design.map(|d| Arc::new(Design { name: d.sanitized_name(), blocks: d.blocks })),
+            team,
             out,
             ship: None,
             inputs: BTreeMap::new(),
@@ -320,10 +366,16 @@ impl Game {
                     }
                 }
             }
-            Mode::Ffa => {
+            Mode::Ffa | Mode::Teams => {
                 self.spawn_player(pid);
+                let sub = match (self.cfg.mode, self.limit) {
+                    (Mode::Teams, 0) => "击落对方队伍的飞机".to_string(),
+                    (Mode::Teams, n) => format!("先拿到 {n} 次击落的队伍获胜"),
+                    (_, 0) => "击落任何其他飞机".to_string(),
+                    (_, n) => format!("先拿到 {n} 次击落的人获胜"),
+                };
                 if let Some(p) = self.players.get(&pid) {
-                    p.send(&ServerMsg::Announce { title: "自由混战".into(), sub: "击落任何其他飞机".into() });
+                    p.send(&ServerMsg::Announce { title: self.cfg.mode.label().into(), sub });
                 }
             }
         }
@@ -375,15 +427,39 @@ impl Game {
         id
     }
 
+    /// A bot that flies `design` for a match, on `team`; it takes off at once and respawns.
+    pub fn add_seat(&mut self, name: String, design: Design, team: Option<u16>) {
+        self.seats.push(BotSeat { name, design: Arc::new(enemy_colors(&design)), team, ship: None, kills: 0, deaths: 0, score: 0 });
+        self.cfg.bots += 1;
+        self.spawn_seat(self.seats.len() - 1);
+    }
+
+    fn spawn_seat(&mut self, seat: usize) {
+        let s = &self.seats[seat];
+        let team = s.team.unwrap_or(2000 + self.next_ship);
+        let (design, name) = (s.design.clone(), s.name.clone());
+        let (pos, rot) = self.spawn_point(team);
+        let id = self.add_ship(design, name, team, None, pos, rot, Some(Skill::ffa_bot()));
+        if let Some(s) = self.ships.get_mut(&id) {
+            s.seat = Some(seat);
+        }
+        self.seats[seat].ship = Some(id);
+        self.scores_dirty = true;
+    }
+
     /// A bot seat with no ship in the air, creating one (with an unused preset if any) if needed.
     fn free_seat(&mut self) -> usize {
         let flying = |s: &BotSeat, i: usize| s.ship.and_then(|id| self.ships.get(&id)).is_some_and(|sh| sh.seat == Some(i));
         if let Some(i) = self.seats.iter().enumerate().position(|(i, s)| !flying(s, i)) {
             return i;
         }
-        let free: Vec<usize> = (0..PRESETS.len()).filter(|p| !self.seats.iter().any(|s| s.preset == *p)).collect();
-        let preset = if free.is_empty() { self.rng.below(PRESETS.len()) } else { free[self.rng.below(free.len())] };
-        self.seats.push(BotSeat { name: format!("AI·{}", PRESETS[preset].name), preset, ship: None, kills: 0, deaths: 0, score: 0 });
+        // presets within the room's budget (all of them if none fits), unused ones first
+        let fits: Vec<usize> = (0..PRESETS.len()).filter(|&p| self.cfg.budget.is_none_or(|b| analyze(&preset(PRESETS[p].key)).stats.cost <= b + 1e-3)).collect();
+        let pool = if fits.is_empty() { (0..PRESETS.len()).collect() } else { fits };
+        let free: Vec<usize> = pool.iter().copied().filter(|&p| !self.seats.iter().any(|s| s.design.name == PRESETS[p].name)).collect();
+        let k = if free.is_empty() { pool[self.rng.below(pool.len())] } else { free[self.rng.below(free.len())] };
+        let design = Arc::new(enemy_colors(&preset(PRESETS[k].key)));
+        self.seats.push(BotSeat { name: format!("AI·{}", PRESETS[k].name), design, team: None, ship: None, kills: 0, deaths: 0, score: 0 });
         self.seats.len() - 1
     }
 
@@ -394,16 +470,16 @@ impl Game {
             return;
         }
         let (name, order) = (p.name.clone(), p.order);
+        let team = p.team.unwrap_or(match self.cfg.mode {
+            Mode::Coop => 0,
+            Mode::Ffa | Mode::Teams => 1000 + pid,
+        });
         let (pos, rot) = match self.cfg.mode {
             Mode::Coop => {
                 let side = (order as f32 - 1.0) * 28.0 * if order % 2 == 0 { 1.0 } else { -1.0 };
                 (PLAYER_SPAWN + Vec3::new(side, (order % 3) as f32 * 8.0, 0.0), Quat::IDENTITY)
             }
-            Mode::Ffa => self.ffa_spawn_point(),
-        };
-        let team = match self.cfg.mode {
-            Mode::Coop => 0,
-            Mode::Ffa => 1000 + pid,
+            Mode::Ffa | Mode::Teams => self.spawn_point(team),
         };
         let id = self.add_ship(design, name, team, Some(pid), pos, rot, None);
         if let Some(p) = self.players.get_mut(&pid) {
@@ -413,6 +489,23 @@ impl Game {
             p.send(&ServerMsg::YourShip { id: Some(id) });
         }
         self.scores_dirty = true;
+    }
+
+    /// Where a ship of `team` enters: in 2v2 each team on its own side of the arena, facing the
+    /// middle; otherwise anywhere clear.
+    fn spawn_point(&mut self, team: u16) -> (Vec3, Quat) {
+        if self.cfg.mode != Mode::Teams {
+            return self.ffa_spawn_point();
+        }
+        let side = if team % 2 == 1 { 1.0 } else { -1.0 };
+        for _ in 0..30 {
+            let pos = Vec3::new(side * self.rng.range(550.0, 700.0), self.rng.range(-80.0, 80.0), self.rng.range(-220.0, 220.0));
+            let clear = self.rocks.iter().all(|a| a.pos.distance(pos) > a.r + 40.0) && self.ships.values().all(|s| s.kin.pos.distance(pos) > 60.0);
+            if clear {
+                return (pos, look_rotation(pos, Vec3::ZERO, Vec3::Y));
+            }
+        }
+        self.ffa_spawn_point()
     }
 
     fn ffa_spawn_point(&mut self) -> (Vec3, Quat) {
@@ -522,16 +615,7 @@ impl Game {
                 Timer::SpawnBot => {
                     self.pending_bots = self.pending_bots.saturating_sub(1);
                     let seat = self.free_seat();
-                    let k = &PRESETS[self.seats[seat].preset];
-                    let (pos, rot) = self.ffa_spawn_point();
-                    let team = 2000 + self.next_ship;
-                    let d = Arc::new(enemy_colors(&preset(k.key)));
-                    let id = self.add_ship(d, self.seats[seat].name.clone(), team, None, pos, rot, Some(Skill::ffa_bot()));
-                    if let Some(s) = self.ships.get_mut(&id) {
-                        s.seat = Some(seat);
-                    }
-                    self.seats[seat].ship = Some(id);
-                    self.scores_dirty = true;
+                    self.spawn_seat(seat);
                 }
             }
         }
@@ -583,7 +667,7 @@ impl Game {
             {
                 s.collide_cd = 0.3;
                 let (pos, rot) = (s.kin.pos, s.kin.rot);
-                s.splash(pos, rot, imp.point, 1.7, imp.speed * 0.9, None);
+                s.splash(pos, rot, imp.point, 1.7, imp.speed * 0.9, DamageKind::Kinetic, None);
                 crashes.push(imp.point);
             }
             s.collide_cd -= DT;
@@ -636,7 +720,7 @@ impl Game {
 
         match self.cfg.mode {
             Mode::Coop => self.coop_logic(),
-            Mode::Ffa => self.ffa_logic(),
+            Mode::Ffa | Mode::Teams => self.ffa_logic(),
         }
         self.flush(t);
     }
@@ -692,7 +776,7 @@ impl Game {
                             let s = self.ships.get_mut(&id).unwrap();
                             s.collide_cd = 0.35;
                             let (pos, rot) = (s.kin.pos, s.kin.rot);
-                            s.splash(pos, rot, cp, 1.9, dmg * 2.0 * share * f, Some(other));
+                            s.splash(pos, rot, cp, 1.9, dmg * 2.0 * share * f, DamageKind::Kinetic, Some(other));
                         }
                         self.events.push(ServerMsg::Crash { pos: cp });
                     }
@@ -737,7 +821,7 @@ impl Game {
                     if shielded {
                         let p = b.prev.lerp(b.pos, tt);
                         let pt = sp + (p - sp).normalize_or(Vec3::Y) * s.body.radius * 1.08;
-                        s.kin.shield = (s.kin.shield - b.dmg).max(0.0);
+                        s.kin.shield = (s.kin.shield - balance().on_shield(b.dmg, spec.kind)).max(0.0);
                         s.kin.shield_delay = 3.0;
                         s.recent_dmg += b.dmg * 0.5;
                         s.last_attacker = Some(b.owner);
@@ -751,17 +835,17 @@ impl Game {
                     if let Some((blk, pt)) = s.body.ray(sp, sr, b.prev, b.pos) {
                         if spec.splash > 0.0 {
                             self.events.push(ServerMsg::Explosion { pos: pt, size: spec.splash * 0.55 });
-                            s.splash(sp, sr, pt, spec.splash, b.dmg, Some(b.owner));
+                            s.splash(sp, sr, pt, spec.splash, b.dmg, spec.kind, Some(b.owner));
                         } else if spec.pierce > 1 {
                             // on through the ship: the next blocks along the line, each hit softer
                             let dir = (b.pos - b.prev).normalize_or(Vec3::NEG_Z);
                             let mut dmg = b.dmg;
                             for i in s.body.ray_through(sp, sr, b.prev, b.pos + dir * s.body.radius * 2.0, spec.pierce as usize) {
-                                s.hit_block(i, dmg, Some(b.owner));
-                                dmg *= PIERCE_FALLOFF;
+                                s.hit_block(i, dmg, spec.kind, Some(b.owner));
+                                dmg *= voxwing_shared::balance::balance().pierce_falloff;
                             }
                         } else {
-                            s.hit_block(blk, b.dmg, Some(b.owner));
+                            s.hit_block(blk, b.dmg, spec.kind, Some(b.owner));
                         }
                         dead = true;
                         break;
@@ -792,6 +876,7 @@ impl Game {
     fn settle_ships(&mut self) {
         let mut kills = Vec::new();
         for s in self.ships.values_mut() {
+            let hurt = !s.damaged.is_empty() || !s.destroyed.is_empty();
             if !s.damaged.is_empty() {
                 let mut hits = std::mem::take(&mut s.damaged);
                 hits.retain(|(i, _)| s.body.alive[*i as usize]);
@@ -807,9 +892,10 @@ impl Game {
                 let blocks = std::mem::take(&mut s.destroyed);
                 self.events.push(ServerMsg::BlocksDestroyed { ship: s.id, blocks });
                 s.body.settle();
-                if !s.body.cockpit_alive() {
-                    kills.push((s.id, s.last_attacker));
-                }
+            }
+            // the cockpit is gone, or so little of the ship is left that it falls apart
+            if hurt && (!s.body.cockpit_alive() || s.body.hp_total() < balance().collapse_below * s.body.max_hp) {
+                kills.push((s.id, s.last_attacker));
             }
         }
         for (id, by) in kills {
@@ -830,6 +916,9 @@ impl Game {
         let killer_name = killer.map(|k| k.name.clone());
         let killer_owner = killer.and_then(|k| k.owner);
         let killer_seat = killer.and_then(|k| k.seat);
+        if let Some(k) = killer.filter(|k| k.team != victim.team) {
+            *self.team_kills.entry(k.team).or_insert(0) += 1;
+        }
         let pts = 100 + (victim.body.max_hp / 10.0) as u32;
         if let Some(pid) = killer_owner
             && let Some(p) = self.players.get_mut(&pid)
@@ -851,7 +940,7 @@ impl Game {
             p.deaths += 1;
             p.ship = None;
             p.send(&ServerMsg::YourShip { id: None });
-            if self.cfg.mode == Mode::Ffa {
+            if matches!(self.cfg.mode, Mode::Ffa | Mode::Teams) {
                 p.respawn_at = Some(self.tick + secs(4.0));
             }
         }
@@ -932,27 +1021,33 @@ impl Game {
         }
     }
 
-    fn flush(&mut self, t: u32) {
-        if self.scores_dirty && t % 15 == 0 {
-            self.scores_dirty = false;
-            let mut rows: Vec<ScoreRow> = self
-                .players
-                .iter()
-                .filter(|(_, p)| !p.watching())
-                .map(|(&pid, p)| ScoreRow { pid, name: p.name.clone(), kills: p.kills, deaths: p.deaths, score: p.score, alive: p.ship.is_some() })
-                .chain(self.seats.iter().enumerate().map(|(i, s)| ScoreRow {
-                    pid: BOT_PID_BASE + i as u16,
-                    name: s.name.clone(),
-                    kills: s.kills,
-                    deaths: s.deaths,
-                    score: s.score,
-                    alive: s.ship.is_some(),
-                }))
-                .collect();
-            rows.sort_by(|a, b| b.score.cmp(&a.score).then(b.kills.cmp(&a.kills)));
-            let enemies = self.ships.values().filter(|s| s.owner.is_none()).count() as u32;
-            self.events.push(ServerMsg::Scores { rows, wave: self.wave, enemies });
-        }
+    /// The scoreboard: players and bot seats, best first.
+    pub fn scores(&self) -> Vec<ScoreRow> {
+        let mode = self.cfg.mode;
+        let mut rows: Vec<ScoreRow> = self
+            .players
+            .iter()
+            .filter(|(_, p)| !p.watching())
+            .map(|(&pid, p)| {
+                let team = p.team.unwrap_or(if mode == Mode::Coop { 0 } else { 1000 + pid });
+                ScoreRow { pid, name: p.name.clone(), kills: p.kills, deaths: p.deaths, score: p.score, alive: p.ship.is_some(), team }
+            })
+            .chain(self.seats.iter().enumerate().map(|(i, s)| ScoreRow {
+                pid: BOT_PID_BASE + i as u16,
+                name: s.name.clone(),
+                kills: s.kills,
+                deaths: s.deaths,
+                score: s.score,
+                alive: s.ship.is_some(),
+                team: s.team.unwrap_or(BOT_PID_BASE + i as u16),
+            }))
+            .collect();
+        rows.sort_by(|a, b| b.score.cmp(&a.score).then(b.kills.cmp(&a.kills)));
+        rows
+    }
+
+    /// Send this tick's events to everyone in the game.
+    fn send_events(&mut self) {
         if !self.events.is_empty() {
             let encoded: Vec<Bytes> = self.events.drain(..).map(|m| Bytes::from(encode(&m))).collect();
             for p in self.players.values() {
@@ -961,6 +1056,17 @@ impl Game {
                 }
             }
         }
+    }
+
+    fn flush(&mut self, t: u32) {
+        if self.scores_dirty && t % 15 == 0 {
+            self.scores_dirty = false;
+            let rows = self.scores();
+            let enemies = self.ships.values().filter(|s| s.owner.is_none()).count() as u32;
+            let left = self.ends_at.map_or(0.0, |e| e.saturating_sub(self.tick) as f32 / TICK_RATE as f32);
+            self.events.push(ServerMsg::Scores { rows, wave: self.wave, enemies, limit: self.limit, left });
+        }
+        self.send_events();
         if t % SNAPSHOT_INTERVAL != 0 {
             return;
         }
@@ -1001,48 +1107,58 @@ impl Game {
     }
 }
 
+/// The outcome of one `duel`.
+#[derive(Clone, Copy, Debug)]
+pub struct Duel {
+    /// The side (0 or 1) still flying, or with more of its hull left when time ran out; None for
+    /// a draw.
+    pub winner: Option<usize>,
+    pub secs: f32,
+    /// Share of each side's hit points left.
+    pub hull: [f32; 2],
+}
+
+/// A headless 1v1 for balance testing: two AI pilots of the same skill fly `a` and `b` at each
+/// other in the normal arena, asteroids and all, until one goes down or `max_secs` pass. Run it
+/// many times with different seeds; one fight says little.
+pub fn duel(a: &Design, b: &Design, seed: u64, max_secs: f32) -> Duel {
+    let mut g = Game::with_seed(GameConfig { mode: Mode::Ffa, bots: 0, budget: None, verbose: false }, seed);
+    // full damage on both sides: free-for-all bots normally hit a little softer than players
+    let skill = Skill { dmg_mul: 1.0, ..Skill::ffa_bot() };
+    // two spots 700 m apart, clear of rocks, facing each other
+    let clear = |g: &Game, p: Vec3| g.rocks.iter().all(|r| r.pos.distance(p) > r.r + 40.0);
+    let mut spots = (Vec3::new(-350.0, 0.0, 0.0), Vec3::new(350.0, 0.0, 0.0));
+    for _ in 0..60 {
+        let c = g.rng.unit() * g.rng.range(0.0, 400.0);
+        let d = g.rng.unit().normalize_or(Vec3::X) * 350.0;
+        if clear(&g, c - d) && clear(&g, c + d) {
+            spots = (c - d, c + d);
+            break;
+        }
+    }
+    let (pa, pb) = spots;
+    let ia = g.add_ship(Arc::new(a.clone()), "A".into(), 1, None, pa, look_rotation(pa, pb, Vec3::Y), Some(skill));
+    let ib = g.add_ship(Arc::new(b.clone()), "B".into(), 2, None, pb, look_rotation(pb, pa, Vec3::Y), Some(skill));
+    let hull = |g: &Game, id: u16| g.ships.get(&id).map_or(0.0, |s| s.body.hp_total() / s.body.max_hp);
+    let ticks = (max_secs * TICK_RATE as f32) as u32;
+    for n in 0..ticks {
+        g.tick();
+        let (a_up, b_up) = (g.ships.contains_key(&ia), g.ships.contains_key(&ib));
+        if !(a_up && b_up) {
+            let winner = match (a_up, b_up) {
+                (true, false) => Some(0),
+                (false, true) => Some(1),
+                _ => None,
+            };
+            return Duel { winner, secs: n as f32 / TICK_RATE as f32, hull: [hull(&g, ia), hull(&g, ib)] };
+        }
+    }
+    let h = [hull(&g, ia), hull(&g, ib)];
+    let winner = if (h[0] - h[1]).abs() < 0.02 { None } else if h[0] > h[1] { Some(0) } else { Some(1) };
+    Duel { winner, secs: max_secs, hull: h }
+}
+
 fn spawn_msg(s: &Ship) -> ServerMsg {
     ServerMsg::ShipSpawn { id: s.id, team: s.team, name: s.name.clone(), owner: s.owner, design: (*s.body.design).clone(), kin: s.kin }
 }
 
-pub fn run_loop(cfg: GameConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>) {
-    let verbose = cfg.verbose;
-    let mut g = Game::new(cfg);
-    let step = Duration::from_secs_f64(1.0 / TICK_RATE as f64);
-    let mut next = Instant::now();
-    let (mut worst, mut total, mut n) = (Duration::ZERO, Duration::ZERO, 0u32);
-    let mut report = Instant::now();
-    while !stop.load(Ordering::Relaxed) {
-        while let Ok(ev) = rx.try_recv() {
-            g.handle(ev);
-        }
-        let t0 = Instant::now();
-        g.tick();
-        let el = t0.elapsed();
-        worst = worst.max(el);
-        total += el;
-        n += 1;
-        if verbose && report.elapsed() > Duration::from_secs(10) {
-            println!(
-                "[server] tick {} · players {} · ships {} · bolts {} · tick avg {:.2} ms, worst {:.2} ms",
-                g.tick,
-                g.players.len(),
-                g.ships.len(),
-                g.bolts.len(),
-                total.as_secs_f64() * 1000.0 / n as f64,
-                worst.as_secs_f64() * 1000.0
-            );
-            report = Instant::now();
-            worst = Duration::ZERO;
-            total = Duration::ZERO;
-            n = 0;
-        }
-        next += step;
-        let now = Instant::now();
-        if next > now {
-            std::thread::sleep(next - now);
-        } else if now - next > Duration::from_millis(250) {
-            next = now;
-        }
-    }
-}

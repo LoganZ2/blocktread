@@ -3,6 +3,7 @@
 
 pub mod ai;
 pub mod analysis;
+pub mod balance;
 pub mod blocks;
 pub mod flight;
 pub mod grid;
@@ -21,7 +22,9 @@ pub const DT: f32 = 1.0 / TICK_RATE as f32;
 /// The server sends a snapshot every this many ticks (30 Hz).
 pub const SNAPSHOT_INTERVAL: u32 = 2;
 /// 2: block types after the web version's twelve, and spectators.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 3: the balance table's hash in the hello, build budgets and the new damage rules.
+/// 4: matchmaking: queue, ship pick, matches.
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const DEFAULT_PORT: u16 = 4433;
 /// Ships beyond this distance from the origin get pushed back.
 pub const ARENA_R: f32 = 1400.0;

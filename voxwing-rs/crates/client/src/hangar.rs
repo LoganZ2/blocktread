@@ -32,7 +32,7 @@ impl Plugin for HangarPlugin {
             .init_resource::<OrbitCam>()
             .add_systems(OnEnter(Screen::Hangar), enter_hangar)
             .add_systems(OnExit(Screen::Hangar), leave_hangar)
-            .add_systems(Update, (orbit_and_pick, edit_keys, hangar_actions, rebuild_model, refresh_ui, draw_gizmos).chain().run_if(in_state(Screen::Hangar)))
+            .add_systems(Update, (orbit_and_pick, edit_keys, hangar_actions, sync_ship_name, rebuild_model, refresh_ui, draw_gizmos).chain().run_if(in_state(Screen::Hangar)))
             .add_systems(Update, keep_analysis);
     }
 }
@@ -49,6 +49,8 @@ const KEYS: [&str; 12] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-",
 
 #[derive(Resource)]
 pub struct Hangar {
+    /// All your ships; `design` is the selected one being edited, written back on every change.
+    pub fleet: settings::Fleet,
     pub design: Design,
     tool: Tool,
     ty: BlockType,
@@ -68,9 +70,11 @@ pub struct Hangar {
 
 impl Hangar {
     fn load() -> Self {
-        let design = settings::load_current().filter(|d| !d.blocks.is_empty()).unwrap_or_else(|| preset("falcon"));
+        let fleet = settings::load_fleet();
+        let design = fleet.ships[fleet.current].clone();
         let analysis = analyze(&design);
         Hangar {
+            fleet,
             design,
             tool: Tool::Place,
             ty: BlockType::Hull,
@@ -105,7 +109,50 @@ impl Hangar {
         self.analysis = analyze(&self.design);
         self.dirty = true;
         self.ui_dirty = true;
-        settings::save_current(&self.design);
+        self.fleet.ships[self.fleet.current] = self.design.clone();
+        settings::save_fleet(&self.fleet);
+    }
+
+    /// Switch to ship `i` (wrapping around). Undo history belongs to the ship left behind.
+    pub fn select(&mut self, i: isize) {
+        let n = self.fleet.ships.len() as isize;
+        self.fleet.current = i.rem_euclid(n) as usize;
+        self.design = self.fleet.ships[self.fleet.current].clone();
+        self.undo.clear();
+        self.redo.clear();
+        self.changed();
+    }
+
+    pub fn step(&mut self, by: isize) {
+        self.select(self.fleet.current as isize + by);
+    }
+
+    /// Add a ship (a blank one: just a cockpit) after the last and switch to it.
+    pub fn add_ship(&mut self, mut d: Design) {
+        if d.name.trim().is_empty() || self.fleet.ships.iter().any(|s| s.name == d.name) {
+            let base = if d.name.trim().is_empty() { "新机体".to_string() } else { d.name.clone() };
+            d.name = (1..).map(|k| format!("{base} {k}")).find(|n| !self.fleet.ships.iter().any(|s| &s.name == n)).unwrap();
+        }
+        self.fleet.ships.push(d);
+        self.select(self.fleet.ships.len() as isize - 1);
+    }
+
+    pub fn delete_current(&mut self) {
+        self.fleet.ships.remove(self.fleet.current);
+        if self.fleet.ships.is_empty() {
+            self.fleet.ships.push(Design { name: "新机体".into(), blocks: preset("blank").blocks });
+        }
+        self.select(self.fleet.current.min(self.fleet.ships.len() - 1) as isize);
+    }
+
+    /// Rename the selected ship (blank names are ignored).
+    fn rename(&mut self, name: &str) {
+        let n: String = name.trim().chars().take(14).collect();
+        if !n.is_empty() && n != self.design.name {
+            self.design.name = n;
+            self.fleet.ships[self.fleet.current] = self.design.clone();
+            settings::save_fleet(&self.fleet);
+        }
     }
 
     fn mirror_of(&self, c: IVec3) -> Option<IVec3> {
@@ -166,6 +213,22 @@ impl Hangar {
             self.design.blocks[j].color = self.color;
         }
         self.changed();
+    }
+
+    /// Move every block by `d`, unless that would push one off the build grid. The build layer
+    /// moves with the ship, so you keep building where you were.
+    fn nudge(&mut self, d: IVec3) -> Result<(), String> {
+        if self.design.blocks.iter().any(|b| !in_grid(b.pos() + d)) {
+            return Err("再移就超出搭建范围了".into());
+        }
+        self.push_undo();
+        for b in &mut self.design.blocks {
+            let p = b.pos() + d;
+            (b.x, b.y, b.z) = (p.x as i8, p.y as i8, p.z as i8);
+        }
+        self.layer = (self.layer + d.y).clamp(GMIN.y, GMAX.y);
+        self.changed();
+        Ok(())
     }
 
     /// Replace the design (keeps an undo step).
@@ -268,6 +331,7 @@ fn enter_hangar(
     mut images: ResMut<Assets<Image>>,
     cam: Single<(Entity, &mut Projection), With<MainCamera>>,
     thumbs: Res<PartThumbs>,
+    icons: Res<Icons>,
 ) {
     let (ce, mut proj) = cam.into_inner();
     commands.entity(ce).remove::<bevy::light::Skybox>();
@@ -293,22 +357,45 @@ fn enter_hangar(
         Ghost,
         scope.clone(),
     ));
-    spawn_ui(&mut commands, &font, &hangar, &thumbs);
+    spawn_ui(&mut commands, &font, &hangar, &thumbs, &icons);
     hangar.dirty = true;
     hangar.ui_dirty = true;
 }
 
 fn leave_hangar(fields: Query<&EditableText, With<NameField>>, mut hangar: ResMut<Hangar>) {
     if let Ok(e) = fields.single() {
-        let n = e.value().to_string();
-        if !n.trim().is_empty() && n != hangar.design.name {
-            hangar.design.name = n.trim().chars().take(14).collect();
-            settings::save_current(&hangar.design);
+        hangar.rename(&e.value().to_string());
+    }
+}
+
+/// The name field renames the ship as you type; switching ships puts the new name in it.
+fn sync_ship_name(mut fields: Query<&mut EditableText, With<NameField>>, mut hangar: ResMut<Hangar>, mut shown: Local<Option<usize>>, mut counter: Query<&mut Text, With<ShipCounter>>) {
+    let Ok(mut e) = fields.single_mut() else {
+        *shown = None;
+        return;
+    };
+    let at = hangar.fleet.current;
+    if *shown != Some(at) {
+        *shown = Some(at);
+        *e = EditableText { visible_width: e.visible_width, allow_newlines: false, ..EditableText::new(&hangar.design.name) };
+    } else {
+        let typed = e.value().to_string();
+        if typed.trim() != hangar.design.name {
+            hangar.rename(&typed);
+        }
+    }
+    let label = format!("{} / {}", at + 1, hangar.fleet.ships.len());
+    for mut t in &mut counter {
+        if t.0 != label {
+            t.0 = label.clone();
         }
     }
 }
 
-fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &PartThumbs) {
+#[derive(Component)]
+struct ShipCounter;
+
+fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &PartThumbs, icons: &Icons) {
     let f = font;
     let scope = DespawnOnExit(Screen::Hangar);
     let root = commands.spawn((Node { width: percent(100), height: percent(100), position_type: PositionType::Absolute, ..default() }, Pickable::IGNORE, IgnoreHover, scope)).id();
@@ -336,10 +423,18 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
     spawn_btn(commands, f, top, Kind::Ghost, "← 主菜单", UiAction::Goto(Screen::Menu), Some("Esc"));
     spawn_title(commands, f, top, "机库", "HANGAR");
     divider(commands);
+    // the ship carousel: ‹ name › 2 / 5, then a new ship and delete
+    let prev = spawn_icon_btn(commands, f, top, icons.left.clone(), UiAction::ShipPrev);
+    commands.entity(prev).insert(Tip("上一架  ,".into()));
     let nf = spawn_field(commands, f, top, &hangar.design.name, 9.0);
-    commands.entity(nf).insert((NameField, Node { padding: UiRect::axes(px(12), px(9)), width: px(160), min_width: px(96), flex_shrink: 1.0, ..default() }));
-    bar_btn(commands, Kind::Normal, "换一架…", UiAction::OpenLoad, None);
-    bar_btn(commands, Kind::Normal, "保存", UiAction::Save, None);
+    commands.entity(nf).insert((NameField, Node { padding: UiRect::axes(px(12), px(9)), width: px(150), min_width: px(96), flex_shrink: 1.0, ..default() }));
+    let next = spawn_icon_btn(commands, f, top, icons.right.clone(), UiAction::ShipNext);
+    commands.entity(next).insert(Tip("下一架  .".into()));
+    commands.spawn((tech(f, "", 12.0, MUTED), ShipCounter, Node { width: px(40), justify_content: JustifyContent::Center, ..default() }, TextLayout::justify(Justify::Center), ChildOf(top)));
+    let new = bar_btn(commands, Kind::Normal, "+ 新建", UiAction::NewShip, None);
+    commands.entity(new).insert(Tip("新建一架空白机体（只有驾驶舱）".into()));
+    let del = spawn_btn(commands, f, top, Kind::Icon, "×", UiAction::DeleteShip, None);
+    commands.entity(del).insert(Tip("删除这架机体".into()));
     divider(commands);
     let share = bar_btn(commands, Kind::Normal, "复制分享码", UiAction::CopyShare, None);
     commands.entity(share).insert(Tip("复制一段 VW1. 开头的文字，朋友粘贴就能得到同一架飞机（网页版也能用）".into()));
@@ -353,7 +448,7 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
     commands.entity(m).insert(Tip("开启后左右对称同时放置、擦除和喷漆".into()));
     bar_btn(commands, Kind::Danger, "清空", UiAction::Clear, None);
     divider(commands);
-    bar_btn(commands, Kind::Accent, "去出击 →", UiAction::Goto(Screen::Lobby), None);
+    bar_btn(commands, Kind::Accent, "开始游戏 →", UiAction::Goto(Screen::Lobby), None);
 
     let panel_top = bar_h + GAP;
     let (left_w, right_w) = (296.0, 344.0);
@@ -403,6 +498,19 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
     let up = spawn_btn(commands, f, lrow, Kind::Icon, "+", UiAction::Layer(1), None);
     commands.entity(up).insert(Tip("上移一层  ]".into()));
     commands.spawn((text(f, "空处放在这一层", 12.0, MUTED), Node { margin: UiRect::left(px(4)), ..default() }, ChildOf(lrow)));
+    let mv = spawn_section(commands, f, left, "整机平移|MOVE SHIP");
+    let mrow = commands.spawn((row(GAP_S), ChildOf(mv))).id();
+    for (label, d, tip) in [
+        ("←", (-1, 0, 0), "整机左移  Shift+←"),
+        ("→", (1, 0, 0), "整机右移  Shift+→"),
+        ("↑", (0, 1, 0), "整机上移  Shift+↑"),
+        ("↓", (0, -1, 0), "整机下移  Shift+↓"),
+        ("前", (0, 0, -1), "整机前移  Shift+["),
+        ("后", (0, 0, 1), "整机后移  Shift+]"),
+    ] {
+        let b = spawn_btn(commands, f, mrow, Kind::Icon, label, UiAction::Nudge(d.0, d.1, d.2), None);
+        commands.entity(b).insert(Tip(tip.into()));
+    }
 
     // right panel: preflight checks and performance
     let right = spawn_panel(commands, Some(root), Node { position_type: PositionType::Absolute, right: px(EDGE), top: px(panel_top), bottom: px(EDGE), width: px(right_w), padding: px(PAD).all(), flex_direction: FlexDirection::Column, row_gap: px(GAP), overflow: Overflow::scroll_y(), ..default() });
@@ -415,7 +523,7 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
     commands.spawn((col(GAP_S), CheckList, ChildOf(checks)));
     let perf = spawn_section(commands, f, right, "性能预估|PERFORMANCE");
     let mut bars = Vec::new();
-    for (l, c) in [("速度", ACCENT), ("俯仰", ACCENT), ("偏航", ACCENT), ("翻滚", ACCENT), ("火力", SIGNAL), ("持续", SIGNAL), ("耐久", OK), ("护盾", Color::srgb(0.4, 0.62, 1.0)), ("能量", WARN)] {
+    for (l, c) in [("造价", INK.with_alpha(0.7)), ("速度", ACCENT), ("俯仰", ACCENT), ("偏航", ACCENT), ("翻滚", ACCENT), ("火力", SIGNAL), ("持续", SIGNAL), ("耐久", OK), ("护盾", Color::srgb(0.4, 0.62, 1.0)), ("能量", WARN)] {
         bars.push(spawn_stat(commands, f, perf, l, c));
     }
     commands.insert_resource(StatBars(bars));
@@ -429,7 +537,7 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
             ChildOf(root),
         ))
         .id();
-    for (k, v) in [("左键", "放置"), ("右键", "删除"), ("左键拖动", "旋转"), ("右键拖动", "平移"), ("滚轮", "缩放"), ("Alt+点击", "吸取")] {
+    for (k, v) in [("左键", "放置"), ("右键", "删除"), ("左键拖动", "旋转"), ("右键拖动", "平移"), ("滚轮", "缩放"), ("Alt+点击", "吸取"), ("Shift+方向键", "平移整机")] {
         commands.spawn((row(6.0), ChildOf(hints), children![(Node { padding: UiRect::axes(px(6), px(1)), border: px(1).all(), ..default() }, BorderColor::all(LINE_HI), children![text(f, k, 11.0, MUTED)]), text(f, v, 12.0, INK.with_alpha(0.7))]));
     }
 }
@@ -579,8 +687,14 @@ fn edit_keys(keys: Res<ButtonInput<KeyCode>>, focus: Res<InputFocus>, editing: Q
         if keys.just_pressed(KeyCode::KeyY) {
             w.write(UiAction::Redo);
         }
-        if keys.just_pressed(KeyCode::KeyS) {
-            w.write(UiAction::Save);
+        return;
+    }
+    // Shift moves the whole ship: arrows for left/right and up/down, brackets for forward/back
+    if shift {
+        for (k, d) in [(KeyCode::ArrowLeft, (-1, 0, 0)), (KeyCode::ArrowRight, (1, 0, 0)), (KeyCode::ArrowUp, (0, 1, 0)), (KeyCode::ArrowDown, (0, -1, 0)), (KeyCode::BracketLeft, (0, 0, -1)), (KeyCode::BracketRight, (0, 0, 1))] {
+            if keys.just_pressed(k) {
+                w.write(UiAction::Nudge(d.0, d.1, d.2));
+            }
         }
         return;
     }
@@ -595,6 +709,8 @@ fn edit_keys(keys: Res<ButtonInput<KeyCode>>, focus: Res<InputFocus>, editing: Q
         (KeyCode::KeyX, UiAction::Tool(1)),
         (KeyCode::KeyG, UiAction::Tool(2)),
         (KeyCode::KeyM, UiAction::Mirror),
+        (KeyCode::Comma, UiAction::ShipPrev),
+        (KeyCode::Period, UiAction::ShipNext),
         (KeyCode::BracketLeft, UiAction::Layer(-1)),
         (KeyCode::BracketRight, UiAction::Layer(1)),
         (KeyCode::Escape, UiAction::Goto(Screen::Menu)),
@@ -606,7 +722,7 @@ fn edit_keys(keys: Res<ButtonInput<KeyCode>>, focus: Res<InputFocus>, editing: Q
 }
 
 #[allow(clippy::too_many_arguments)]
-fn hangar_actions(mut msgs: MessageReader<UiAction>, mut hangar: ResMut<Hangar>, mut toasts: ResMut<Toasts>, mut modal: ResMut<ModalReq>, name: Query<&EditableText, With<NameField>>) {
+fn hangar_actions(mut msgs: MessageReader<UiAction>, mut hangar: ResMut<Hangar>, mut toasts: ResMut<Toasts>, mut modal: ResMut<ModalReq>) {
     for m in msgs.read() {
         match m.clone() {
             UiAction::SelectType(t) => {
@@ -621,6 +737,11 @@ fn hangar_actions(mut msgs: MessageReader<UiAction>, mut hangar: ResMut<Hangar>,
                 }
             }
             UiAction::Layer(d) => hangar.layer = (hangar.layer + d).clamp(GMIN.y, GMAX.y),
+            UiAction::Nudge(x, y, z) => {
+                if let Err(why) = hangar.nudge(IVec3::new(x as i32, y as i32, z as i32)) {
+                    toasts.push(why, ToastKind::Warn);
+                }
+            }
             UiAction::Undo => {
                 if let Some(prev) = hangar.undo.pop() {
                     let cur = std::mem::replace(&mut hangar.design.blocks, prev);
@@ -647,16 +768,6 @@ fn hangar_actions(mut msgs: MessageReader<UiAction>, mut hangar: ResMut<Hangar>,
                 let name = hangar.design.name.clone();
                 hangar.load_design(Design { name, blocks: preset("blank").blocks });
             }
-            UiAction::Save => {
-                if let Ok(e) = name.single() {
-                    hangar.design.name = e.value().to_string().trim().chars().take(14).collect();
-                }
-                let n = hangar.design.sanitized_name();
-                hangar.design.name = n.clone();
-                settings::save_design(&hangar.design);
-                settings::save_current(&hangar.design);
-                toasts.push(format!("已保存「{n}」，可以在「换一架…」里找到"), ToastKind::Ok);
-            }
             UiAction::CopyShare => {
                 let code = settings::encode_share(&hangar.design);
                 match arboard::Clipboard::new().and_then(|mut c| c.set_text(code)) {
@@ -667,8 +778,8 @@ fn hangar_actions(mut msgs: MessageReader<UiAction>, mut hangar: ResMut<Hangar>,
             UiAction::PasteShare => match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                 Ok(t) => match settings::decode_share(&t) {
                     Ok(d) => {
-                        toasts.push(format!("已导入「{}」", d.name), ToastKind::Ok);
-                        hangar.load_design(d);
+                        toasts.push(format!("已导入「{}」，放在最后一架", d.name), ToastKind::Ok);
+                        hangar.add_ship(d);
                     }
                     Err(e) => toasts.push(format!("剪贴板里不是有效的分享码：{e}"), ToastKind::Warn),
                 },
@@ -770,6 +881,7 @@ fn refresh_ui(
     commands.spawn((chip(f, st, sc), ChildOf(*summary)));
 
     let vals = [
+        (s.cost / 350.0, crate::screens::lobby::cost_label(s.cost)),
         (s.max_speed / 125.0, format!("{:.0} m/s", s.max_speed)),
         (s.pitch_rate / 2.0, format!("{:.0} 度/秒", s.pitch_rate.to_degrees())),
         (s.yaw_rate / 1.7, format!("{:.0} 度/秒", s.yaw_rate.to_degrees())),
@@ -826,7 +938,7 @@ fn part_detail(t: BlockType) -> String {
         })
         .unwrap_or_default();
     let weapon = if t.thrust() > 0.0 { format!("{weapon} · 推力 {:.0}", t.thrust()) } else { weapon };
-    format!("质量 {} · 耐久 {}{}\n{}", i.mass, i.hp, weapon, i.info)
+    format!("造价 {} · 质量 {} · 耐久 {}{}\n{}", i.cost, i.mass, i.hp, weapon, i.info)
 }
 
 fn col_text(f: &UiFont, title: &str, msg: &str, ok: bool) -> impl Bundle {

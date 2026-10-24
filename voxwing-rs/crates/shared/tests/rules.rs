@@ -112,12 +112,22 @@ fn protocol_roundtrip() {
 
 #[test]
 fn spectators_join_with_their_own_message() {
-    let w = ClientMsg::Watch { version: voxwing_shared::PROTOCOL_VERSION, name: "看客".into() };
+    let w = ClientMsg::Watch { version: voxwing_shared::PROTOCOL_VERSION, name: "看客".into(), balance: voxwing_shared::balance::hash() };
     match decode::<ClientMsg>(&encode(&w)).unwrap() {
         ClientMsg::Watch { name, .. } => assert_eq!(name, "看客"),
         _ => panic!(),
     }
-    // a pilot's hello is unchanged, so an older client still gets a readable version mismatch
-    let h = ClientMsg::Hello { version: 1, name: "x".into(), design: preset("falcon") };
-    assert!(matches!(decode::<ClientMsg>(&encode(&h)), Some(ClientMsg::Hello { version: 1, .. })));
+    // every hello starts with its version, so even one this build can't parse says which it is
+    let h = ClientMsg::Hello { version: 7, name: "x".into(), balance: 1 };
+    assert_eq!(hello_version(&encode(&h)), Some(7));
+    // a version 3 client's hello still carried its ship
+    #[derive(serde::Serialize)]
+    enum OldHello {
+        Hello { version: u32, name: String, design: voxwing_shared::blocks::Design, balance: u64 },
+    }
+    let old = encode(&OldHello::Hello { version: 3, name: "x".into(), design: preset("falcon"), balance: 1 });
+    assert!(decode::<ClientMsg>(&old).is_none_or(|m| !matches!(m, ClientMsg::Hello { version: 4.., .. })));
+    assert_eq!(hello_version(&old), Some(3));
+    let w = ClientMsg::Watch { version: 9, name: "x".into(), balance: 1 };
+    assert_eq!(hello_version(&encode(&w)), Some(9));
 }
