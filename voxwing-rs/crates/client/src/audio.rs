@@ -110,7 +110,12 @@ fn mix(a: Vec<f32>, b: Vec<f32>) -> Vec<f32> {
     (0..n).map(|i| a.get(i).copied().unwrap_or(0.0) + b.get(i).copied().unwrap_or(0.0)).collect()
 }
 
-pub fn build_sounds(mut commands: Commands, mut assets: ResMut<Assets<AudioSource>>, settings: Res<crate::settings::Settings>) {
+pub fn build_sounds(mut commands: Commands, assets: Option<ResMut<Assets<AudioSource>>>, settings: Res<crate::settings::Settings>, dev: Res<crate::DevOpts>) {
+    // muted (test runs): no audio at all
+    let Some(mut assets) = assets.filter(|_| !dev.mute) else {
+        commands.insert_resource(Sounds { map: Default::default(), hum: Handle::default(), enabled: false, volume: 0.0, last: Default::default() });
+        return;
+    };
     let mut map = std::collections::HashMap::new();
     let mut add = |k: Sfx, s: Vec<f32>| {
         map.insert(k, assets.add(AudioSource { bytes: wav(&s) }));

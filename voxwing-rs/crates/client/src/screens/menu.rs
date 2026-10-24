@@ -1,12 +1,12 @@
-//! The lobby, the game's main screen: your ship on display (‹ › to flip through your ships, + for a
-//! new one), the mode and budget to play, and matchmaking. The queue runs right here; when the
-//! server finds a match the ship pick takes over.
+//! The lobby, the game's main screen: your ships in a carousel (carousel.rs), the mode and budget to
+//! play, and matchmaking. The queue runs right here; when the server finds a match the ship pick
+//! takes over.
 
 use super::Overlays;
+use super::carousel::Carousel;
 use crate::flight::Session;
 use crate::hangar::Hangar;
 use crate::settings::{self, Settings};
-use crate::ui::icons::Icons;
 use crate::ui::kit::*;
 use crate::ui::*;
 use crate::{DevOpts, Hosted, LastError, Screen};
@@ -92,7 +92,7 @@ fn spawn_menu(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>
     let play = spawn_panel(&mut commands, Some(root), Node { position_type: PositionType::Absolute, left: px(EDGE), bottom: px(EDGE), width: px(380), padding: px(PAD).all(), flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() });
     commands.entity(play).insert((PlayBox, SlideIn::new(0.1, -40.0, 0.0)));
 
-    // bottom centre: ‹ ship › +
+    // bottom centre: the name of the ship in view
     commands.spawn((
         Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(EDGE), justify_content: JustifyContent::Center, ..default() },
         Pickable::IGNORE,
@@ -106,29 +106,38 @@ fn spawn_menu(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>
     commands.entity(stats).insert((StatsCard, SlideIn::new(0.2, 40.0, 0.0)));
 }
 
-/// The ship bar and the numbers card follow the ship on display.
+/// The name bar and the numbers card follow the carousel.
 #[allow(clippy::too_many_arguments)]
 fn refresh_ship(
     mut commands: Commands,
     hangar: Res<Hangar>,
     settings: Res<Settings>,
+    car: Res<Carousel>,
     font: Res<UiFont>,
-    icons: Res<Icons>,
     bar: Single<Entity, With<ShipBar>>,
     card: Single<Entity, With<StatsCard>>,
     added: Query<(), Added<ShipBar>>,
 ) {
-    if !hangar.is_changed() && !settings.is_changed() && added.is_empty() {
+    if !hangar.is_changed() && !settings.is_changed() && !car.is_changed() && added.is_empty() {
         return;
     }
     let f = &*font;
     let a = &hangar.analysis;
     let s = &a.stats;
-
     let bar = *bar;
+    let card = *card;
     commands.entity(bar).despawn_children();
-    spawn_icon_btn(&mut commands, f, bar, icons.left.clone(), UiAction::ShipPrev);
-    let mid = commands.spawn((Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(4), min_width: px(240), padding: UiRect::horizontal(px(12)), ..default() }, ChildOf(bar))).id();
+    commands.entity(card).despawn_children();
+    let mid = commands.spawn((Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(4), ..default() }, ChildOf(bar))).id();
+
+    // a "new ship" slot: what it would make
+    if car.new_slot(hangar.fleet.ships.len()).is_some() {
+        commands.spawn((heading(f, "新建机体", 28.0, INK), ChildOf(mid)));
+        commands.spawn((text(f, format!("机库里有 {} 架 · 点中间的卡片新建一架", hangar.fleet.ships.len()), 13.0, MUTED), ChildOf(mid)));
+        let sec = spawn_section(&mut commands, f, card, "新建机体|NEW SHIP");
+        commands.spawn((para(f, "空白机体只有一个驾驶舱。新建后进入机库，拼上引擎、机翼和武器，通过起飞检查就能出击。", 13.0, MUTED), ChildOf(sec)));
+        return;
+    }
     commands.spawn((heading(f, hangar.design.name.clone(), 28.0, INK), ChildOf(mid)));
     let line = commands.spawn((row(GAP_S), ChildOf(mid))).id();
     if a.ok() {
@@ -138,12 +147,7 @@ fn refresh_ship(
     }
     commands.spawn((tech(f, cost_label(s.cost), 13.0, MUTED), ChildOf(line)));
     commands.spawn((tech(f, format!("{} / {}", hangar.fleet.current + 1, hangar.fleet.ships.len()), 13.0, MUTED), ChildOf(line)));
-    spawn_icon_btn(&mut commands, f, bar, icons.right.clone(), UiAction::ShipNext);
-    let new = spawn_btn(&mut commands, f, bar, Kind::Normal, "+ 新建", UiAction::NewShip, None);
-    commands.entity(new).insert(Tip("新建一架空白机体，然后在机库里拼装".into()));
 
-    let card = *card;
-    commands.entity(card).despawn_children();
     let sec = spawn_section(&mut commands, f, card, "当前机体|CURRENT SHIP");
     let budget = voxwing_shared::balance::balance().tier(&settings.host_budget).map_or(350.0, |t| t.budget);
     for (label, frac, val, c) in [
@@ -378,7 +382,14 @@ fn menu_keys(
     dev: Res<DevOpts>,
     time: Res<Time>,
     mut auto: Local<bool>,
+    mut stepped: Local<f32>,
 ) {
+    // dev: slide the carousel right every 2 seconds (screenshots of the slide)
+    let now = time.elapsed_secs();
+    if dev.forced("next", now) && now - *stepped > 2.0 {
+        *stepped = now;
+        w.write(UiAction::CarouselStep(1));
+    }
     if !*auto && time.elapsed_secs() > 1.5 {
         *auto = true;
         match dev.auto_launch.as_deref() {
@@ -409,10 +420,10 @@ fn menu_keys(
         (KeyCode::KeyH, UiAction::Goto(Screen::Hangar)),
         (KeyCode::KeyS, UiAction::OpenSettings),
         (KeyCode::KeyV, UiAction::Watch),
-        (KeyCode::ArrowLeft, UiAction::ShipPrev),
-        (KeyCode::Comma, UiAction::ShipPrev),
-        (KeyCode::ArrowRight, UiAction::ShipNext),
-        (KeyCode::Period, UiAction::ShipNext),
+        (KeyCode::ArrowLeft, UiAction::CarouselStep(-1)),
+        (KeyCode::Comma, UiAction::CarouselStep(-1)),
+        (KeyCode::ArrowRight, UiAction::CarouselStep(1)),
+        (KeyCode::Period, UiAction::CarouselStep(1)),
     ] {
         if keys.just_pressed(k) {
             w.write(a);

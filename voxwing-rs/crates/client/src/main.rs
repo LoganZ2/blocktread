@@ -72,6 +72,8 @@ pub struct DevOpts {
     pub port: Option<u16>,
     /// Log frame pacing stats every 5 seconds.
     pub frame_stats: bool,
+    /// No sound at all, not even an audio device (`--mute`, and every `--offscreen` test run).
+    pub mute: bool,
 }
 
 impl DevOpts {
@@ -82,7 +84,7 @@ impl DevOpts {
 
 const USAGE: &str = "用法: voxwing-client [--name 名字] [--server 地址:端口|local]
 开发用: [--launch ffa|2v2|watch] [--local] [--autopilot] [--latency 毫秒] [--screen error|hangar|settings]
-       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|tip|revert:秒] [--frame-stats] [--port 端口]";
+       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|tip|revert|next:秒] [--frame-stats] [--port 端口] [--mute]";
 
 fn main() {
     let mut s = settings::load_settings();
@@ -100,7 +102,12 @@ fn main() {
             "--exit" => dev.exit_after_shot = true,
             "--local" => dev.local_only = true,
             "--screen" => dev.start = a.next(),
-            "--offscreen" => dev.offscreen = true,
+            "--offscreen" => {
+                // test runs stay silent
+                dev.offscreen = true;
+                dev.mute = true;
+            }
+            "--mute" => dev.mute = true,
             "--frame-stats" => dev.frame_stats = true,
             "--port" => dev.port = a.next().and_then(|v| v.parse().ok()),
             "--force" => dev.force = a.next().and_then(|v| v.split_once(':').and_then(|(w, t)| Some((w.to_string(), t.parse().ok()?)))),
@@ -116,13 +123,19 @@ fn main() {
             }
         }
     }
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+    let mut plugins = DefaultPlugins
+        .set(WindowPlugin {
             // opens at the saved size and mode; offscreen test runs render into an image, so their
             // window stays hidden and windowed
             primary_window: Some(display::initial_window(&s, dev.offscreen)),
             ..default()
-        }))
+        })
+        .build();
+    if dev.mute {
+        plugins = plugins.disable::<bevy::audio::AudioPlugin>();
+    }
+    App::new()
+        .add_plugins(plugins)
         .insert_resource(ClearColor(Color::srgb(0.024, 0.04, 0.07)))
         .insert_resource(s)
         .insert_resource(dev)

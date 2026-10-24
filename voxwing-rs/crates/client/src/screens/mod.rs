@@ -2,6 +2,7 @@
 //! hangar and settings reachable from the lobby. This module holds what several screens share: the 3D ship showcase,
 //! navigation and design-picking actions, the settings overlay and the FPS readout.
 
+pub mod carousel;
 pub mod matching;
 pub mod menu;
 
@@ -27,16 +28,15 @@ pub struct ScreensPlugin;
 
 impl Plugin for ScreensPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((menu::MenuPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
+        app.add_plugins((menu::MenuPlugin, carousel::CarouselPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
             .init_resource::<Overlays>()
             .init_resource::<Showcase>()
-            .add_systems(OnEnter(Screen::Menu), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
-                spawn_showcase(c, a, s, art, m, h, cam, Screen::Menu)
-            })
+            // the lobby's ships are the carousel's
+            .add_systems(OnEnter(Screen::Menu), |mut c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| spawn_stage(&mut c, &a, &s, cam, Screen::Menu))
             .add_systems(OnEnter(Screen::Match), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
                 spawn_showcase(c, a, s, art, m, h, cam, Screen::Match)
             })
-            .add_systems(Update, showcase_turn.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Match)))
+            .add_systems(Update, showcase_turn.run_if(in_state(Screen::Match)))
             .add_systems(Update, (global_actions, refresh_showcase, render_settings, display_banner, apply_settings, fps_text));
     }
 }
@@ -74,13 +74,18 @@ fn spawn_showcase(
     cam: Single<(Entity, &mut Projection), With<MainCamera>>,
     screen: Screen,
 ) {
+    spawn_stage(&mut commands, &env_assets, &sky, cam, screen.clone());
+    spawn_showcase_ship(&mut commands, &mut art, &mut mats, &hangar.design, screen);
+}
+
+/// The backdrop ships are shown against: sky, asteroids, the camera's lens.
+fn spawn_stage(commands: &mut Commands, env_assets: &EnvAssets, sky: &SkyImage, cam: Single<(Entity, &mut Projection), With<MainCamera>>, screen: Screen) {
     let (ce, mut proj) = cam.into_inner();
     commands.entity(ce).insert(Skybox { image: Some(sky.0.clone()), brightness: 1200.0, ..default() });
     if let Projection::Perspective(p) = &mut *proj {
         p.fov = 38f32.to_radians();
     }
-    env::spawn_env(&mut commands, &env_assets, screen.clone(), Vec3::ZERO);
-    spawn_showcase_ship(&mut commands, &mut art, &mut mats, &hangar.design, screen);
+    env::spawn_env(commands, env_assets, screen, Vec3::ZERO);
 }
 
 fn spawn_showcase_ship(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<StandardMaterial>, design: &Design, screen: Screen) {
@@ -112,18 +117,13 @@ fn refresh_showcase(
     spawn_showcase_ship(&mut commands, &mut art, &mut mats, over.0.as_ref().unwrap_or(&hangar.design), state.get().clone());
 }
 
-fn showcase_turn(time: Res<Time>, state: Res<State<Screen>>, mut ship: Query<(&mut Transform, &ShowcaseShip), Without<MainCamera>>, mut cam: Single<&mut Transform, With<MainCamera>>) {
+fn showcase_turn(time: Res<Time>, mut ship: Query<(&mut Transform, &ShowcaseShip), Without<MainCamera>>, mut cam: Single<&mut Transform, With<MainCamera>>) {
     let t = time.elapsed_secs();
     let Ok((mut st, s)) = ship.single_mut() else { return };
     st.rotation = Quat::from_rotation_y(t * 0.22 + 2.4) * Quat::from_rotation_x(0.08 * (t * 0.5).sin());
     st.translation = Vec3::Y * (t * 0.8).sin() * 0.25;
-    // the lobby makes the ship the centrepiece: closer than elsewhere
-    let dist = if *state.get() == Screen::Menu { s.0 * 3.0 + 11.0 } else { s.0 * 3.6 + 18.0 };
-    let target = match state.get() {
-        // the lobby: centred, a little high, above the ship bar
-        Screen::Menu => Vec3::new(0.0, -s.0 * 0.3 - 1.0, 0.0),
-        _ => Vec3::new(s.0 * 0.15, 0.6, 0.0),
-    };
+    let dist = s.0 * 3.6 + 18.0;
+    let target = Vec3::new(s.0 * 0.15, 0.6, 0.0);
     let sway = Vec3::new((t * 0.1).sin() * 2.0, 0.0, 0.0);
     **cam = Transform::from_translation(target + Vec3::new(0.0, dist * 0.22, dist) + sway).looking_at(target, Vec3::Y);
 }
@@ -370,6 +370,7 @@ fn display_banner(revert: Res<DisplayRevert>, time: Res<Time>, mut bars: Query<&
 
 fn apply_settings(
     settings: Res<Settings>,
+    dev: Res<crate::DevOpts>,
     mut sounds: ResMut<Sounds>,
     mut commands: Commands,
     cam: Single<(Entity, Has<Bloom>), With<MainCamera>>,
@@ -377,7 +378,7 @@ fn apply_settings(
     if !settings.is_changed() {
         return;
     }
-    sounds.enabled = settings.sound;
+    sounds.enabled = settings.sound && !dev.mute;
     sounds.volume = settings.volume;
     let (ce, has_bloom) = *cam;
     if settings.bloom && !has_bloom {

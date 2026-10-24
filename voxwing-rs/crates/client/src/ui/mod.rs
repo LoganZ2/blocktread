@@ -172,6 +172,10 @@ pub enum UiAction {
     HostMode(&'static str),
     /// Budget tier to queue in (a `balance.ron` key, empty = no limit).
     HostBudget(String),
+    /// The lobby's ship carousel: slide one slot left (-1) or right (1).
+    CarouselStep(i8),
+    /// Add a blank ship at the front (true) or back of the fleet and open it in the hangar.
+    NewShipAt(bool),
     /// Start matchmaking, or cancel it while queued.
     Launch,
     /// Spectate instead of play.
