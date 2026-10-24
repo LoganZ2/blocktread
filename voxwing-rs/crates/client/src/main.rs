@@ -36,7 +36,7 @@ pub enum Screen {
 pub struct MainCamera;
 
 /// The game server matchmaking connects to (`--server` overrides it).
-pub const SERVER: &str = "38.76.173.217:4433";
+pub const SERVER: &str = "38.92.8.110:4433";
 
 /// The server this client runs under `--server local`, if any. Kept alive across matches.
 #[derive(Resource, Default)]
