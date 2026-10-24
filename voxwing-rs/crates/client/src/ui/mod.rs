@@ -175,6 +175,8 @@ pub enum UiAction {
     HostBudget(String),
     /// The server to play on (a `REGIONS` key), on the entry page.
     Region(&'static str),
+    /// Open or close the entry page's server list.
+    ServerList,
     /// Into the lobby, on the server picked.
     StartGame,
     /// The lobby's ship carousel: slide one slot left (-1) or right (1).

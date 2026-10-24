@@ -1,8 +1,10 @@
-//! The entry page, first after starting the game: pick the server to play on, each with its live
-//! ping, then 开始游戏 into the lobby. The lobby plays on that server; its 更换 comes back here.
+//! The entry page, first after starting the game: pick the server to play on from a dropdown
+//! (each server with its live ping), then 开始游戏 into the lobby. The lobby plays on that server;
+//! its 更换 comes back here.
 
 use super::Overlays;
 use crate::settings::{self, Settings};
+use crate::ui::icons::Icons;
 use crate::ui::kit::*;
 use crate::ui::*;
 use crate::{MainCamera, REGIONS, Region, Screen};
@@ -16,11 +18,12 @@ pub struct EntryPlugin;
 impl Plugin for EntryPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Chosen>()
+            .init_resource::<ListOpen>()
             // pings run on this page and in the lobby, not in the hangar or a match
             .add_systems(OnEnter(Screen::Entry), (start_pings, spawn_entry))
             .add_systems(OnEnter(Screen::Menu), start_pings)
             .add_systems(OnExit(Screen::Menu), |mut c: Commands| c.remove_resource::<Pings>())
-            .add_systems(Update, (entry_actions, entry_keys, refresh_cards, drift).chain().run_if(in_state(Screen::Entry)))
+            .add_systems(Update, (entry_actions, entry_keys, refresh_select, drift).chain().run_if(in_state(Screen::Entry)))
             .add_systems(Update, ping_labels.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Entry | Screen::Menu)));
     }
 }
@@ -85,15 +88,36 @@ fn ping_labels(pings: Option<Res<Pings>>, mut labels: Query<(&mut Text, &mut Tex
     }
 }
 
-/// The card picked on this page; None follows the saved choice, or the fastest server.
+/// The server picked on this page; None follows the saved choice, or the fastest server.
 #[derive(Resource, Default)]
 struct Chosen(Option<usize>);
 
-#[derive(Component)]
-struct ServerCard(usize);
+/// Whether the dropdown's list is open.
+#[derive(Resource, Default)]
+struct ListOpen(bool);
 
-fn spawn_entry(mut commands: Commands, font: Res<UiFont>, mut chosen: ResMut<Chosen>) {
+/// The dropdown's closed face: the server picked, its ping, the arrow.
+#[derive(Component)]
+struct SelectName;
+#[derive(Component)]
+struct SelectPing;
+#[derive(Component)]
+struct SelectArrow;
+/// The list under it, and one line of it per server.
+#[derive(Component)]
+struct SelectList;
+#[derive(Component)]
+struct SelectItem(usize);
+/// The accent bar on the list line of the server picked.
+#[derive(Component)]
+struct ItemMark(usize);
+
+/// Width of the server picker and the start button.
+const COLUMN: f32 = 480.0;
+
+fn spawn_entry(mut commands: Commands, font: Res<UiFont>, icons: Res<Icons>, mut chosen: ResMut<Chosen>, mut open: ResMut<ListOpen>) {
     chosen.0 = None;
+    open.0 = false;
     let f = &*font;
     let scope = DespawnOnExit(Screen::Entry);
     let root = commands
@@ -114,18 +138,49 @@ fn spawn_entry(mut commands: Commands, font: Res<UiFont>, mut chosen: ResMut<Cho
     commands.spawn((display(f, "体素星翼", 112.0, INK), LetterSpacing::Px(4.0), ChildOf(head)));
     commands.spawn((text(f, "用方块拼出你的战机，在小行星带里和朋友空战", 16.0, MUTED), ChildOf(head)));
 
-    // servers, then start
-    let body = commands.spawn((Node { width: px(640), flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() }, SlideIn::new(0.1, 0.0, 24.0), ChildOf(root))).id();
-    spawn_header(&mut commands, f, body, "选择服务器|SERVER");
-    let cards = commands.spawn((Node { column_gap: px(GAP), ..default() }, ChildOf(body))).id();
+    // the server dropdown, then start
+    let body = commands.spawn((Node { width: px(COLUMN), flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() }, SlideIn::new(0.1, 0.0, 24.0), ChildOf(root))).id();
+    spawn_header(&mut commands, f, body, "服务器|SERVER");
+    // the field and its list share a holder, so the list can hang under the field over the rest
+    let holder = commands.spawn((Node { flex_direction: FlexDirection::Column, ..default() }, ChildOf(body))).id();
+    let field = spawn_btn(&mut commands, f, holder, Kind::Normal, "", UiAction::ServerList, None);
+    commands.entity(field).insert(Node { height: px(H_LG), padding: UiRect::horizontal(px(16)), justify_content: JustifyContent::FlexStart, column_gap: px(12), ..btn_node(Kind::Normal) });
+    commands.spawn((text(f, "", 16.0, INK), SelectName, Pickable::IGNORE, ChildOf(field)));
+    commands.spawn((Node { flex_grow: 1.0, ..default() }, Pickable::IGNORE, ChildOf(field)));
+    commands.spawn((tech(f, "…", 15.0, MUTED), SelectPing, Pickable::IGNORE, ChildOf(field)));
+    commands.spawn((
+        ImageNode { image: icons.right.clone(), color: MUTED, ..default() },
+        Node { width: px(14), height: px(14), ..default() },
+        UiTransform { rotation: Rot2::degrees(90.0), ..default() },
+        SelectArrow,
+        Pickable::IGNORE,
+        ChildOf(field),
+    ));
+    let list = commands
+        .spawn((
+            Node { display: Display::None, position_type: PositionType::Absolute, top: px(H_LG + 4.0), left: px(0), right: px(0), flex_direction: FlexDirection::Column, padding: px(4).all(), ..default() },
+            solid_plate(),
+            GlobalZIndex(20),
+            SelectList,
+            ChildOf(holder),
+        ))
+        .id();
     for (i, r) in REGIONS.iter().enumerate() {
-        let card = spawn_btn(&mut commands, f, cards, Kind::Card, r.name, UiAction::Region(r.key), None);
-        commands.entity(card).insert((ServerCard(i), Node { flex_grow: 1.0, flex_basis: px(0), padding: px(20).all(), row_gap: px(10), ..btn_node(Kind::Card) }));
-        commands.spawn((tech(f, r.code, 12.0, MUTED), LetterSpacing::Px(4.0), Node { position_type: PositionType::Absolute, right: px(20), top: px(24), ..default() }, Pickable::IGNORE, ChildOf(card)));
-        commands.spawn((tech(f, "…", 34.0, MUTED), RegionPing(i), Pickable::IGNORE, ChildOf(card)));
-        commands.spawn((tech(f, r.addr, 11.0, MUTED), LetterSpacing::Px(1.0), Pickable::IGNORE, ChildOf(card)));
+        let item = spawn_btn(&mut commands, f, list, Kind::Ghost, format!("{} {}", r.name, r.code), UiAction::Region(r.key), None);
+        commands.entity(item).insert((SelectItem(i), Node { height: px(44), padding: UiRect::horizontal(px(12)), justify_content: JustifyContent::FlexStart, column_gap: px(12), ..btn_node(Kind::Ghost) }));
+        commands.spawn((
+            Node { position_type: PositionType::Absolute, left: px(0), top: px(10), bottom: px(10), width: px(3), ..default() },
+            BackgroundColor(ACCENT),
+            Visibility::Hidden,
+            ItemMark(i),
+            Pickable::IGNORE,
+            ChildOf(item),
+        ));
+        commands.spawn((Node { flex_grow: 1.0, ..default() }, Pickable::IGNORE, ChildOf(item)));
+        commands.spawn((tech(f, r.addr, 11.0, MUTED), LetterSpacing::Px(1.0), Pickable::IGNORE, ChildOf(item)));
+        commands.spawn((tech(f, "…", 14.0, MUTED), RegionPing(i), Node { width: px(64), justify_content: JustifyContent::FlexEnd, ..default() }, TextLayout::justify(Justify::Right), Pickable::IGNORE, ChildOf(item)));
     }
-    commands.spawn((para(f, "延迟每 3 秒刷新一次。选离你近、延迟低的服务器，同一个服务器上的玩家会被匹配到一起。", 12.0, MUTED), ChildOf(body)));
+    commands.spawn((para(f, "选延迟低的服务器。同一服务器上的玩家会匹配到一起。", 12.0, MUTED), ChildOf(body)));
     let go = spawn_btn(&mut commands, f, body, Kind::Primary, "开始游戏", UiAction::StartGame, Some("Enter"));
     commands.entity(go).insert(bevy::input_focus::AutoFocus);
 
@@ -146,19 +201,71 @@ fn current(chosen: &Chosen, settings: &Settings, pings: Option<&Pings>) -> usize
     chosen.0.unwrap_or_else(|| region(settings, pings))
 }
 
-fn refresh_cards(chosen: Res<Chosen>, settings: Res<Settings>, pings: Option<Res<Pings>>, mut cards: Query<(&ServerCard, &mut Selected)>) {
+/// The dropdown: the picked server and its ping on the face, the list shown while open.
+#[allow(clippy::type_complexity)]
+fn refresh_select(
+    chosen: Res<Chosen>,
+    open: Res<ListOpen>,
+    settings: Res<Settings>,
+    pings: Option<Res<Pings>>,
+    mut name: Query<&mut Text, (With<SelectName>, Without<SelectPing>)>,
+    mut ping_face: Query<(&mut Text, &mut TextColor), (With<SelectPing>, Without<SelectName>)>,
+    mut arrow: Query<&mut UiTransform, With<SelectArrow>>,
+    mut list: Query<&mut Node, With<SelectList>>,
+    mut items: Query<(&SelectItem, &mut Selected)>,
+    mut marks: Query<(&ItemMark, &mut Visibility)>,
+) {
     let at = current(&chosen, &settings, pings.as_deref());
-    for (c, mut sel) in &mut cards {
-        if sel.0 != (c.0 == at) {
-            sel.0 = c.0 == at;
+    let r = &REGIONS[at];
+    let label = format!("{} {}", r.name, r.code);
+    for mut t in &mut name {
+        if t.0 != label {
+            t.0 = label.clone();
+        }
+    }
+    let (s, color) = ping_text(ping(pings.as_deref(), at));
+    for (mut t, mut c) in &mut ping_face {
+        if t.0 != s {
+            t.0 = s.clone();
+        }
+        if c.0 != color {
+            c.0 = color;
+        }
+    }
+    // the arrow points down while closed, up while open
+    let turn = Rot2::degrees(if open.0 { -90.0 } else { 90.0 });
+    for mut tr in &mut arrow {
+        if tr.rotation != turn {
+            tr.rotation = turn;
+        }
+    }
+    let shown = if open.0 { Display::Flex } else { Display::None };
+    for mut n in &mut list {
+        if n.display != shown {
+            n.display = shown;
+        }
+    }
+    for (item, mut sel) in &mut items {
+        if sel.0 != (item.0 == at) {
+            sel.0 = item.0 == at;
+        }
+    }
+    for (m, mut vis) in &mut marks {
+        let want = if m.0 == at { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
         }
     }
 }
 
-fn entry_actions(mut msgs: MessageReader<UiAction>, mut chosen: ResMut<Chosen>, mut settings: ResMut<Settings>, pings: Option<Res<Pings>>, mut next: ResMut<NextState<Screen>>) {
+fn entry_actions(mut msgs: MessageReader<UiAction>, mut chosen: ResMut<Chosen>, mut open: ResMut<ListOpen>, mut settings: ResMut<Settings>, pings: Option<Res<Pings>>, mut next: ResMut<NextState<Screen>>) {
     for m in msgs.read() {
         match m {
-            UiAction::Region(k) => chosen.0 = REGIONS.iter().position(|r| r.key == *k),
+            UiAction::ServerList => open.0 = !open.0,
+            UiAction::Region(k) => {
+                chosen.0 = REGIONS.iter().position(|r| r.key == *k);
+                open.0 = false;
+            }
             UiAction::StartGame => {
                 let at = current(&chosen, &settings, pings.as_deref());
                 let r: &Region = &REGIONS[at];
@@ -171,24 +278,52 @@ fn entry_actions(mut msgs: MessageReader<UiAction>, mut chosen: ResMut<Chosen>, 
     }
 }
 
-fn entry_keys(keys: Res<ButtonInput<KeyCode>>, overlays: Res<Overlays>, modal: Res<ModalReq>, mut chosen: ResMut<Chosen>, settings: Res<Settings>, pings: Option<Res<Pings>>, mut w: MessageWriter<UiAction>) {
+#[allow(clippy::too_many_arguments)]
+fn entry_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    overlays: Res<Overlays>,
+    modal: Res<ModalReq>,
+    mut chosen: ResMut<Chosen>,
+    mut open: ResMut<ListOpen>,
+    settings: Res<Settings>,
+    pings: Option<Res<Pings>>,
+    mut w: MessageWriter<UiAction>,
+    dev: Res<crate::DevOpts>,
+    time: Res<Time>,
+    mut forced: Local<bool>,
+) {
+    // dev: open the list (offscreen screenshots have no pointer)
+    if !*forced && dev.forced("serverlist", time.elapsed_secs()) {
+        *forced = true;
+        open.0 = true;
+    }
     if overlays.any(&modal) {
         return;
     }
-    let step = keys.any_just_pressed([KeyCode::ArrowRight, KeyCode::KeyD]) as i32 - keys.any_just_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]) as i32;
+    // ↑ ↓ change the server, open or not
+    let step = keys.just_pressed(KeyCode::ArrowDown) as i32 - keys.just_pressed(KeyCode::ArrowUp) as i32;
     if step != 0 {
         let n = REGIONS.len() as i32;
         let at = current(&chosen, &settings, pings.as_deref()) as i32;
         chosen.0 = Some((at + step).rem_euclid(n) as usize);
     }
     if keys.just_pressed(KeyCode::Enter) {
-        w.write(UiAction::StartGame);
+        // Enter on an open list takes the server; on a closed one it starts
+        if open.0 {
+            open.0 = false;
+        } else {
+            w.write(UiAction::StartGame);
+        }
     }
     if keys.just_pressed(KeyCode::KeyS) {
         w.write(UiAction::OpenSettings);
     }
     if keys.just_pressed(KeyCode::Escape) {
-        w.write(UiAction::Quit);
+        if open.0 {
+            open.0 = false;
+        } else {
+            w.write(UiAction::Quit);
+        }
     }
 }
 

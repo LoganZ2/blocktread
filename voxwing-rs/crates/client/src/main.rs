@@ -101,7 +101,7 @@ impl DevOpts {
 
 const USAGE: &str = "用法: voxwing-client [--name 名字] [--server 地址:端口|local]
 开发用: [--launch ffa|2v2|watch] [--local] [--autopilot] [--latency 毫秒] [--screen lobby|error|hangar|settings]
-       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|tip|revert|next|hover:秒] [--frame-stats] [--port 端口] [--mute]";
+       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|tip|revert|next|hover|serverlist:秒] [--frame-stats] [--port 端口] [--mute]";
 
 fn main() {
     let mut s = settings::load_settings();
