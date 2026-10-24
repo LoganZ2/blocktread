@@ -27,6 +27,7 @@ jobs:
   test:
     name: tests (rules, server)
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -39,6 +40,7 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +71,7 @@ jobs:
   server:
     name: server ${{ matrix.arch }}-linux
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -109,15 +112,20 @@ jobs:
     name: package
     needs: build
     runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
     defaults:
       run:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: bin-*
-          path: bin
+      # gh, not actions/download-artifact (see release)
+      - name: fetch binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'bin-*' -D bin
       - name: Voxwing.app (universal)
         run: |
           version=$(grep -m1 '^version' voxwing-rs/Cargo.toml | cut -d'"' -f2)
@@ -167,28 +175,23 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, package, server]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
+      actions: read
     defaults:
       run:
         working-directory: .
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: Voxwing-*
-          path: dist
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: server-*
-          path: dist
-          merge-multiple: true
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/*.zip
-            dist/voxwing-server-*
-          generate_release_notes: true
+      # gh, not actions/download-artifact: that action sometimes hangs after its download is done
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'Voxwing-*' -p 'server-*' -D dist
+          files=$(find dist -type f \( -name '*.zip' -o -name 'voxwing-server-*' \))
+          echo "$files"
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --generate-notes $files
 
   # the server goes out with the client: same tag, same release
   deploy:
