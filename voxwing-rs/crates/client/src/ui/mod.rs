@@ -173,6 +173,10 @@ pub enum UiAction {
     HostMode(&'static str),
     /// Budget tier to queue in (a `balance.ron` key, empty = no limit).
     HostBudget(String),
+    /// The server to play on (a `REGIONS` key), on the entry page.
+    Region(&'static str),
+    /// Into the lobby, on the server picked.
+    StartGame,
     /// The lobby's ship carousel: slide one slot left (-1) or right (1).
     CarouselStep(i8),
     /// The carousel's "new ship" slot: add a blank ship after the last and open it in the hangar.

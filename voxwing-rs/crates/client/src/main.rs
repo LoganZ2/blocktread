@@ -24,6 +24,8 @@ use voxwing_server::ServerHandle;
 pub enum Screen {
     #[default]
     Boot,
+    /// The entry page: pick a server (with its ping), start.
+    Entry,
     /// The lobby: your ship on display, the mode to play, matchmaking.
     Menu,
     Hangar,
@@ -35,8 +37,19 @@ pub enum Screen {
 #[derive(Component)]
 pub struct MainCamera;
 
-/// The game server matchmaking connects to (`--server` overrides it).
-pub const SERVER: &str = "38.92.8.110:4433";
+/// A game server players pick in the lobby (`deploy/servers.json` lists the same machines for CI).
+pub struct Region {
+    /// Kept in the settings.
+    pub key: &'static str,
+    pub name: &'static str,
+    pub code: &'static str,
+    pub addr: &'static str,
+}
+
+pub const REGIONS: &[Region] = &[
+    Region { key: "na", name: "北美", code: "NA", addr: "99.246.198.62:4433" },
+    Region { key: "asia", name: "亚洲", code: "ASIA", addr: "38.92.8.110:4433" },
+];
 
 /// The server this client runs under `--server local`, if any. Kept alive across matches.
 #[derive(Resource, Default)]
@@ -58,7 +71,8 @@ pub struct DevOpts {
     pub shot_every: f32,
     /// Start matchmaking (ffa, 2v2) or spectating (watch) on launch.
     pub auto_launch: Option<String>,
-    /// Server address instead of `SERVER`; "local" runs one in this client (no queue wait).
+    /// Server address instead of the region picked in the lobby; "local" runs one in this client
+    /// (no queue wait).
     pub server: Option<String>,
     /// Fly by AI; also locks in the ship pick on its own.
     pub autopilot: bool,
@@ -86,7 +100,7 @@ impl DevOpts {
 }
 
 const USAGE: &str = "用法: voxwing-client [--name 名字] [--server 地址:端口|local]
-开发用: [--launch ffa|2v2|watch] [--local] [--autopilot] [--latency 毫秒] [--screen error|hangar|settings]
+开发用: [--launch ffa|2v2|watch] [--local] [--autopilot] [--latency 毫秒] [--screen lobby|error|hangar|settings]
        [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|tip|revert|next|hover:秒] [--frame-stats] [--port 端口] [--mute]";
 
 fn main() {
@@ -186,7 +200,10 @@ fn boot(mut next: ResMut<NextState<Screen>>, dev: Res<DevOpts>, mut overlays: Re
     }
     next.set(match dev.start.as_deref() {
         Some("hangar") => Screen::Hangar,
-        _ => Screen::Menu,
+        // straight to the lobby for unattended runs
+        Some("lobby" | "error") => Screen::Menu,
+        _ if dev.auto_launch.is_some() => Screen::Menu,
+        _ => Screen::Entry,
     });
     overlays.settings = dev.start.as_deref() == Some("settings");
 }

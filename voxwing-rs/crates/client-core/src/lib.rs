@@ -4,6 +4,7 @@
 
 pub mod interp;
 pub mod net;
+pub mod ping;
 pub mod predict;
 
 use glam::{Quat, Vec3};

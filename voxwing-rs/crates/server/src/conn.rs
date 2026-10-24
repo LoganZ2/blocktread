@@ -18,7 +18,12 @@ pub async fn handle(inc: quinn::Incoming, tx: Sender<NetEvent>, next_pid: Arc<At
 
 async fn handle_inner(inc: quinn::Incoming, tx: Sender<NetEvent>, next_pid: Arc<AtomicU16>) -> Result<()> {
     let conn = inc.await?;
-    let (mut send, mut recv) = tokio::time::timeout(Duration::from_secs(5), conn.accept_bi()).await??;
+    let (mut send, mut recv) = match tokio::time::timeout(Duration::from_secs(5), conn.accept_bi()).await? {
+        Ok(streams) => streams,
+        // a client measuring its ping: it connected and hung up, nothing to report
+        Err(quinn::ConnectionError::ApplicationClosed(c)) if c.error_code == voxwing_net::PING_CLOSE.into() => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
     let Some(frame) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut recv)).await?? else { return Ok(()) };
     let (version, name, watch, bal) = match decode::<ClientMsg>(&frame) {
         Some(ClientMsg::Hello { version, name, balance }) => (version, name, false, balance),

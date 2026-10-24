@@ -1,8 +1,10 @@
-# Deploys a released server to the game server over SSH. Runs after a v* tag's release (ci.yml),
-# or by hand from the Actions tab with any released tag (also the way to roll back).
+# Deploys a released server to every game server in voxwing-rs/deploy/servers.json, in parallel.
+# Runs after a v* tag's release (ci.yml), or by hand from the Actions tab with any released tag
+# (also the way to roll back), optionally to one server only.
 #
-# Needs the repository secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS;
-# without them it skips with a warning. The server is set up once with voxwing-rs/deploy/setup.sh.
+# The server list is read from the default branch, so a rollback to an old tag still reaches
+# today's servers. The only secret is DEPLOY_SSH_KEY, a private key every server accepts; host keys
+# are pinned in servers.json. A server is set up once with voxwing-rs/deploy/setup.sh.
 name: deploy
 
 on:
@@ -11,6 +13,10 @@ on:
       tag:
         description: "要部署的版本（已发布的 v 标签，比如 v0.2.0）"
         required: true
+      server:
+        description: "只部署到这一台（servers.json 里的 name），留空 = 全部"
+        required: false
+        default: ""
   workflow_call:
     inputs:
       tag:
@@ -25,51 +31,82 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
-    name: deploy ${{ inputs.tag }}
+  servers:
+    name: servers
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      list: ${{ steps.read.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: voxwing-rs/deploy
+      - id: read
+        env:
+          ONLY: ${{ inputs.server }}
+        run: |
+          list=$(jq -c --arg only "$ONLY" '[.[] | select($only == "" or .name == $only)]' voxwing-rs/deploy/servers.json)
+          if [ "$list" = "[]" ]; then echo "::error::servers.json 里没有要部署的服务器 $ONLY"; exit 1; fi
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: ${{ matrix.server.name }} ← ${{ inputs.tag }}
+    needs: servers
+    runs-on: ubuntu-latest
+    # the deploy may wait up to 20 minutes for players to leave
     timeout-minutes: 30
     environment: production
+    strategy:
+      # one server failing (offline, players won't leave) doesn't stop the others
+      fail-fast: false
+      matrix:
+        server: ${{ fromJSON(needs.servers.outputs.list) }}
     env:
       TAG: ${{ inputs.tag }}
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      HOST: ${{ matrix.server.host }}
+      PORT: ${{ matrix.server.port || 22 }}
+      DUSER: ${{ matrix.server.user }}
+      HOST_KEY: ${{ matrix.server.host_key }}
     steps:
-      - name: configured?
+      - name: check
         id: cfg
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
-          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ]; then
-            echo "::warning::部署用的 secrets（DEPLOY_HOST 等）还没设置，跳过部署"
+          case "$TAG" in v*) ;; *) echo "::error::要部署的必须是 v 开头的发布版本：$TAG"; exit 1;; esac
+          if [ -z "$KEY" ]; then
+            echo "::warning::DEPLOY_SSH_KEY 还没设置，跳过部署"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
-          case "$TAG" in v*) ;; *) echo "::error::要部署的必须是 v 开头的发布版本：$TAG"; exit 1;; esac
       - uses: actions/checkout@v4
         if: steps.cfg.outputs.skip != 'true'
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: voxwing-rs/deploy
       - name: ssh key
         if: steps.cfg.outputs.skip != 'true'
         env:
           KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
-          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          if [ "$PORT" = 22 ]; then name="$HOST"; else name="[$HOST]:$PORT"; fi
+          printf '%s %s\n' "$name" "$HOST_KEY" > ~/.ssh/known_hosts
       - name: upload and switch over
         if: steps.cfg.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           opts=(-i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20)
-          at="$DEPLOY_USER@$DEPLOY_HOST"
-          case "$(ssh "${opts[@]}" "$at" uname -m)" in
+          at="$DUSER@$HOST"
+          case "$(ssh "${opts[@]}" -p "$PORT" "$at" uname -m)" in
             x86_64) arch=x86_64 ;;
             aarch64|arm64) arch=aarch64 ;;
             *) echo "::error::服务器的 CPU 架构不支持"; exit 1 ;;
           esac
           gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "voxwing-server-$arch-linux" -D bin
-          ssh "${opts[@]}" "$at" "mkdir -p voxwing-server/releases/$TAG"
-          scp "${opts[@]}" "bin/voxwing-server-$arch-linux" "$at:voxwing-server/releases/$TAG/voxwing-server"
-          scp "${opts[@]}" voxwing-rs/deploy/remote-deploy.sh "$at:voxwing-server/remote-deploy.sh"
-          ssh "${opts[@]}" "$at" "bash voxwing-server/remote-deploy.sh $TAG"
+          ssh "${opts[@]}" -p "$PORT" "$at" "mkdir -p voxwing-server/releases/$TAG"
+          scp "${opts[@]}" -P "$PORT" "bin/voxwing-server-$arch-linux" "$at:voxwing-server/releases/$TAG/voxwing-server"
+          scp "${opts[@]}" -P "$PORT" voxwing-rs/deploy/remote-deploy.sh "$at:voxwing-server/remote-deploy.sh"
+          ssh "${opts[@]}" -p "$PORT" "$at" "bash voxwing-server/remote-deploy.sh $TAG"

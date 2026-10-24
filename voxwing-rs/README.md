@@ -25,7 +25,9 @@ CI 用 `dist` 配置编译（release 去掉符号，体积小三分之一左右�
 cargo run -p voxwing-client --release
 ```
 
-打开游戏就是大厅：中间是你的飞机，两侧的大箭头滑到上一架 / 下一架。飞机是一个循环：最后一架后面是新建位（框角里的大加号，点一下新建一架空白机体并进入机库），再往后又回到第一架；左下选模式（自由混战 6 人 / 2v2 团队战）和造价上限，点「开始匹配」。匹配连的是固定的服务器 `38.92.8.110:4433`（客户端里的 `SERVER` 常量；开发时可以用 `--server` 换，`--server local` 在客户端里跑一个不等人的服务器，离线也能玩）。
+打开游戏先是入口页：选服务器（北美 NA、亚洲 ASIA，每个都实时显示延迟，每 3 秒测一次；绿色 < 90 ms、黄色 < 180 ms、红色更高，连不上显示「超时」；没选过时默认延迟最低的那个），点「开始游戏」进入大厅。大厅底部显示当前服务器和延迟，点「更换」或按 Esc 回到入口页。
+
+大厅：中间是你的飞机，两侧的大箭头滑到上一架 / 下一架。飞机是一个循环：最后一架后面是新建位（框角里的大加号，点一下新建一架空白机体并进入机库），再往后又回到第一架；左下选模式（自由混战 6 人 / 2v2 团队战）和造价上限，点「开始匹配」。服务器列表在 `crates/client/src/main.rs` 的 `REGIONS` 里（开发时可以用 `--server` 指定地址，`--server local` 在客户端里跑一个不等人的服务器，离线也能玩）。
 
 **一局是怎么开始的**：大厅里开始匹配 → 匹配到之后选战机 → 开战 → 结果 → 回大厅。
 - 匹配：就在大厅里进行，左下显示已等多久、队列里几个人、几秒后 AI 补位，再按一次（或 Esc）取消。服务器按「模式 + 造价档」排队。人满一局就开；第一个人等了 `--queue-wait` 秒还凑不齐，就用 AI 补齐空位。2v2 里玩家轮流分到蓝队、红队。
@@ -52,33 +54,24 @@ cargo run -p voxwing-server --release
 
 ## 部署到 Linux 服务器
 
-正式服务器由 CI 部署（`.github/workflows/deploy.yml`）：推一个 `v` 开头的标签时，CI 编译客户端和服务器、发布 GitHub Release，再把这个版本的服务器部署上去；也可以在仓库的 Actions → deploy 里手动填一个已发布的版本来部署（回滚也用它）。服务器程序是静态链接的 Linux 二进制（x86_64 和 ARM 各一份），服务器上不需要装 Rust。
+正式服务器由 CI 部署（`.github/workflows/deploy.yml`）：推一个 `v` 开头的标签时，CI 编译客户端和服务器、发布 GitHub Release，再把这个版本的服务器**并行部署到 `deploy/servers.json` 里的每一台**；也可以在仓库的 Actions → deploy 里手动填一个已发布的版本来部署（回滚也用它），可选只部署到某一台。服务器程序是静态链接的 Linux 二进制（x86_64 和 ARM 各一份），服务器上不需要装 Rust。
 
-每次部署：上传新版本 → **等到没人在线再重启**（最多等 20 分钟，超时就放弃并报错，新版本已经传上去，稍后再跑一次即可）→ 切换到新版本并重启 → 检查新版本有没有起来，没起来自动换回旧版本。服务器保留最近 5 个版本。
+每台服务器各自：上传新版本 → **等到这台没人在线再重启**（最多等 20 分钟，超时就放弃并报错，新版本已经传上去，稍后再跑一次即可）→ 切换到新版本并重启 → 检查新版本有没有起来，没起来自动换回旧版本。一台失败不影响其他台。每台保留最近 5 个版本。
 
-**一次性准备**
+**服务器清单** `deploy/servers.json`：每台一项，`name`、`host`、`user`、`host_key`（`ssh-keyscan -t ed25519 地址` 输出里 `ssh-ed25519 …` 那部分），SSH 不是 22 端口时加 `"port": 端口`。部署时读的是 main 分支上的清单，所以回滚到旧版本也会部署到现在的这些服务器。
 
-1. 云服务商的安全组放行 UDP 4433（游戏）和 TCP 22（SSH）。
-2. 服务器上建一个普通用户（比如 `voxwing`），SSH 只允许密钥登录。
-3. 生成一对只给 CI 用的部署密钥，公钥加到这个用户的 `~/.ssh/authorized_keys`：
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/voxwing-deploy -N "" -C voxwing-deploy
-   ```
-4. 以这个用户登录服务器，跑一次 `deploy/setup.sh`（把 `voxwing-rs/deploy/` 传上去再运行；要输一次 sudo 密码）。它装好 systemd 用户服务：开机自启、崩溃自动重启，日志用 `journalctl --user-unit voxwing-server -f` 看。
-5. 仓库 Settings → Secrets and variables → Actions 里加四个 secret：
+**加一台服务器**
 
-   | 名字 | 内容 |
-   | --- | --- |
-   | `DEPLOY_HOST` | 服务器 IP 或域名 |
-   | `DEPLOY_USER` | 第 2 步的用户名 |
-   | `DEPLOY_SSH_KEY` | 第 3 步私钥文件的全部内容 |
-   | `DEPLOY_KNOWN_HOSTS` | `ssh-keyscan -t ed25519 服务器IP` 的输出 |
+1. 防火墙放行 UDP 4433（游戏）和 SSH；在家里或内网的机器，要在路由器上把 UDP 4433 和 SSH 端口转发到它。
+2. 把 `DEPLOY_SSH_KEY` 对应的公钥加到这台机器部署用户的 `~/.ssh/authorized_keys`。
+3. 以这个用户登录，跑一次 `deploy/setup.sh`（把 `voxwing-rs/deploy/` 传上去再运行；非 root 用户要输一次 sudo 密码）。它装好 systemd 用户服务：开机自启、崩溃自动重启，日志用 `journalctl --user-unit voxwing-server -f` 看。
+4. 在 `deploy/servers.json` 里加一项，推到 main。
 
-   没设置这些时，部署会跳过并给出警告，发版本身不受影响。想每次部署前手动确认，在 Settings → Environments → production 里加上审批人。
+**GitHub 上只有一个 secret**：Settings → Secrets and variables → Actions 里的 `DEPLOY_SSH_KEY`，所有服务器都接受的那把私钥的完整内容。没设置时部署会跳过并给出警告，发版本身不受影响。想每次部署前手动确认，在 Settings → Environments → production 里加上审批人。
 
 服务器的额外参数（比如 `ARGS=--queue-wait 30 --match-secs 600`）写在服务器上的 `~/voxwing-server/args.env`。服务器每 5 秒把版本和在线人数写进 `~/voxwing-server/status.json`。服务器和客户端的协议版本要一致：升了协议的版本，客户端和服务器要一起发（打同一个标签就是一起发）。
 
-客户端连的服务器地址写在 `crates/client/src/main.rs` 的 `SERVER` 常量里，换服务器就改这一行。
+客户端能选的服务器写在 `crates/client/src/main.rs` 的 `REGIONS` 里（名称、代号、地址），加服务器时 `deploy/servers.json` 和这里各加一项。
 
 **开发机（手动）**：`./deploy.sh 用户名@地址 [服务器参数]` 同步源码、在那台机器上编译，在 tmux 会话 `voxwing` 里重启服务器，日志在 `~/voxwing-server.log`。那台机器需要 `build-essential` 和用户目录里的 Rust。
 
@@ -178,7 +171,9 @@ cargo run --release -p voxwing-server --example duel -- --games 150 --weapons --
 连接失败 / 断开：回到大厅，弹出原因 + 重试
 ```
 
-**大厅快捷键**：Enter 开始 / 取消匹配，← → 或 , . 滑到上一架 / 下一架，H 机库，S 设置，V 观战，Esc 取消匹配或退出。
+**入口页快捷键**：← → 选服务器，Enter 开始游戏，S 设置，Esc 退出。
+
+**大厅快捷键**：Enter 开始 / 取消匹配，← → 或 , . 滑到上一架 / 下一架，H 机库，S 设置，V 观战，Esc 取消匹配或回到入口页。
 
 **观战**：大厅里的「观战」按钮（或按 V）不驾驶，附身到场上的飞机上看它打。
 - 服务器上有对局在打就看那一局；没有的话开一局全 AI 的自由混战。看完一局可以「继续观战」下一局。
@@ -266,12 +261,12 @@ cargo run -p voxwing_shared --example stats   # 各预设机型的数值，以�
 
 | 参数 | 说明 |
 | --- | --- |
-| `--server 地址:端口\|local` | 不连 `38.92.8.110:4433`，改连这个地址；`local` 在客户端里跑一个服务器（不排队，AI 马上补齐） |
+| `--server 地址:端口\|local` | 不用入口页选的服务器，改连这个地址；`local` 在客户端里跑一个服务器（不排队，AI 马上补齐） |
 | `--launch ffa\|2v2\|watch` | 启动后直接开始匹配或观战 |
 | `--local` | `--server local` 只监听 127.0.0.1（不会触发防火墙弹窗） |
 | `--autopilot` | AI 代飞；选战机时也会自己确认 |
 | `--latency 毫秒` | 模拟单向延迟 |
-| `--screen error\|hangar\|settings` | 从指定界面启动（error：大厅里弹出连接失败） |
+| `--screen lobby\|error\|hangar\|settings` | 从指定界面启动，跳过入口页（error：大厅里弹出连接失败） |
 | `--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]` | 定时截图 |
 | `--offscreen` | 渲染到离屏图像（大小取设置里的窗口尺寸）并隐藏窗口：屏幕锁定时也能截图，也不会弹窗打扰。同时静音（等于 `--mute`） |
 | `--mute` | 完全不出声，连音频设备都不打开 |

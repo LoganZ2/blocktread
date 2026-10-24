@@ -3,6 +3,7 @@
 //! navigation and design-picking actions, the settings overlay and the FPS readout.
 
 pub mod carousel;
+pub mod entry;
 pub mod matching;
 pub mod menu;
 
@@ -28,11 +29,12 @@ pub struct ScreensPlugin;
 
 impl Plugin for ScreensPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((menu::MenuPlugin, carousel::CarouselPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
+        app.add_plugins((entry::EntryPlugin, menu::MenuPlugin, carousel::CarouselPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
             .init_resource::<Overlays>()
             .init_resource::<Showcase>()
             // the lobby's ships are the carousel's
             .add_systems(OnEnter(Screen::Menu), |mut c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| spawn_stage(&mut c, &a, &s, cam, Screen::Menu))
+            .add_systems(OnEnter(Screen::Entry), |mut c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| spawn_stage(&mut c, &a, &s, cam, Screen::Entry))
             .add_systems(OnEnter(Screen::Match), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
                 spawn_showcase(c, a, s, art, m, h, cam, Screen::Match)
             })

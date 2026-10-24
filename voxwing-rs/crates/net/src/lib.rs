@@ -16,6 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const ALPN: &[u8] = b"voxwing/1";
+/// Close code of a connection made only to measure the round trip (the client's server picker);
+/// the server lets it go without logging a failed join.
+pub const PING_CLOSE: u32 = 0x5049_4e47;
 /// Largest reliable frame we accept (a full design is ~1 KB, a scoreboard a few KB).
 pub const MAX_FRAME: usize = 256 * 1024;
 

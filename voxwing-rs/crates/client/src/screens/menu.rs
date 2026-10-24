@@ -1,6 +1,6 @@
-//! The lobby, the game's main screen: your ships in a carousel (carousel.rs), the mode and budget to
-//! play, and matchmaking. The queue runs right here; when the server finds a match the ship pick
-//! takes over.
+//! The lobby, the game's main screen: your ships in a carousel (carousel.rs), the mode, budget and
+//! server to play on (each server with its live ping), and matchmaking. The queue runs right here;
+//! when the server finds a match the ship pick takes over.
 
 use super::Overlays;
 use super::carousel::Carousel;
@@ -9,11 +9,12 @@ use crate::hangar::Hangar;
 use crate::settings::{self, Settings};
 use crate::ui::kit::*;
 use crate::ui::*;
-use crate::{DevOpts, Hosted, LastError, Screen};
+use crate::{DevOpts, Hosted, LastError, REGIONS, Screen};
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::text::{EditableText, LetterSpacing};
 use std::time::Duration;
+use super::entry::{Pings, RegionPing, region};
 use voxwing_client_core::{ClientCore, ConnState, Phase};
 use voxwing_server::{HubConfig, ServerConfig};
 use voxwing_shared::protocol::Mode;
@@ -44,7 +45,6 @@ struct PlayBox;
 struct QueueLine;
 #[derive(Component)]
 struct NameField;
-
 /// The mode a settings key stands for ("coop" from older settings files plays free-for-all).
 pub fn mode_of(key: &str) -> Mode {
     if key == "2v2" { Mode::Teams } else { Mode::Ffa }
@@ -58,8 +58,9 @@ pub fn cost_label(cost: f32) -> String {
     }
 }
 
-fn server_addr(dev: &DevOpts) -> String {
-    dev.server.clone().unwrap_or_else(|| crate::SERVER.to_string())
+/// Where to connect: `--server` if given, else the server picked on the entry page.
+fn server_addr(dev: &DevOpts, region: usize) -> String {
+    dev.server.clone().unwrap_or_else(|| REGIONS[region].addr.to_string())
 }
 
 fn spawn_menu(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>) {
@@ -86,7 +87,7 @@ fn spawn_menu(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>
     commands.entity(name).insert(NameField);
     commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(top)));
     spawn_btn(&mut commands, f, top, Kind::Normal, "设置", UiAction::OpenSettings, Some("S"));
-    spawn_btn(&mut commands, f, top, Kind::Ghost, "退出", UiAction::Quit, Some("Esc"));
+    spawn_btn(&mut commands, f, top, Kind::Ghost, "退出", UiAction::Quit, None);
 
     // bottom left: what to play, and the button that finds a match
     let play = spawn_panel(&mut commands, Some(root), Node { position_type: PositionType::Absolute, left: px(EDGE), bottom: px(EDGE), width: px(380), padding: px(PAD).all(), flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() });
@@ -194,10 +195,11 @@ fn refresh_play(
     settings: Res<Settings>,
     hangar: Res<Hangar>,
     session: Option<Res<Session>>,
+    pings: Option<Res<Pings>>,
     dev: Res<DevOpts>,
     font: Res<UiFont>,
     panel: Single<Entity, With<PlayBox>>,
-    mut built: Local<Option<(String, String, Queue, Option<String>)>>,
+    mut built: Local<Option<(String, String, usize, Queue, Option<String>)>>,
     added: Query<(), Added<PlayBox>>,
 ) {
     let q = queue_state(session.as_deref());
@@ -206,7 +208,8 @@ fn refresh_play(
     // the ship can be changed in the pick, but say so if this one won't do
     let cost = hangar.analysis.stats.cost;
     let warn = tier.filter(|t| cost > t.budget + 1e-3).map(|t| format!("「{}」超出{}上限 {:.0}，匹配到之后要换一架。", hangar.design.name, t.name, t.budget));
-    let want = (settings.host_mode.clone(), settings.host_budget.clone(), q, warn.clone());
+    let here = region(&settings, pings.as_deref());
+    let want = (settings.host_mode.clone(), settings.host_budget.clone(), here, q, warn.clone());
     if built.as_ref() == Some(&want) && added.is_empty() {
         return;
     }
@@ -255,7 +258,19 @@ fn refresh_play(
         TipDetail("服务器上有对局时观看它；没有的话开一局全 AI 的自由混战。\n← → 换一架飞机，C 切换座舱视角。".into()),
     ));
     set_enabled(&mut commands, wb, !busy);
-    commands.spawn((tech(f, format!("SERVER  {}", server_addr(&dev)), 11.0, MUTED), LetterSpacing::Px(1.5), ChildOf(p)));
+    // the server this lobby plays on, its ping, and the way back to pick another
+    let line = commands.spawn((row(GAP_S), ChildOf(p))).id();
+    if dev.server.is_some() {
+        commands.spawn((tech(f, format!("SERVER  {}", server_addr(&dev, here)), 11.0, MUTED), LetterSpacing::Px(1.5), ChildOf(line)));
+    } else {
+        let r = &REGIONS[here];
+        commands.spawn((tech(f, "SERVER", 11.0, MUTED), LetterSpacing::Px(1.5), ChildOf(line)));
+        commands.spawn((text(f, format!("{} {}", r.name, r.code), 13.0, INK), ChildOf(line)));
+        commands.spawn((tech(f, "…", 13.0, MUTED), RegionPing(here), ChildOf(line)));
+        commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(line)));
+        let change = spawn_btn(&mut commands, f, line, Kind::Ghost, "更换", UiAction::Goto(Screen::Entry), None);
+        set_enabled(&mut commands, change, !busy);
+    }
 }
 
 /// The queue's progress: time waited, players waiting, when AI fills in.
@@ -299,6 +314,7 @@ fn menu_actions(
     mut settings: ResMut<Settings>,
     mut hosted: ResMut<Hosted>,
     session: Option<Res<Session>>,
+    pings: Option<Res<Pings>>,
     fields: Query<&EditableText, With<NameField>>,
     mut toasts: ResMut<Toasts>,
     mut next: ResMut<NextState<Screen>>,
@@ -339,7 +355,7 @@ fn menu_actions(
                         }
                         format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port())
                     }
-                    _ => server_addr(&dev),
+                    _ => server_addr(&dev, region(&settings, pings.as_deref())),
                 };
                 info!("{} {addr}", if watch { "watching" } else { "matchmaking on" });
                 let latency = Duration::from_millis(dev.latency_ms);
@@ -411,7 +427,7 @@ fn menu_keys(
         w.write(UiAction::Launch);
     }
     if keys.just_pressed(KeyCode::Escape) {
-        w.write(if session.is_some() { UiAction::Launch } else { UiAction::Quit });
+        w.write(if session.is_some() { UiAction::Launch } else { UiAction::Goto(Screen::Entry) });
     }
     if typing_now {
         return;

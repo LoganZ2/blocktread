@@ -1,0 +1,14 @@
+[
+  {
+    "name": "main",
+    "host": "38.92.8.110",
+    "user": "root",
+    "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIJs4LwfAt76FFyHTM7J1JVaWsLXEr3ZlfxPX2A0KjJ6"
+  },
+  {
+    "name": "home",
+    "host": "99.246.198.62",
+    "user": "logan",
+    "host_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKsnGosq0HEof5r+f4WwtNuBy3b9s8mzfpRLefekpVht"
+  }
+]
