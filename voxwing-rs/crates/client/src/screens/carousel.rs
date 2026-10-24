@@ -1,6 +1,6 @@
-//! The lobby's ship carousel: your ships stand in a row in 3D, with a "new ship" slot at each end.
-//! The arrows beside the ship (or ← →) slide the row to the previous or next one; the one in view
-//! is the ship you fly.
+//! The lobby's ship carousel: your ships stand in a loop in 3D — the last one is followed by a
+//! "new ship" slot, and that by the first ship again. The arrows beside the ship (or ← →) slide to
+//! the previous or next one; the one in view is the ship you fly.
 
 use crate::art::BlockArt;
 use crate::hangar::Hangar;
@@ -28,55 +28,48 @@ impl Plugin for CarouselPlugin {
     }
 }
 
-/// The slot in view: -1 and the fleet's length are the "new ship" slots at the ends, the rest are
-/// the fleet's ships.
+/// The slot in view, counted without wrapping, so a step across the loop's seam is still a
+/// one-slot slide. `slot` folds it onto the loop: ships 0..n, then the "new ship" slot n.
 #[derive(Resource, Default)]
 pub struct Carousel {
-    pub slot: i32,
+    turn: i32,
 }
 
 impl Carousel {
-    /// The "new ship" slot in view, if one is: true for the left end.
-    pub fn new_slot(&self, ships: usize) -> Option<bool> {
-        match self.slot {
-            -1 => Some(true),
-            s if s >= ships as i32 => Some(false),
-            _ => None,
-        }
+    pub fn slot(&self, ships: usize) -> usize {
+        self.turn.rem_euclid(ships as i32 + 1) as usize
+    }
+
+    /// True when the "new ship" slot is in view.
+    pub fn on_new(&self, ships: usize) -> bool {
+        self.slot(ships) == ships
     }
 }
 
-/// The row as it moves: where it is (a slot, fractional while sliding), and what was spawned.
+/// The loop as it moves: where it is (unwrapped, fractional while sliding), and what was spawned.
 #[derive(Resource, Default)]
 struct Slide {
     pos: f32,
     /// Each ship's name and size, to notice when the fleet changes.
     built: Vec<(String, usize)>,
-    /// Bounding radius per slot, both ends included (index = slot + 1).
+    /// Bounding radius per slot: the ships, then the "new ship" slot.
     radii: Vec<f32>,
-    /// Where each slot stands along the row (index = slot + 1).
-    xs: Vec<f32>,
+    /// Distance between neighbouring slots.
+    gap: f32,
 }
 
-impl Slide {
-    /// Linear in the slot position: the row's offset and the camera's subject size.
-    fn at(v: &[f32], pos: f32) -> f32 {
-        let i = (pos + 1.0).clamp(0.0, (v.len() - 1) as f32);
-        let k = (i.floor() as usize).min(v.len() - 1);
-        let next = v[(k + 1).min(v.len() - 1)];
-        v[k] + (next - v[k]) * (i - k as f32)
-    }
+/// Offset `d` (in slots) folded onto the loop of `len` slots: the nearer way round.
+fn wrap(d: f32, len: f32) -> f32 {
+    (d + len * 0.5).rem_euclid(len) - len * 0.5
 }
 
-/// Size of the "new ship" slots (a blank ship's).
+/// Size of the "new ship" slot (a blank ship's).
 const NEW_RADIUS: f32 = 4.0;
 
 #[derive(Component)]
 struct CarouselShip(i32);
 #[derive(Component)]
-struct Arrow(i8);
-#[derive(Component)]
-struct NewCard(i32);
+struct NewCard;
 /// A bare glyph that works as a button: no surface. Under the pointer it brightens and moves a
 /// few pixels (an arrow toward where it goes, the plus's corner marks inward) — no colour fill, no
 /// bounce.
@@ -100,7 +93,7 @@ enum Part {
 struct PartOf(Entity);
 
 /// Glyph sizes (px): the arrows beside the ship, the frame around the plus.
-const ARROW: f32 = 128.0;
+const ARROW: f32 = 112.0;
 const PLUS: f32 = 152.0;
 /// Rest and hover alpha of a mark.
 const DIM: f32 = 0.42;
@@ -122,14 +115,14 @@ fn glyph_button(commands: &mut Commands, parent: Entity, node: Node, action: UiA
         .id()
 }
 
-/// An arrow beside the ship: a thin chevron, nothing behind it.
+/// An arrow beside the ship: a solid chevron with flat-cut ends, nothing behind it.
 fn spawn_arrow(commands: &mut Commands, parent: Entity, image: Handle<Image>, step: i8) -> Entity {
     let b = glyph_button(commands, parent, Node { width: px(ARROW), height: px(ARROW), ..default() }, UiAction::CarouselStep(step));
     commands.spawn((
         ImageNode { image, color: INK.with_alpha(DIM), ..default() },
         Node { width: percent(100), height: percent(100), ..default() },
         UiTransform::default(),
-        Part::Mark { nudge: Vec2::new(step as f32 * 6.0, 0.0) },
+        Part::Mark { nudge: Vec2::new(step as f32 * 5.0, 0.0) },
         PartOf(b),
         Pickable::IGNORE,
         ChildOf(b),
@@ -138,8 +131,8 @@ fn spawn_arrow(commands: &mut Commands, parent: Entity, image: Handle<Image>, st
 }
 
 /// The "new ship" mark: a thin plus in four corner brackets, captioned.
-fn spawn_plus(commands: &mut Commands, f: &UiFont, parent: Entity, image: Handle<Image>, front: bool) -> Entity {
-    let b = glyph_button(commands, parent, Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(10), ..default() }, UiAction::NewShipAt(front));
+fn spawn_plus(commands: &mut Commands, f: &UiFont, parent: Entity, image: Handle<Image>) -> Entity {
+    let b = glyph_button(commands, parent, Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(10), ..default() }, UiAction::CarouselNew);
     let frame = commands.spawn((Node { width: px(PLUS), height: px(PLUS), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() }, Pickable::IGNORE, ChildOf(b))).id();
     commands.spawn((
         ImageNode { image, color: INK.with_alpha(DIM), ..default() },
@@ -246,8 +239,8 @@ fn style_glyphs(
 }
 
 fn enter_carousel(mut commands: Commands, hangar: Res<Hangar>, mut car: ResMut<Carousel>, mut slide: ResMut<Slide>, icons: Res<Icons>, font: Res<UiFont>) {
-    car.slot = hangar.fleet.current as i32;
-    slide.pos = car.slot as f32;
+    car.turn = hangar.fleet.current as i32;
+    slide.pos = car.turn as f32;
     slide.built.clear();
     // the arrows, either side of the ship
     let row = commands
@@ -264,25 +257,22 @@ fn enter_carousel(mut commands: Commands, hangar: Res<Hangar>, mut car: ResMut<C
         if step == 1 {
             commands.spawn((Node { width: px(560), ..default() }, Pickable::IGNORE, ChildOf(row)));
         }
-        let b = spawn_arrow(&mut commands, row, icon, step);
-        commands.entity(b).insert(Arrow(step));
+        spawn_arrow(&mut commands, row, icon, step);
     }
-    // a plus in each "new ship" slot, sliding along with the row
-    for slot in [-1, hangar.fleet.ships.len() as i32] {
-        let holder = commands
-            .spawn((
-                Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(36), margin: UiRect::top(px(-PLUS / 2.0)), justify_content: JustifyContent::Center, ..default() },
-                Pickable::IGNORE,
-                IgnoreHover,
-                DespawnOnExit(Screen::Menu),
-            ))
-            .id();
-        let plus = spawn_plus(&mut commands, &font, holder, icons.plus.clone(), slot < 0);
-        commands.entity(plus).insert((NewCard(slot), Visibility::Hidden));
-    }
+    // the plus in the "new ship" slot, sliding along with the ships
+    let holder = commands
+        .spawn((
+            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(36), margin: UiRect::top(px(-PLUS / 2.0)), justify_content: JustifyContent::Center, ..default() },
+            Pickable::IGNORE,
+            IgnoreHover,
+            DespawnOnExit(Screen::Menu),
+        ))
+        .id();
+    let plus = spawn_plus(&mut commands, &font, holder, icons.plus.clone());
+    commands.entity(plus).insert((NewCard, Visibility::Hidden));
 }
 
-/// Spawn the row: every ship of the fleet, again whenever the fleet changes.
+/// Spawn the loop: every ship of the fleet, again whenever the fleet changes.
 fn spawn_ships(mut commands: Commands, hangar: Res<Hangar>, mut slide: ResMut<Slide>, old: Query<Entity, With<CarouselShip>>, mut art: ResMut<BlockArt>, mut mats: ResMut<Assets<StandardMaterial>>) {
     let ships = &hangar.fleet.ships;
     let built: Vec<(String, usize)> = ships.iter().map(|d| (d.name.clone(), d.blocks.len())).collect();
@@ -292,7 +282,7 @@ fn spawn_ships(mut commands: Commands, hangar: Res<Hangar>, mut slide: ResMut<Sl
     for e in &old {
         commands.entity(e).despawn();
     }
-    let mut radii = vec![NEW_RADIUS];
+    let mut radii = Vec::with_capacity(ships.len() + 1);
     for (i, d) in ships.iter().enumerate() {
         let a = analyze(d);
         radii.push(a.stats.radius);
@@ -302,33 +292,26 @@ fn spawn_ships(mut commands: Commands, hangar: Res<Hangar>, mut slide: ResMut<Sl
         }
     }
     radii.push(NEW_RADIUS);
-    // far enough apart that only the ship in view is on screen once the row stops
-    let mut xs = vec![0.0];
-    for w in radii.windows(2) {
-        let last = *xs.last().unwrap();
-        xs.push(last + 3.0 * w[0].max(w[1]) + 16.0);
-    }
+    // far enough apart that only the ship in view is on screen once the loop stops
+    slide.gap = 3.0 * radii.iter().copied().fold(0.0, f32::max) + 16.0;
     slide.built = built;
     slide.radii = radii;
-    slide.xs = xs;
 }
 
 fn carousel_actions(mut msgs: MessageReader<UiAction>, mut car: ResMut<Carousel>, mut hangar: ResMut<Hangar>, mut next: ResMut<NextState<Screen>>, mut toasts: ResMut<Toasts>) {
     for m in msgs.read() {
         match m {
             UiAction::CarouselStep(d) => {
-                let n = hangar.fleet.ships.len() as i32;
-                let to = (car.slot + *d as i32).clamp(-1, n);
-                if to != car.slot {
-                    car.slot = to;
-                    if (0..n).contains(&to) {
-                        hangar.select(to as isize);
-                    }
+                car.turn += *d as i32;
+                let n = hangar.fleet.ships.len();
+                let s = car.slot(n);
+                if s < n {
+                    hangar.select(s as isize);
                 }
             }
-            UiAction::NewShipAt(front) => {
-                let at = if *front { 0 } else { hangar.fleet.ships.len() };
-                hangar.add_ship_at(at, Design { name: String::new(), blocks: preset("blank").blocks });
+            UiAction::CarouselNew => {
+                // after the last ship, where the "new ship" slot is
+                hangar.add_ship(Design { name: String::new(), blocks: preset("blank").blocks });
                 toasts.push(format!("新建了「{}」", hangar.design.name), ToastKind::Ok);
                 next.set(Screen::Hangar);
             }
@@ -337,62 +320,53 @@ fn carousel_actions(mut msgs: MessageReader<UiAction>, mut car: ResMut<Carousel>
     }
 }
 
-/// Move the row toward the slot in view, turn the ships, frame the camera on the one in front.
-#[allow(clippy::too_many_arguments)]
+/// Move the loop toward the slot in view, turn the ships, frame the camera on the one in front.
 fn slide(
     time: Res<Time>,
     car: Res<Carousel>,
     mut slide: ResMut<Slide>,
     mut ships: Query<(&mut Transform, &mut Visibility, &CarouselShip), Without<MainCamera>>,
     cam: Single<(&mut Transform, &Camera), With<MainCamera>>,
-    mut cards: Query<(&mut UiTransform, &mut Visibility, &NewCard), (Without<CarouselShip>, Without<Arrow>)>,
-    mut arrows: Query<(&mut Visibility, &Arrow), (Without<CarouselShip>, Without<NewCard>)>,
+    mut cards: Query<(&mut UiTransform, &mut Visibility), (With<NewCard>, Without<CarouselShip>)>,
 ) {
-    if slide.xs.is_empty() {
+    if slide.radii.is_empty() {
         return;
     }
     let dt = time.delta_secs();
     let t = time.elapsed_secs();
-    let target = car.slot as f32;
+    let target = car.turn as f32;
     slide.pos += (target - slide.pos) * (1.0 - (-dt * 9.0).exp());
     if (target - slide.pos).abs() < 0.001 {
         slide.pos = target;
     }
     let pos = slide.pos;
-    let offset = Slide::at(&slide.xs, pos);
+    let len = slide.radii.len();
     for (mut tr, mut vis, s) in &mut ships {
-        let near = (s.0 as f32 - pos).abs() < 1.05;
-        let want = if near { Visibility::Inherited } else { Visibility::Hidden };
+        let d = wrap(s.0 as f32 - pos, len as f32);
+        let want = if d.abs() < 1.05 { Visibility::Inherited } else { Visibility::Hidden };
         if *vis != want {
             *vis = want;
         }
-        tr.translation = Vec3::new(slide.xs[(s.0 + 1) as usize] - offset, (t * 0.8).sin() * 0.25, 0.0);
+        tr.translation = Vec3::new(d * slide.gap, (t * 0.8).sin() * 0.25, 0.0);
         tr.rotation = Quat::from_rotation_y(t * 0.22 + 2.4) * Quat::from_rotation_x(0.08 * (t * 0.5).sin());
     }
     // the camera frames the ship in front: closer for small ones, a little high above the ship bar
     let (mut ct, camera) = cam.into_inner();
-    let r = Slide::at(&slide.radii, pos);
+    let k = pos.floor();
+    let (a, b) = ((k as i32).rem_euclid(len as i32) as usize, (k as i32 + 1).rem_euclid(len as i32) as usize);
+    let r = slide.radii[a] + (slide.radii[b] - slide.radii[a]) * (pos - k);
     let dist = r * 3.0 + 11.0;
     let aim = Vec3::new(0.0, -r * 0.3 - 1.0, 0.0);
     let sway = Vec3::new((t * 0.1).sin() * 2.0, 0.0, 0.0);
     *ct = Transform::from_translation(aim + Vec3::new(0.0, dist * 0.22, dist) + sway).looking_at(aim, Vec3::Y);
-    // the "new ship" pluses move with the row, a screen's worth per slot
+    // the plus moves with the ships, a screen's worth per slot
     let w = camera.logical_viewport_size().map_or(1440.0, |s| s.x);
-    for (mut ut, mut vis, c) in &mut cards {
-        let d = c.0 as f32 - pos;
+    let d = wrap((len - 1) as f32 - pos, len as f32);
+    for (mut ut, mut vis) in &mut cards {
         let want = if d.abs() < 1.0 { Visibility::Inherited } else { Visibility::Hidden };
         if *vis != want {
             *vis = want;
         }
         ut.translation = Val2::px(d * w * 0.8, 0.0);
-    }
-    // no arrow past an end of the row
-    let n = slide.radii.len() as i32 - 2;
-    for (mut vis, a) in &mut arrows {
-        let on = if a.0 < 0 { car.slot > -1 } else { car.slot < n };
-        let want = if on { Visibility::Inherited } else { Visibility::Hidden };
-        if *vis != want {
-            *vis = want;
-        }
     }
 }

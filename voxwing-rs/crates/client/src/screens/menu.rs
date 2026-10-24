@@ -131,7 +131,7 @@ fn refresh_ship(
     let mid = commands.spawn((Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(4), ..default() }, ChildOf(bar))).id();
 
     // a "new ship" slot: what it would make
-    if car.new_slot(hangar.fleet.ships.len()).is_some() {
+    if car.on_new(hangar.fleet.ships.len()) {
         commands.spawn((heading(f, "新建机体", 28.0, INK), ChildOf(mid)));
         commands.spawn((text(f, format!("机库里有 {} 架 · 点中间的加号新建一架", hangar.fleet.ships.len()), 13.0, MUTED), ChildOf(mid)));
         let sec = spawn_section(&mut commands, f, card, "新建机体|NEW SHIP");

@@ -127,21 +127,14 @@ impl Hangar {
         self.select(self.fleet.current as isize + by);
     }
 
-    /// Add a ship after the last and switch to it.
-    pub fn add_ship(&mut self, d: Design) {
-        self.add_ship_at(self.fleet.ships.len(), d);
-    }
-
-    /// Add a ship at position `at` in the fleet and switch to it. A blank or taken name gets a
-    /// numbered one.
-    pub fn add_ship_at(&mut self, at: usize, mut d: Design) {
+    /// Add a ship after the last and switch to it. A blank or taken name gets a numbered one.
+    pub fn add_ship(&mut self, mut d: Design) {
         if d.name.trim().is_empty() || self.fleet.ships.iter().any(|s| s.name == d.name) {
             let base = if d.name.trim().is_empty() { "新机体".to_string() } else { d.name.clone() };
             d.name = (1..).map(|k| format!("{base} {k}")).find(|n| !self.fleet.ships.iter().any(|s| &s.name == n)).unwrap();
         }
-        let at = at.min(self.fleet.ships.len());
-        self.fleet.ships.insert(at, d);
-        self.select(at as isize);
+        self.fleet.ships.push(d);
+        self.select(self.fleet.ships.len() as isize - 1);
     }
 
     pub fn delete_current(&mut self) {

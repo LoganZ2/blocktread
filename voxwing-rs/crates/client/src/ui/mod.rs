@@ -174,8 +174,8 @@ pub enum UiAction {
     HostBudget(String),
     /// The lobby's ship carousel: slide one slot left (-1) or right (1).
     CarouselStep(i8),
-    /// Add a blank ship at the front (true) or back of the fleet and open it in the hangar.
-    NewShipAt(bool),
+    /// The carousel's "new ship" slot: add a blank ship after the last and open it in the hangar.
+    CarouselNew,
     /// Start matchmaking, or cancel it while queued.
     Launch,
     /// Spectate instead of play.
