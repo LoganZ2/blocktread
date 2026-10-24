@@ -3,11 +3,11 @@
 //! its 更换 comes back here.
 
 use super::Overlays;
-use crate::settings::{self, Settings};
+use crate::settings::{self, Regions, Settings};
 use crate::ui::icons::Icons;
 use crate::ui::kit::*;
 use crate::ui::*;
-use crate::{MainCamera, REGIONS, Region, Screen};
+use crate::{MainCamera, Screen};
 use bevy::prelude::*;
 use bevy::text::LetterSpacing;
 use std::time::Duration;
@@ -32,27 +32,27 @@ impl Plugin for EntryPlugin {
 #[derive(Resource)]
 pub struct Pings(pub Pinger);
 
-fn start_pings(mut commands: Commands, pings: Option<Res<Pings>>) {
+fn start_pings(mut commands: Commands, pings: Option<Res<Pings>>, regions: Res<Regions>) {
     if pings.is_none() {
-        commands.insert_resource(Pings(Pinger::start(REGIONS.iter().map(|r| r.addr.to_string()).collect(), Duration::from_secs(3))));
+        commands.insert_resource(Pings(Pinger::start(regions.0.iter().map(|r| r.addr.clone()).collect(), Duration::from_secs(3))));
     }
 }
 
-/// The ping of `REGIONS[i]`, if it is being measured.
+/// The ping of server `i`, if it is being measured.
 pub fn ping(pings: Option<&Pings>, i: usize) -> Ping {
     pings.map_or(Ping::Pending, |p| p.0.get(i))
 }
 
 /// The server to play on: the one picked, else the one answering fastest, else the first.
-pub fn region(settings: &Settings, pings: Option<&Pings>) -> usize {
-    if let Some(i) = REGIONS.iter().position(|r| r.key == settings.region) {
+pub fn region(settings: &Settings, regions: &Regions, pings: Option<&Pings>) -> usize {
+    if let Some(i) = regions.0.iter().position(|r| r.key == settings.region) {
         return i;
     }
-    fastest(pings).unwrap_or(0)
+    fastest(regions, pings).unwrap_or(0)
 }
 
-fn fastest(pings: Option<&Pings>) -> Option<usize> {
-    (0..REGIONS.len())
+fn fastest(regions: &Regions, pings: Option<&Pings>) -> Option<usize> {
+    (0..regions.0.len())
         .filter_map(|i| match ping(pings, i) {
             Ping::Ms(ms) => Some((i, ms)),
             _ => None,
@@ -72,7 +72,7 @@ pub fn ping_text(p: Ping) -> (String, Color) {
     }
 }
 
-/// Text that shows `REGIONS[i]`'s ping, kept current.
+/// Text that shows server `i`'s ping, kept current.
 #[derive(Component)]
 pub struct RegionPing(pub usize);
 
@@ -115,7 +115,7 @@ struct ItemMark(usize);
 /// Width of the server picker and the start button.
 const COLUMN: f32 = 480.0;
 
-fn spawn_entry(mut commands: Commands, font: Res<UiFont>, icons: Res<Icons>, mut chosen: ResMut<Chosen>, mut open: ResMut<ListOpen>) {
+fn spawn_entry(mut commands: Commands, font: Res<UiFont>, icons: Res<Icons>, regions: Res<Regions>, mut chosen: ResMut<Chosen>, mut open: ResMut<ListOpen>) {
     chosen.0 = None;
     open.0 = false;
     let f = &*font;
@@ -165,8 +165,8 @@ fn spawn_entry(mut commands: Commands, font: Res<UiFont>, icons: Res<Icons>, mut
             ChildOf(holder),
         ))
         .id();
-    for (i, r) in REGIONS.iter().enumerate() {
-        let item = spawn_btn(&mut commands, f, list, Kind::Ghost, format!("{} {}", r.name, r.code), UiAction::Region(r.key), None);
+    for (i, r) in regions.0.iter().enumerate() {
+        let item = spawn_btn(&mut commands, f, list, Kind::Ghost, format!("{} {}", r.name, r.code), UiAction::Region(i), None);
         commands.entity(item).insert((SelectItem(i), Node { height: px(44), padding: UiRect::horizontal(px(12)), justify_content: JustifyContent::FlexStart, column_gap: px(12), ..btn_node(Kind::Ghost) }));
         commands.spawn((
             Node { position_type: PositionType::Absolute, left: px(0), top: px(10), bottom: px(10), width: px(3), ..default() },
@@ -177,7 +177,7 @@ fn spawn_entry(mut commands: Commands, font: Res<UiFont>, icons: Res<Icons>, mut
             ChildOf(item),
         ));
         commands.spawn((Node { flex_grow: 1.0, ..default() }, Pickable::IGNORE, ChildOf(item)));
-        commands.spawn((tech(f, r.addr, 11.0, MUTED), LetterSpacing::Px(1.0), Pickable::IGNORE, ChildOf(item)));
+        commands.spawn((tech(f, r.addr.clone(), 11.0, MUTED), LetterSpacing::Px(1.0), Pickable::IGNORE, ChildOf(item)));
         commands.spawn((tech(f, "…", 14.0, MUTED), RegionPing(i), Node { width: px(64), justify_content: JustifyContent::FlexEnd, ..default() }, TextLayout::justify(Justify::Right), Pickable::IGNORE, ChildOf(item)));
     }
     commands.spawn((para(f, "选延迟低的服务器。同一服务器上的玩家会匹配到一起。", 12.0, MUTED), ChildOf(body)));
@@ -196,9 +196,9 @@ fn spawn_entry(mut commands: Commands, font: Res<UiFont>, icons: Res<Icons>, mut
     spawn_btn(&mut commands, f, corner, Kind::Ghost, "退出", UiAction::Quit, Some("Esc"));
 }
 
-/// The card shown as picked: the click on this page, else the saved choice, else the fastest.
-fn current(chosen: &Chosen, settings: &Settings, pings: Option<&Pings>) -> usize {
-    chosen.0.unwrap_or_else(|| region(settings, pings))
+/// The server shown as picked: the choice on this page, else the saved one, else the fastest.
+fn current(chosen: &Chosen, settings: &Settings, regions: &Regions, pings: Option<&Pings>) -> usize {
+    chosen.0.unwrap_or_else(|| region(settings, regions, pings))
 }
 
 /// The dropdown: the picked server and its ping on the face, the list shown while open.
@@ -207,6 +207,7 @@ fn refresh_select(
     chosen: Res<Chosen>,
     open: Res<ListOpen>,
     settings: Res<Settings>,
+    regions: Res<Regions>,
     pings: Option<Res<Pings>>,
     mut name: Query<&mut Text, (With<SelectName>, Without<SelectPing>)>,
     mut ping_face: Query<(&mut Text, &mut TextColor), (With<SelectPing>, Without<SelectName>)>,
@@ -215,8 +216,8 @@ fn refresh_select(
     mut items: Query<(&SelectItem, &mut Selected)>,
     mut marks: Query<(&ItemMark, &mut Visibility)>,
 ) {
-    let at = current(&chosen, &settings, pings.as_deref());
-    let r = &REGIONS[at];
+    let at = current(&chosen, &settings, &regions, pings.as_deref());
+    let r = &regions.0[at];
     let label = format!("{} {}", r.name, r.code);
     for mut t in &mut name {
         if t.0 != label {
@@ -258,18 +259,26 @@ fn refresh_select(
     }
 }
 
-fn entry_actions(mut msgs: MessageReader<UiAction>, mut chosen: ResMut<Chosen>, mut open: ResMut<ListOpen>, mut settings: ResMut<Settings>, pings: Option<Res<Pings>>, mut next: ResMut<NextState<Screen>>) {
+#[allow(clippy::too_many_arguments)]
+fn entry_actions(
+    mut msgs: MessageReader<UiAction>,
+    mut chosen: ResMut<Chosen>,
+    mut open: ResMut<ListOpen>,
+    mut settings: ResMut<Settings>,
+    regions: Res<Regions>,
+    pings: Option<Res<Pings>>,
+    mut next: ResMut<NextState<Screen>>,
+) {
     for m in msgs.read() {
         match m {
             UiAction::ServerList => open.0 = !open.0,
-            UiAction::Region(k) => {
-                chosen.0 = REGIONS.iter().position(|r| r.key == *k);
+            UiAction::Region(i) => {
+                chosen.0 = Some(*i);
                 open.0 = false;
             }
             UiAction::StartGame => {
-                let at = current(&chosen, &settings, pings.as_deref());
-                let r: &Region = &REGIONS[at];
-                settings.region = r.key.to_string();
+                let at = current(&chosen, &settings, &regions, pings.as_deref());
+                settings.region = regions.0[at].key.clone();
                 settings::save_settings(&settings);
                 next.set(Screen::Menu);
             }
@@ -286,6 +295,7 @@ fn entry_keys(
     mut chosen: ResMut<Chosen>,
     mut open: ResMut<ListOpen>,
     settings: Res<Settings>,
+    regions: Res<Regions>,
     pings: Option<Res<Pings>>,
     mut w: MessageWriter<UiAction>,
     dev: Res<crate::DevOpts>,
@@ -303,8 +313,8 @@ fn entry_keys(
     // ↑ ↓ change the server, open or not
     let step = keys.just_pressed(KeyCode::ArrowDown) as i32 - keys.just_pressed(KeyCode::ArrowUp) as i32;
     if step != 0 {
-        let n = REGIONS.len() as i32;
-        let at = current(&chosen, &settings, pings.as_deref()) as i32;
+        let n = regions.0.len() as i32;
+        let at = current(&chosen, &settings, &regions, pings.as_deref()) as i32;
         chosen.0 = Some((at + step).rem_euclid(n) as usize);
     }
     if keys.just_pressed(KeyCode::Enter) {

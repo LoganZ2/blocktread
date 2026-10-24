@@ -173,8 +173,8 @@ pub enum UiAction {
     HostMode(&'static str),
     /// Budget tier to queue in (a `balance.ron` key, empty = no limit).
     HostBudget(String),
-    /// The server to play on (a `REGIONS` key), on the entry page.
-    Region(&'static str),
+    /// The server to play on (an index into `Regions`), on the entry page.
+    Region(usize),
     /// Open or close the entry page's server list.
     ServerList,
     /// Into the lobby, on the server picked.

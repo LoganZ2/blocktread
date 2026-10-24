@@ -37,19 +37,6 @@ pub enum Screen {
 #[derive(Component)]
 pub struct MainCamera;
 
-/// A game server players pick in the lobby (`deploy/servers.json` lists the same machines for CI).
-pub struct Region {
-    /// Kept in the settings.
-    pub key: &'static str,
-    pub name: &'static str,
-    pub code: &'static str,
-    pub addr: &'static str,
-}
-
-pub const REGIONS: &[Region] = &[
-    Region { key: "na", name: "北美", code: "NA", addr: "99.246.198.62:4433" },
-    Region { key: "asia", name: "亚洲", code: "ASIA", addr: "38.92.8.110:4433" },
-];
 
 /// The server this client runs under `--server local`, if any. Kept alive across matches.
 #[derive(Resource, Default)]
@@ -71,8 +58,8 @@ pub struct DevOpts {
     pub shot_every: f32,
     /// Start matchmaking (ffa, 2v2) or spectating (watch) on launch.
     pub auto_launch: Option<String>,
-    /// Server address instead of the region picked in the lobby; "local" runs one in this client
-    /// (no queue wait).
+    /// Server address instead of the one picked on the entry page; "local" runs one in this
+    /// client (no queue wait). Players change servers in ~/.voxwing/servers.json instead.
     pub server: Option<String>,
     /// Fly by AI; also locks in the ship pick on its own.
     pub autopilot: bool,
@@ -155,6 +142,7 @@ fn main() {
         .add_plugins(plugins)
         .insert_resource(ClearColor(Color::srgb(0.024, 0.04, 0.07)))
         .insert_resource(s)
+        .insert_resource(settings::load_regions())
         .insert_resource(dev)
         .init_resource::<Hosted>()
         .init_resource::<LastError>()

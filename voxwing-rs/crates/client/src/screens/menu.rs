@@ -9,7 +9,8 @@ use crate::hangar::Hangar;
 use crate::settings::{self, Settings};
 use crate::ui::kit::*;
 use crate::ui::*;
-use crate::{DevOpts, Hosted, LastError, REGIONS, Screen};
+use crate::settings::Regions;
+use crate::{DevOpts, Hosted, LastError, Screen};
 use bevy::input_focus::InputFocus;
 use bevy::prelude::*;
 use bevy::text::{EditableText, LetterSpacing};
@@ -59,8 +60,8 @@ pub fn cost_label(cost: f32) -> String {
 }
 
 /// Where to connect: `--server` if given, else the server picked on the entry page.
-fn server_addr(dev: &DevOpts, region: usize) -> String {
-    dev.server.clone().unwrap_or_else(|| REGIONS[region].addr.to_string())
+fn server_addr(dev: &DevOpts, regions: &Regions, region: usize) -> String {
+    dev.server.clone().unwrap_or_else(|| regions.0[region].addr.clone())
 }
 
 fn spawn_menu(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>) {
@@ -196,6 +197,7 @@ fn refresh_play(
     hangar: Res<Hangar>,
     session: Option<Res<Session>>,
     pings: Option<Res<Pings>>,
+    regions: Res<Regions>,
     dev: Res<DevOpts>,
     font: Res<UiFont>,
     panel: Single<Entity, With<PlayBox>>,
@@ -208,7 +210,7 @@ fn refresh_play(
     // the ship can be changed in the pick, but say so if this one won't do
     let cost = hangar.analysis.stats.cost;
     let warn = tier.filter(|t| cost > t.budget + 1e-3).map(|t| format!("「{}」超出{}上限 {:.0}，匹配到之后要换一架。", hangar.design.name, t.name, t.budget));
-    let here = region(&settings, pings.as_deref());
+    let here = region(&settings, &regions, pings.as_deref());
     let want = (settings.host_mode.clone(), settings.host_budget.clone(), here, q, warn.clone());
     if built.as_ref() == Some(&want) && added.is_empty() {
         return;
@@ -261,9 +263,9 @@ fn refresh_play(
     // the server this lobby plays on, its ping, and the way back to pick another
     let line = commands.spawn((row(GAP_S), ChildOf(p))).id();
     if dev.server.is_some() {
-        commands.spawn((tech(f, format!("SERVER  {}", server_addr(&dev, here)), 11.0, MUTED), LetterSpacing::Px(1.5), ChildOf(line)));
+        commands.spawn((tech(f, format!("SERVER  {}", server_addr(&dev, &regions, here)), 11.0, MUTED), LetterSpacing::Px(1.5), ChildOf(line)));
     } else {
-        let r = &REGIONS[here];
+        let r = &regions.0[here];
         commands.spawn((tech(f, "SERVER", 11.0, MUTED), LetterSpacing::Px(1.5), ChildOf(line)));
         commands.spawn((text(f, format!("{} {}", r.name, r.code), 13.0, INK), ChildOf(line)));
         commands.spawn((tech(f, "…", 13.0, MUTED), RegionPing(here), ChildOf(line)));
@@ -315,6 +317,7 @@ fn menu_actions(
     mut hosted: ResMut<Hosted>,
     session: Option<Res<Session>>,
     pings: Option<Res<Pings>>,
+    regions: Res<Regions>,
     fields: Query<&EditableText, With<NameField>>,
     mut toasts: ResMut<Toasts>,
     mut next: ResMut<NextState<Screen>>,
@@ -355,7 +358,7 @@ fn menu_actions(
                         }
                         format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port())
                     }
-                    _ => server_addr(&dev, region(&settings, pings.as_deref())),
+                    _ => server_addr(&dev, &regions, region(&settings, &regions, pings.as_deref())),
                 };
                 info!("{} {addr}", if watch { "watching" } else { "matchmaking on" });
                 let latency = Duration::from_millis(dev.latency_ms);
