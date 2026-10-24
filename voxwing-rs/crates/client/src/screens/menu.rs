@@ -133,7 +133,7 @@ fn refresh_ship(
     // a "new ship" slot: what it would make
     if car.new_slot(hangar.fleet.ships.len()).is_some() {
         commands.spawn((heading(f, "新建机体", 28.0, INK), ChildOf(mid)));
-        commands.spawn((text(f, format!("机库里有 {} 架 · 点中间的卡片新建一架", hangar.fleet.ships.len()), 13.0, MUTED), ChildOf(mid)));
+        commands.spawn((text(f, format!("机库里有 {} 架 · 点中间的加号新建一架", hangar.fleet.ships.len()), 13.0, MUTED), ChildOf(mid)));
         let sec = spawn_section(&mut commands, f, card, "新建机体|NEW SHIP");
         commands.spawn((para(f, "空白机体只有一个驾驶舱。新建后进入机库，拼上引擎、机翼和武器，通过起飞检查就能出击。", 13.0, MUTED), ChildOf(sec)));
         return;

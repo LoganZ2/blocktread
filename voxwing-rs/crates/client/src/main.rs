@@ -67,7 +67,7 @@ pub struct DevOpts {
     /// Render into an image instead of the window (screenshots work with the display locked).
     pub offscreen: bool,
     /// Show a flight overlay (pause or board) from the given second on, for screenshots.
-    pub force: Option<(String, f32)>,
+    pub force: Vec<(String, f32)>,
     /// UDP port for `--server local` (default: 4433, or any free one).
     pub port: Option<u16>,
     /// Log frame pacing stats every 5 seconds.
@@ -78,13 +78,13 @@ pub struct DevOpts {
 
 impl DevOpts {
     pub fn forced(&self, what: &str, now: f32) -> bool {
-        self.force.as_ref().is_some_and(|(w, t)| w == what && now >= *t)
+        self.force.iter().any(|(w, t)| w == what && now >= *t)
     }
 }
 
 const USAGE: &str = "用法: voxwing-client [--name 名字] [--server 地址:端口|local]
 开发用: [--launch ffa|2v2|watch] [--local] [--autopilot] [--latency 毫秒] [--screen error|hangar|settings]
-       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|tip|revert|next:秒] [--frame-stats] [--port 端口] [--mute]";
+       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|tip|revert|next|hover:秒] [--frame-stats] [--port 端口] [--mute]";
 
 fn main() {
     let mut s = settings::load_settings();
@@ -110,7 +110,7 @@ fn main() {
             "--mute" => dev.mute = true,
             "--frame-stats" => dev.frame_stats = true,
             "--port" => dev.port = a.next().and_then(|v| v.parse().ok()),
-            "--force" => dev.force = a.next().and_then(|v| v.split_once(':').and_then(|(w, t)| Some((w.to_string(), t.parse().ok()?)))),
+            "--force" => dev.force.extend(a.next().and_then(|v| v.split_once(':').and_then(|(w, t)| Some((w.to_string(), t.parse().ok()?))))),
             "--count" => dev.shot_count = a.next().and_then(|v| v.parse().ok()).unwrap_or(1),
             "--every" => dev.shot_every = a.next().and_then(|v| v.parse().ok()).unwrap_or(5.0),
             "-h" | "--help" => {

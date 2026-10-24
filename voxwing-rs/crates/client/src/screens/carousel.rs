@@ -8,7 +8,11 @@ use crate::ui::icons::Icons;
 use crate::ui::kit::*;
 use crate::ui::*;
 use crate::{MainCamera, Screen};
+use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
+use bevy::text::LetterSpacing;
+use bevy::ui::Pressed;
+use bevy::ui_widgets::{Activate, Button, observe};
 use voxwing_shared::analysis::analyze;
 use voxwing_shared::blocks::Design;
 use voxwing_shared::presets::preset;
@@ -20,7 +24,7 @@ impl Plugin for CarouselPlugin {
         app.init_resource::<Carousel>()
             .init_resource::<Slide>()
             .add_systems(OnEnter(Screen::Menu), enter_carousel)
-            .add_systems(Update, (carousel_actions, spawn_ships, slide).chain().run_if(in_state(Screen::Menu)));
+            .add_systems(Update, (carousel_actions, spawn_ships, slide, style_glyphs).chain().run_if(in_state(Screen::Menu)));
     }
 }
 
@@ -73,56 +77,208 @@ struct CarouselShip(i32);
 struct Arrow(i8);
 #[derive(Component)]
 struct NewCard(i32);
+/// A bare glyph that works as a button: no surface. Under the pointer it brightens and moves a
+/// few pixels (an arrow toward where it goes, the plus's corner marks inward) — no colour fill, no
+/// bounce.
+#[derive(Component, Default)]
+struct Glyph {
+    /// 0 at rest, 1 hovered; eased.
+    hot: f32,
+}
 
-fn enter_carousel(mut commands: Commands, hangar: Res<Hangar>, mut car: ResMut<Carousel>, mut slide: ResMut<Slide>, font: Res<UiFont>, icons: Res<Icons>) {
+/// A piece of a glyph that reacts to it: the mark itself, a corner bracket, the caption.
+#[derive(Component)]
+enum Part {
+    /// The drawn mark; `nudge` is the direction it shifts under the pointer.
+    Mark { nudge: Vec2 },
+    /// A corner bracket at (±1, ±1); it closes in under the pointer.
+    Corner(Vec2),
+    Caption,
+}
+
+#[derive(Component)]
+struct PartOf(Entity);
+
+/// Glyph sizes (px): the arrows beside the ship, the frame around the plus.
+const ARROW: f32 = 128.0;
+const PLUS: f32 = 152.0;
+/// Rest and hover alpha of a mark.
+const DIM: f32 = 0.42;
+const LIT: f32 = 0.95;
+
+fn glyph_button(commands: &mut Commands, parent: Entity, node: Node, action: UiAction) -> Entity {
+    commands
+        .spawn((
+            Button,
+            Hovered::default(),
+            Glyph::default(),
+            node,
+            UiTransform::default(),
+            observe(move |_: On<Activate>, mut w: MessageWriter<UiAction>| {
+                w.write(action.clone());
+            }),
+            ChildOf(parent),
+        ))
+        .id()
+}
+
+/// An arrow beside the ship: a thin chevron, nothing behind it.
+fn spawn_arrow(commands: &mut Commands, parent: Entity, image: Handle<Image>, step: i8) -> Entity {
+    let b = glyph_button(commands, parent, Node { width: px(ARROW), height: px(ARROW), ..default() }, UiAction::CarouselStep(step));
+    commands.spawn((
+        ImageNode { image, color: INK.with_alpha(DIM), ..default() },
+        Node { width: percent(100), height: percent(100), ..default() },
+        UiTransform::default(),
+        Part::Mark { nudge: Vec2::new(step as f32 * 6.0, 0.0) },
+        PartOf(b),
+        Pickable::IGNORE,
+        ChildOf(b),
+    ));
+    b
+}
+
+/// The "new ship" mark: a thin plus in four corner brackets, captioned.
+fn spawn_plus(commands: &mut Commands, f: &UiFont, parent: Entity, image: Handle<Image>, front: bool) -> Entity {
+    let b = glyph_button(commands, parent, Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(10), ..default() }, UiAction::NewShipAt(front));
+    let frame = commands.spawn((Node { width: px(PLUS), height: px(PLUS), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() }, Pickable::IGNORE, ChildOf(b))).id();
+    commands.spawn((
+        ImageNode { image, color: INK.with_alpha(DIM), ..default() },
+        Node { width: px(PLUS * 0.62), height: px(PLUS * 0.62), ..default() },
+        Part::Mark { nudge: Vec2::ZERO },
+        PartOf(b),
+        Pickable::IGNORE,
+        ChildOf(frame),
+    ));
+    // whole pixels: a 1.5 px line blurs on a 1× screen
+    let (arm, w) = (18.0, 2.0);
+    for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+        let corner = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: if sx < 0.0 { px(0) } else { Val::Auto },
+                    right: if sx > 0.0 { px(0) } else { Val::Auto },
+                    top: if sy < 0.0 { px(0) } else { Val::Auto },
+                    bottom: if sy > 0.0 { px(0) } else { Val::Auto },
+                    width: px(arm),
+                    height: px(arm),
+                    ..default()
+                },
+                UiTransform::default(),
+                Part::Corner(Vec2::new(sx, sy)),
+                PartOf(b),
+                Pickable::IGNORE,
+                ChildOf(frame),
+            ))
+            .id();
+        let edge = |at_start: bool| if at_start { px(0) } else { Val::Auto };
+        for (bw, bh) in [(arm, w), (w, arm)] {
+            commands.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: edge(sx < 0.0),
+                    right: edge(sx > 0.0),
+                    top: edge(sy < 0.0),
+                    bottom: edge(sy > 0.0),
+                    width: px(bw),
+                    height: px(bh),
+                    ..default()
+                },
+                BackgroundColor(INK.with_alpha(0.2)),
+                Pickable::IGNORE,
+                ChildOf(corner),
+            ));
+        }
+    }
+    commands.spawn((tech(f, "NEW SHIP", 11.0, MUTED), LetterSpacing::Px(4.0), Part::Caption, PartOf(b), Pickable::IGNORE, ChildOf(b)));
+    b
+}
+
+/// Ease each glyph toward hovered or not, then pose its parts.
+#[allow(clippy::type_complexity)]
+fn style_glyphs(
+    time: Res<Time>,
+    dev: Res<crate::DevOpts>,
+    mut glyphs: Query<(&Hovered, Has<Pressed>, &mut Glyph)>,
+    mut parts: Query<(&Part, &PartOf, Option<&mut ImageNode>, Option<&mut UiTransform>, Option<&mut TextColor>, Option<&Children>)>,
+    mut bars: Query<&mut BackgroundColor>,
+) {
+    let k = 1.0 - (-time.delta_secs() * 12.0).exp();
+    // dev: show every glyph hovered (offscreen screenshots have no pointer)
+    let all = dev.forced("hover", time.elapsed_secs());
+    for (hover, pressed, mut g) in &mut glyphs {
+        // pressed: lit but held back from the full nudge, so the click registers
+        let want = if pressed { 0.6 } else if hover.get() || all { 1.0 } else { 0.0 };
+        if (g.hot - want).abs() > 1e-3 {
+            g.hot += (want - g.hot) * k;
+        }
+    }
+    for (part, of, img, tr, txt, kids) in &mut parts {
+        let Ok((_, _, g)) = glyphs.get(of.0) else { continue };
+        let h = g.hot;
+        match part {
+            Part::Mark { nudge } => {
+                if let Some(mut img) = img {
+                    img.color = INK.with_alpha(DIM + (LIT - DIM) * h);
+                }
+                if let Some(mut tr) = tr {
+                    tr.translation = Val2::px(nudge.x * h, nudge.y * h);
+                }
+            }
+            Part::Corner(dir) => {
+                if let Some(mut tr) = tr {
+                    tr.translation = Val2::px(-dir.x * 8.0 * h, -dir.y * 8.0 * h);
+                }
+                let c = INK.with_alpha(0.2).mix(&ACCENT.with_alpha(0.85), h);
+                for &bar in kids.into_iter().flatten() {
+                    if let Ok(mut bg) = bars.get_mut(bar) {
+                        bg.0 = c;
+                    }
+                }
+            }
+            Part::Caption => {
+                if let Some(mut t) = txt {
+                    t.0 = MUTED.mix(&INK, h);
+                }
+            }
+        }
+    }
+}
+
+fn enter_carousel(mut commands: Commands, hangar: Res<Hangar>, mut car: ResMut<Carousel>, mut slide: ResMut<Slide>, icons: Res<Icons>, font: Res<UiFont>) {
     car.slot = hangar.fleet.current as i32;
     slide.pos = car.slot as f32;
     slide.built.clear();
-    let f = &*font;
     // the arrows, either side of the ship
     let row = commands
         .spawn((
-            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(36), margin: UiRect::top(px(-28)), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() },
+            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(36), margin: UiRect::top(px(-ARROW / 2.0)), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() },
             Pickable::IGNORE,
             IgnoreHover,
-            // above the "new ship" cards sliding past
+            // above the "new ship" plus sliding past
             GlobalZIndex(5),
             DespawnOnExit(Screen::Menu),
         ))
         .id();
-    for (step, icon) in [(-1i8, icons.left.clone()), (1, icons.right.clone())] {
+    for (step, icon) in [(-1i8, icons.arrow_left.clone()), (1, icons.arrow_right.clone())] {
         if step == 1 {
-            commands.spawn((Node { width: px(600), ..default() }, Pickable::IGNORE, ChildOf(row)));
+            commands.spawn((Node { width: px(560), ..default() }, Pickable::IGNORE, ChildOf(row)));
         }
-        let b = spawn_btn(&mut commands, f, row, Kind::Icon, "", UiAction::CarouselStep(step), None);
-        commands.entity(b).insert((Arrow(step), Node { width: px(56), height: px(56), ..btn_node(Kind::Icon) }));
-        commands.spawn((ImageNode { image: icon, color: INK, ..default() }, Node { width: px(26), height: px(26), ..default() }, Pickable::IGNORE, ChildOf(b)));
+        let b = spawn_arrow(&mut commands, row, icon, step);
+        commands.entity(b).insert(Arrow(step));
     }
-    // a card in each "new ship" slot, sliding along with the row
+    // a plus in each "new ship" slot, sliding along with the row
     for slot in [-1, hangar.fleet.ships.len() as i32] {
         let holder = commands
             .spawn((
-                Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(36), margin: UiRect::top(px(-90)), justify_content: JustifyContent::Center, ..default() },
+                Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(36), margin: UiRect::top(px(-PLUS / 2.0)), justify_content: JustifyContent::Center, ..default() },
                 Pickable::IGNORE,
                 IgnoreHover,
                 DespawnOnExit(Screen::Menu),
             ))
             .id();
-        let card = spawn_btn(&mut commands, f, holder, Kind::Card, "新建机体", UiAction::NewShipAt(slot < 0), None);
-        commands.entity(card).insert((NewCard(slot), UiTransform::default(), Visibility::Hidden, Node { width: px(280), align_items: AlignItems::Center, padding: px(20).all(), row_gap: px(8), ..btn_node(Kind::Card) }));
-        // a drawn plus: the fonts' "+" sits off-centre at this size
-        let plus = commands.spawn((Node { width: px(44), height: px(44), margin: UiRect::bottom(px(6)), ..default() }, Pickable::IGNORE)).id();
-        for (w, h) in [(44.0, 4.0), (4.0, 44.0)] {
-            commands.spawn((
-                Node { position_type: PositionType::Absolute, left: px((44.0 - w) / 2.0), top: px((44.0 - h) / 2.0), width: px(w), height: px(h), ..default() },
-                BackgroundColor(ACCENT),
-                Pickable::IGNORE,
-                ChildOf(plus),
-            ));
-        }
-        // children so far: accent bar, label
-        commands.entity(card).insert_children(1, &[plus]);
-        commands.spawn((para(f, "从一个驾驶舱开始，进机库拼装", 13.0, MUTED), Pickable::IGNORE, ChildOf(card)));
+        let plus = spawn_plus(&mut commands, &font, holder, icons.plus.clone(), slot < 0);
+        commands.entity(plus).insert((NewCard(slot), Visibility::Hidden));
     }
 }
 
@@ -184,16 +340,13 @@ fn carousel_actions(mut msgs: MessageReader<UiAction>, mut car: ResMut<Carousel>
 /// Move the row toward the slot in view, turn the ships, frame the camera on the one in front.
 #[allow(clippy::too_many_arguments)]
 fn slide(
-    mut commands: Commands,
     time: Res<Time>,
     car: Res<Carousel>,
     mut slide: ResMut<Slide>,
     mut ships: Query<(&mut Transform, &mut Visibility, &CarouselShip), Without<MainCamera>>,
     cam: Single<(&mut Transform, &Camera), With<MainCamera>>,
-    mut cards: Query<(&mut UiTransform, &mut Visibility, &NewCard), Without<CarouselShip>>,
-    arrows: Query<(Entity, &Arrow)>,
-    new_arrows: Query<(), Added<Arrow>>,
-    mut ends: Local<(i32, i32)>,
+    mut cards: Query<(&mut UiTransform, &mut Visibility, &NewCard), (Without<CarouselShip>, Without<Arrow>)>,
+    mut arrows: Query<(&mut Visibility, &Arrow), (Without<CarouselShip>, Without<NewCard>)>,
 ) {
     if slide.xs.is_empty() {
         return;
@@ -223,7 +376,7 @@ fn slide(
     let aim = Vec3::new(0.0, -r * 0.3 - 1.0, 0.0);
     let sway = Vec3::new((t * 0.1).sin() * 2.0, 0.0, 0.0);
     *ct = Transform::from_translation(aim + Vec3::new(0.0, dist * 0.22, dist) + sway).looking_at(aim, Vec3::Y);
-    // the "new ship" cards move with the row, a screen's worth per slot
+    // the "new ship" pluses move with the row, a screen's worth per slot
     let w = camera.logical_viewport_size().map_or(1440.0, |s| s.x);
     for (mut ut, mut vis, c) in &mut cards {
         let d = c.0 as f32 - pos;
@@ -233,12 +386,13 @@ fn slide(
         }
         ut.translation = Val2::px(d * w * 0.8, 0.0);
     }
-    // an arrow is off at its end of the row
+    // no arrow past an end of the row
     let n = slide.radii.len() as i32 - 2;
-    if *ends != (car.slot, n) || !new_arrows.is_empty() {
-        *ends = (car.slot, n);
-        for (e, a) in &arrows {
-            set_enabled(&mut commands, e, if a.0 < 0 { car.slot > -1 } else { car.slot < n });
+    for (mut vis, a) in &mut arrows {
+        let on = if a.0 < 0 { car.slot > -1 } else { car.slot < n };
+        let want = if on { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
         }
     }
 }
