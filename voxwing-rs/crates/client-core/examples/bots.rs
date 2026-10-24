@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
         Some(s) => s,
         None => {
             let hub = HubConfig { queue_wait: 2.0, match_secs, ..HubConfig::default() };
-            let h = start(ServerConfig { bind: "127.0.0.1:0".parse()?, hub, verbose: true })?;
+            let h = start(ServerConfig { bind: "127.0.0.1:0".parse()?, hub, verbose: true, status: None })?;
             let addr = h.addr.to_string();
             _handle = h;
             addr

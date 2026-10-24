@@ -361,7 +361,7 @@ fn menu_actions(
 fn host_local(dev: &DevOpts) -> anyhow::Result<voxwing_server::ServerHandle> {
     let host = if dev.local_only { "127.0.0.1" } else { "0.0.0.0" };
     let hub = HubConfig { queue_wait: 0.0, ..HubConfig::default() };
-    let at = |port: u16| ServerConfig { bind: format!("{host}:{port}").parse().unwrap(), hub: hub.clone(), verbose: false };
+    let at = |port: u16| ServerConfig { bind: format!("{host}:{port}").parse().unwrap(), hub: hub.clone(), verbose: false, status: None };
     match voxwing_server::start(at(dev.port.unwrap_or(voxwing_shared::DEFAULT_PORT))) {
         Ok(h) => Ok(h),
         // the port is taken (another server on this machine): any free one will do

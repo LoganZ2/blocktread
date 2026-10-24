@@ -12,6 +12,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use crossbeam_channel::Receiver;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::{Duration, Instant};
@@ -40,7 +41,15 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     pub hub: HubConfig,
     pub verbose: bool,
+    /// A JSON file kept up to date with who is online (for deploys: restart only when empty).
+    pub status: Option<PathBuf>,
 }
+
+/// This build: the release tag CI builds it for (`VOXWING_BUILD`), else the crate version.
+pub const BUILD: &str = match option_env!("VOXWING_BUILD") {
+    Some(b) => b,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 pub struct ServerHandle {
     pub addr: SocketAddr,
@@ -100,19 +109,42 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
     let addr = ready_rx.recv()??;
     let stop_sim = stop.clone();
     let hub_cfg = cfg.hub.clone();
-    let verbose = cfg.verbose;
-    std::thread::Builder::new().name("voxwing-sim".into()).spawn(move || run(hub_cfg, net_rx, stop_sim, verbose))?;
+    let (verbose, status) = (cfg.verbose, cfg.status.clone());
+    std::thread::Builder::new().name("voxwing-sim".into()).spawn(move || run(hub_cfg, net_rx, stop_sim, verbose, status))?;
     Ok(ServerHandle { addr, stop })
 }
 
+/// Write the status file: build, protocol, who is online. Written whole and renamed into place,
+/// so a reader never sees half of it.
+fn write_status(path: &std::path::Path, hub: &hub::Hub) {
+    let (conns, matches, queued) = hub.census();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let json = format!(
+        "{{\"build\":\"{BUILD}\",\"protocol\":{},\"connections\":{conns},\"matches\":{matches},\"queued\":{queued},\"updated\":{now}}}\n",
+        voxwing_shared::PROTOCOL_VERSION
+    );
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)).is_err() {
+        eprintln!("[server] could not write status to {}", path.display());
+    }
+}
+
 /// The 60 Hz loop: network events in, one hub tick (every match steps), sleep to the next tick.
-fn run(cfg: HubConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: bool) {
+fn run(cfg: HubConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: bool, status: Option<PathBuf>) {
     let mut hub = hub::Hub::new(cfg);
     let step = Duration::from_secs_f64(1.0 / TICK_RATE as f64);
     let mut next = Instant::now();
     let (mut worst, mut total, mut n) = (Duration::ZERO, Duration::ZERO, 0u32);
     let mut report = Instant::now();
+    // the status file: written now (a deploy checks it right after a restart), then every 5 s
+    let mut status_at = Instant::now() - Duration::from_secs(5);
     while !stop.load(Ordering::Relaxed) {
+        if let Some(p) = &status
+            && status_at.elapsed() >= Duration::from_secs(5)
+        {
+            write_status(p, &hub);
+            status_at = Instant::now();
+        }
         while let Ok(ev) = rx.try_recv() {
             hub.handle(ev);
         }

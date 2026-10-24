@@ -1,0 +1,74 @@
+# Deploys a released server to the game server over SSH. Runs after a v* tag's release (ci.yml),
+# or by hand from the Actions tab with any released tag (also the way to roll back).
+#
+# Needs the repository secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS;
+# without them it skips with a warning. The server is set up once with voxwing-rs/deploy/setup.sh.
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要部署的版本（已发布的 v 标签，比如 v0.2.0）"
+        required: true
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      TAG: ${{ inputs.tag }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+    steps:
+      - name: configured?
+        id: cfg
+        run: |
+          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ]; then
+            echo "::warning::部署用的 secrets（DEPLOY_HOST 等）还没设置，跳过部署"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+          case "$TAG" in v*) ;; *) echo "::error::要部署的必须是 v 开头的发布版本：$TAG"; exit 1;; esac
+      - uses: actions/checkout@v4
+        if: steps.cfg.outputs.skip != 'true'
+        with:
+          ref: ${{ inputs.tag }}
+      - name: ssh key
+        if: steps.cfg.outputs.skip != 'true'
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+      - name: upload and switch over
+        if: steps.cfg.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          opts=(-i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=20)
+          at="$DEPLOY_USER@$DEPLOY_HOST"
+          case "$(ssh "${opts[@]}" "$at" uname -m)" in
+            x86_64) arch=x86_64 ;;
+            aarch64|arm64) arch=aarch64 ;;
+            *) echo "::error::服务器的 CPU 架构不支持"; exit 1 ;;
+          esac
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "voxwing-server-$arch-linux" -D bin
+          ssh "${opts[@]}" "$at" "mkdir -p voxwing-server/releases/$TAG"
+          scp "${opts[@]}" "bin/voxwing-server-$arch-linux" "$at:voxwing-server/releases/$TAG/voxwing-server"
+          scp "${opts[@]}" voxwing-rs/deploy/remote-deploy.sh "$at:voxwing-server/remote-deploy.sh"
+          ssh "${opts[@]}" "$at" "bash voxwing-server/remote-deploy.sh $TAG"

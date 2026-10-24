@@ -1,0 +1,16 @@
+# systemd user service for the game server, installed by setup.sh. Runs whichever release
+# ~/voxwing-server/current points at; deploys switch that link and restart.
+[Unit]
+Description=Voxwing game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# extra server flags (e.g. ARGS=--queue-wait 30), optional
+EnvironmentFile=-%h/voxwing-server/args.env
+ExecStart=%h/voxwing-server/current --bind 0.0.0.0 --port 4433 --status %h/voxwing-server/status.json $ARGS
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

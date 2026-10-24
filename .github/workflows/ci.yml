@@ -1,7 +1,8 @@
-# Builds the game client for macOS (one universal app for Apple Silicon and Intel) and Windows.
-# Every push and pull request gets the packages as workflow artifacts; a pushed tag v* also
-# publishes them as a GitHub release.
-name: client
+# Builds the game client for macOS (one universal app for Apple Silicon and Intel) and Windows,
+# and the server for Linux (static binaries, x86_64 and ARM). Every push and pull request gets them
+# as workflow artifacts; a pushed tag v* also publishes them as a GitHub release and deploys that
+# release to the game server (deploy.yml).
+name: ci
 
 on:
   push:
@@ -11,7 +12,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: client-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -63,6 +64,45 @@ jobs:
         with:
           name: bin-${{ matrix.target }}
           path: voxwing-rs/target/${{ matrix.target }}/dist/${{ matrix.exe }}
+          if-no-files-found: error
+
+  server:
+    name: server ${{ matrix.arch }}-linux
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: x86_64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
+    env:
+      # musl: one static binary that runs on any Linux
+      TARGET: ${{ matrix.arch }}-unknown-linux-musl
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+      # the version the server reports in its status file and log
+      VOXWING_BUILD: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -yq musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: voxwing-rs
+          key: server-${{ matrix.arch }}
+      - run: cargo build --profile dist --locked -p voxwing-server --target "$TARGET"
+      - name: check it is static and runs
+        run: |
+          bin="target/$TARGET/dist/voxwing-server"
+          file "$bin"
+          "$bin" --help | head -2
+          mkdir -p out && cp "$bin" "out/voxwing-server-${{ matrix.arch }}-linux"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.arch }}-linux
+          path: voxwing-rs/out/voxwing-server-${{ matrix.arch }}-linux
           if-no-files-found: error
 
   package:
@@ -125,7 +165,7 @@ jobs:
   release:
     name: release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, package]
+    needs: [test, package, server]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -138,7 +178,24 @@ jobs:
           pattern: Voxwing-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: server-*
+          path: dist
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/voxwing-server-*
           generate_release_notes: true
+
+  # the server goes out with the client: same tag, same release
+  deploy:
+    name: deploy
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    uses: ./.github/workflows/deploy.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
