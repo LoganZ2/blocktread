@@ -420,7 +420,7 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
         commands.entity(b).insert(Node { padding: UiRect::horizontal(px(12)), ..btn_node(kind) });
         b
     };
-    spawn_btn(commands, f, top, Kind::Ghost, "← 主菜单", UiAction::Goto(Screen::Menu), Some("Esc"));
+    spawn_btn(commands, f, top, Kind::Ghost, "← 大厅", UiAction::Goto(Screen::Menu), Some("Esc"));
     spawn_title(commands, f, top, "机库", "HANGAR");
     divider(commands);
     // the ship carousel: ‹ name › 2 / 5, then a new ship and delete
@@ -448,7 +448,7 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
     commands.entity(m).insert(Tip("开启后左右对称同时放置、擦除和喷漆".into()));
     bar_btn(commands, Kind::Danger, "清空", UiAction::Clear, None);
     divider(commands);
-    bar_btn(commands, Kind::Accent, "开始游戏 →", UiAction::Goto(Screen::Lobby), None);
+    bar_btn(commands, Kind::Accent, "完成", UiAction::Goto(Screen::Menu), None);
 
     let panel_top = bar_h + GAP;
     let (left_w, right_w) = (296.0, 344.0);
@@ -881,7 +881,7 @@ fn refresh_ui(
     commands.spawn((chip(f, st, sc), ChildOf(*summary)));
 
     let vals = [
-        (s.cost / 350.0, crate::screens::lobby::cost_label(s.cost)),
+        (s.cost / 350.0, crate::screens::menu::cost_label(s.cost)),
         (s.max_speed / 125.0, format!("{:.0} m/s", s.max_speed)),
         (s.pitch_rate / 2.0, format!("{:.0} 度/秒", s.pitch_rate.to_degrees())),
         (s.yaw_rate / 1.7, format!("{:.0} 度/秒", s.yaw_rate.to_degrees())),

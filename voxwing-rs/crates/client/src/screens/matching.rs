@@ -1,8 +1,8 @@
-//! The match screen: connected to a server, between flights. It shows the connection, the queue,
-//! the ship pick (everyone's choices as they make them) and the results; the flight screen takes
-//! over while a match is played.
+//! The match screen: the ship pick (everyone's choices as they make them) and the results; the
+//! flight screen takes over while a match is played. Spectators wait here for a match to watch.
+//! (Queueing happens in the lobby.)
 
-use super::lobby::cost_label;
+use super::menu::cost_label;
 use super::{Overlays, Showcase};
 use crate::flight::Session;
 use crate::flight::hud::{spawn_score_table, team_color, team_label};
@@ -24,7 +24,7 @@ impl Plugin for MatchPlugin {
             .add_systems(OnExit(Screen::Match), |mut sc: ResMut<Showcase>| sc.0 = None)
             .add_systems(
                 Update,
-                (match_flow, rebuild_stage, refresh_queue, refresh_pick, match_actions, match_keys, send_pick, sync_showcase, show_notice)
+                (match_flow, rebuild_stage, refresh_pick, match_actions, match_keys, send_pick, sync_showcase, show_notice)
                     .chain()
                     .run_if(in_state(Screen::Match))
                     .run_if(resource_exists::<Session>),
@@ -63,10 +63,6 @@ struct PickView {
 #[derive(Component)]
 struct StageRoot;
 #[derive(Component)]
-struct QueueTimer;
-#[derive(Component)]
-struct QueueNote;
-#[derive(Component)]
 struct PickTimer;
 #[derive(Component)]
 struct PickMine;
@@ -76,11 +72,6 @@ struct Roster;
 struct ConfirmBtn;
 #[derive(Component)]
 struct ViewLabel;
-
-fn mmss(secs: f32) -> String {
-    let s = secs.max(0.0) as u32;
-    format!("{}:{:02}", s / 60, s % 60)
-}
 
 /// The pick's budget, if it has one.
 fn budget(p: &Pick) -> Option<f32> {
@@ -100,7 +91,7 @@ fn pick_problem(hangar: &Hangar, p: &Pick) -> Option<String> {
     budget(p).filter(|b| a.stats.cost > b + 1e-3).map(|b| format!("造价 {:.0}，超出本局上限 {b:.0}。换一架。", a.stats.cost))
 }
 
-/// Queue as soon as the connection is up; move to flight when the match starts.
+/// Into flight when the match starts; back to the lobby to queue again.
 fn match_flow(mut session: ResMut<Session>, mut next: ResMut<NextState<Screen>>, dev: Res<DevOpts>, time: Res<Time>, mut held: Local<f32>) {
     let s = &mut *session;
     if s.core.state == ConnState::InGame {
@@ -110,11 +101,8 @@ fn match_flow(mut session: ResMut<Session>, mut next: ResMut<NextState<Screen>>,
     if s.core.state != ConnState::Lobby {
         return;
     }
-    if matches!(s.core.phase, Phase::Idle) && !s.core.watching {
-        match s.want.take() {
-            Some((mode, tier)) => s.core.queue(mode, tier),
-            None => next.set(Screen::Lobby),
-        }
+    if matches!(s.core.phase, Phase::Queued { .. }) || (matches!(s.core.phase, Phase::Idle) && !s.core.watching) {
+        next.set(Screen::Menu);
     }
     // autopilot runs (tests, screenshots) lock in by themselves
     if dev.autopilot
@@ -176,22 +164,9 @@ fn rebuild_stage(mut commands: Commands, session: Res<Session>, roots: Query<Ent
             }
             spawn_score_table(&mut commands, f, p, rows, core.mode, core.pid);
             let foot = commands.spawn((Node { justify_content: JustifyContent::FlexEnd, column_gap: px(GAP_S), ..default() }, ChildOf(p))).id();
-            spawn_btn(&mut commands, f, foot, Kind::Normal, "返回", UiAction::LeaveFlight, Some("Esc"));
+            spawn_btn(&mut commands, f, foot, Kind::Normal, "返回大厅", UiAction::LeaveFlight, Some("Esc"));
             let again = spawn_btn(&mut commands, f, foot, Kind::Accent, if core.watching { "继续观战" } else { "再来一局" }, UiAction::PlayAgain, Some("Enter"));
             commands.entity(again).insert(bevy::input_focus::AutoFocus);
-        }
-        (Stage::Queued, Phase::Queued { mode, tier, .. }) => {
-            let (_, p) = center_panel(&mut commands, 440.0);
-            let r = commands.spawn((row(GAP), ChildOf(p))).id();
-            commands.spawn((spinner(), ChildOf(r)));
-            commands.spawn((heading(f, "正在匹配", 22.0, INK), ChildOf(r)));
-            commands.spawn((tech(f, "0:00", 22.0, ACCENT), QueueTimer, Node { margin: UiRect::left(Val::Auto), ..default() }, ChildOf(r)));
-            let chips = commands.spawn((row(GAP_S), ChildOf(p))).id();
-            commands.spawn((chip(f, mode.label(), ACCENT), ChildOf(chips)));
-            commands.spawn((chip(f, tier_text(tier.as_deref()), MUTED), ChildOf(chips)));
-            commands.spawn((text(f, "", 13.0, MUTED), QueueNote, ChildOf(p)));
-            let foot = commands.spawn((Node { justify_content: JustifyContent::FlexEnd, ..default() }, ChildOf(p))).id();
-            spawn_btn(&mut commands, f, foot, Kind::Normal, "取消匹配", UiAction::CancelQueue, Some("Esc"));
         }
         _ => {
             let (_, p) = center_panel(&mut commands, 420.0);
@@ -400,33 +375,13 @@ fn refresh_pick(
     }
 }
 
-fn refresh_queue(session: Res<Session>, mut timer: Query<&mut Text, (With<QueueTimer>, Without<QueueNote>)>, mut note: Query<&mut Text, With<QueueNote>>) {
-    let Phase::Queued { waited, players, fill_in, .. } = &session.core.phase else { return };
-    let t = mmss(*waited);
-    for mut x in &mut timer {
-        if x.0 != t {
-            x.0 = t.clone();
-        }
-    }
-    let n = if *fill_in > 0.5 { format!("队列中 {players} 人 · {} 秒后由 AI 补齐空位", fill_in.ceil() as u32) } else { format!("队列中 {players} 人 · 正在组建对局…") };
-    for mut x in &mut note {
-        if x.0 != n {
-            x.0 = n.clone();
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn match_actions(mut msgs: MessageReader<UiAction>, mut session: ResMut<Session>, mut next: ResMut<NextState<Screen>>, mut view: ResMut<PickView>, hangar: Res<Hangar>, mut toasts: ResMut<Toasts>, mut modal: ResMut<ModalReq>) {
     for m in msgs.read() {
         match m.clone() {
-            UiAction::CancelQueue => {
-                session.core.unqueue();
-                next.set(Screen::Lobby);
-            }
             UiAction::LeaveFlight => {
                 modal.0 = None;
-                next.set(Screen::Lobby);
+                next.set(Screen::Menu);
             }
             UiAction::ConfirmPick => {
                 let Phase::Picking(p) = &session.core.phase else { continue };
@@ -464,10 +419,7 @@ fn match_keys(keys: Res<ButtonInput<KeyCode>>, overlays: Res<Overlays>, mut moda
     let esc = keys.just_pressed(KeyCode::Escape);
     let enter = keys.just_pressed(KeyCode::Enter);
     match stage(&session) {
-        Stage::Queued if esc => {
-            w.write(UiAction::CancelQueue);
-        }
-        Stage::Connecting | Stage::Waiting if esc => {
+        Stage::Connecting | Stage::Waiting | Stage::Queued if esc => {
             w.write(UiAction::LeaveFlight);
         }
         Stage::Picking => {

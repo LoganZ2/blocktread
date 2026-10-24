@@ -21,9 +21,8 @@ use voxwing_server::ServerHandle;
 pub enum Screen {
     #[default]
     Boot,
+    /// The lobby: your ship on display, the mode to play, matchmaking.
     Menu,
-    /// Mode select: what to play, where.
-    Lobby,
     Hangar,
     /// Connected to a server between flights: matchmaking, ship pick, results.
     Match,
@@ -33,12 +32,14 @@ pub enum Screen {
 #[derive(Component)]
 pub struct MainCamera;
 
-/// The server this client runs for local play, if any. Kept alive across matches so friends on
-/// the LAN stay connected.
+/// The game server matchmaking connects to (`--server` overrides it).
+pub const SERVER: &str = "10.0.0.81:4433";
+
+/// The server this client runs under `--server local`, if any. Kept alive across matches.
 #[derive(Resource, Default)]
 pub struct Hosted(pub Option<ServerHandle>);
 
-/// (title, message) shown in the mode select after a session ends unexpectedly (rejected,
+/// (title, message) shown in the lobby after a session ends unexpectedly (rejected,
 /// disconnected).
 #[derive(Resource, Default)]
 pub struct LastError(pub Option<(String, String)>);
@@ -52,20 +53,22 @@ pub struct DevOpts {
     /// Take this many screenshots, `shot_every` seconds apart (files get _0, _1, ... suffixes).
     pub shot_count: u32,
     pub shot_every: f32,
-    /// Start matchmaking (ffa, 2v2) or spectating (watch) on launch; "-join" plays online.
+    /// Start matchmaking (ffa, 2v2) or spectating (watch) on launch.
     pub auto_launch: Option<String>,
+    /// Server address instead of `SERVER`; "local" runs one in this client (no queue wait).
+    pub server: Option<String>,
     /// Fly by AI; also locks in the ship pick on its own.
     pub autopilot: bool,
     pub latency_ms: u64,
-    /// Play locally on 127.0.0.1 only (no LAN access).
+    /// `--server local` listens on 127.0.0.1 only (no LAN access).
     pub local_only: bool,
-    /// Start on this screen: lobby, join, error, hangar or settings.
+    /// Start on this screen: error, hangar or settings.
     pub start: Option<String>,
     /// Render into an image instead of the window (screenshots work with the display locked).
     pub offscreen: bool,
     /// Show a flight overlay (pause or board) from the given second on, for screenshots.
     pub force: Option<(String, f32)>,
-    /// UDP port for local play (default 4433).
+    /// UDP port for `--server local` (default: 4433, or any free one).
     pub port: Option<u16>,
     /// Log frame pacing stats every 5 seconds.
     pub frame_stats: bool,
@@ -77,8 +80,8 @@ impl DevOpts {
     }
 }
 
-const USAGE: &str = "用法: voxwing-client [--name 名字] [--server 地址:端口]
-开发用: [--launch ffa|2v2|watch[-join]] [--local] [--autopilot] [--latency 毫秒] [--screen lobby|join|error|hangar|settings]
+const USAGE: &str = "用法: voxwing-client [--name 名字] [--server 地址:端口|local]
+开发用: [--launch ffa|2v2|watch] [--local] [--autopilot] [--latency 毫秒] [--screen error|hangar|settings]
        [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|tip|revert:秒] [--frame-stats] [--port 端口]";
 
 fn main() {
@@ -88,7 +91,7 @@ fn main() {
     while let Some(k) = a.next() {
         match k.as_str() {
             "--name" => s.name = a.next().unwrap_or_default(),
-            "--server" => s.server = a.next().unwrap_or_default(),
+            "--server" => dev.server = a.next(),
             "--launch" => dev.auto_launch = a.next(),
             "--autopilot" => dev.autopilot = true,
             "--latency" => dev.latency_ms = a.next().and_then(|v| v.parse().ok()).unwrap_or(0),
@@ -129,6 +132,7 @@ fn main() {
         .add_systems(Startup, (ui::load_fonts, setup_camera, setup_art, audio::build_sounds))
         .add_systems(Update, boot.run_if(in_state(Screen::Boot)))
         .add_systems(Update, dev_shot)
+        .add_systems(Last, exit_watchdog)
         .add_plugins((ui::UiPlugin, hangar::HangarPlugin, flight::FlightPlugin, screens::ScreensPlugin, thumbs::ThumbsPlugin, display::DisplayPlugin, pacing::PacingPlugin))
         .run();
 }
@@ -165,8 +169,6 @@ fn boot(mut next: ResMut<NextState<Screen>>, dev: Res<DevOpts>, mut overlays: Re
         last.0 = Some(("无法连接".into(), "连接超时。请确认地址和端口无误、服务器正在运行，并且防火墙放行了 UDP。".into()));
     }
     next.set(match dev.start.as_deref() {
-        _ if dev.auto_launch.is_some() => Screen::Lobby,
-        Some("lobby" | "join" | "error") => Screen::Lobby,
         Some("hangar") => Screen::Hangar,
         _ => Screen::Menu,
     });
@@ -187,5 +189,18 @@ fn dev_shot(mut commands: Commands, dev: Res<DevOpts>, off: Option<Res<Offscreen
         *taken += 1;
     } else if *taken >= count && dev.exit_after_shot && t > dev.shot_after + (count - 1) as f32 * dev.shot_every + 1.5 {
         exit.write(AppExit::Success);
+    }
+}
+
+/// Quitting can deadlock on macOS: the render thread drops the window, which has to happen on the
+/// main thread, while the main thread waits for the render thread to finish. Everything is saved
+/// as it changes, so if the app hasn't exited shortly after quitting, end the process.
+fn exit_watchdog(mut exits: MessageReader<AppExit>, mut armed: Local<bool>) {
+    if exits.read().next().is_some() && !*armed {
+        *armed = true;
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            std::process::exit(0);
+        });
     }
 }

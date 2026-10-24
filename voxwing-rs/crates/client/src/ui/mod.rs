@@ -167,20 +167,16 @@ pub enum UiAction {
     DeleteShipConfirmed,
     CopyShare,
     PasteShare,
-    // mode select
+    // lobby
     /// The mode to queue for: "ffa" or "2v2".
     HostMode(&'static str),
     /// Budget tier to queue in (a `balance.ron` key, empty = no limit).
     HostBudget(String),
-    /// Play online (on a server) rather than on this machine.
-    Online(bool),
-    RecentServer(String),
-    /// Start matchmaking.
+    /// Start matchmaking, or cancel it while queued.
     Launch,
-    /// Like Launch, but to spectate.
+    /// Spectate instead of play.
     Watch,
-    // matchmaking, ship pick, results
-    CancelQueue,
+    // ship pick, results
     /// Lock in the picked ship.
     ConfirmPick,
     /// Show this seat's ship in the showcase (None: your own).
@@ -189,7 +185,7 @@ pub enum UiAction {
     PlayAgain,
     // flight
     Resume,
-    /// Leave the match (and the server) for the mode select.
+    /// Leave the match (and the server) for the lobby.
     LeaveFlight,
 }
 

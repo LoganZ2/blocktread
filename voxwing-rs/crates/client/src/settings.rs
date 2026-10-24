@@ -15,13 +15,10 @@ use voxwing_shared::grid::in_grid;
 #[serde(default)]
 pub struct Settings {
     pub name: String,
-    pub server: String,
     /// The mode to queue for: "ffa" or "2v2".
     pub host_mode: String,
     /// Budget tier to queue in (`balance.ron` key); empty = no limit.
     pub host_budget: String,
-    /// Play on the server at `server` instead of on this machine.
-    pub online: bool,
     pub invert_y: bool,
     pub sound: bool,
     pub volume: f32,
@@ -43,13 +40,11 @@ pub struct Settings {
     pub fullscreen: bool,
     pub show_fps: bool,
     pub show_help: bool,
-    /// Recently joined server addresses, newest first.
-    pub recent: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { name: "飞行员".into(), server: format!("127.0.0.1:{}", voxwing_shared::DEFAULT_PORT), host_mode: "ffa".into(), host_budget: String::new(), online: false, invert_y: false, sound: true, volume: 0.8, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true, recent: Vec::new() }
+        Settings { name: "飞行员".into(), host_mode: "ffa".into(), host_budget: String::new(), invert_y: false, sound: true, volume: 0.8, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true }
     }
 }
 
@@ -84,14 +79,6 @@ pub fn load_settings() -> Settings {
 
 pub fn save_settings(s: &Settings) {
     write("settings.json", s);
-}
-
-impl Settings {
-    pub fn remember_server(&mut self, addr: &str) {
-        self.recent.retain(|a| a != addr);
-        self.recent.insert(0, addr.to_string());
-        self.recent.truncate(5);
-    }
 }
 
 

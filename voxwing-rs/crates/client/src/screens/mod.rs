@@ -1,8 +1,7 @@
-//! Screen flow: main menu → launch prep (lobby) → flight, with the hangar and settings reachable
-//! from anywhere sensible. This module holds what several screens share: the 3D ship showcase,
+//! Screen flow: lobby (main screen, matchmaking) → ship pick → flight → results → lobby, with the
+//! hangar and settings reachable from the lobby. This module holds what several screens share: the 3D ship showcase,
 //! navigation and design-picking actions, the settings overlay and the FPS readout.
 
-pub mod lobby;
 pub mod matching;
 pub mod menu;
 
@@ -28,19 +27,16 @@ pub struct ScreensPlugin;
 
 impl Plugin for ScreensPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((menu::MenuPlugin, lobby::LobbyPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
+        app.add_plugins((menu::MenuPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
             .init_resource::<Overlays>()
             .init_resource::<Showcase>()
             .add_systems(OnEnter(Screen::Menu), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
                 spawn_showcase(c, a, s, art, m, h, cam, Screen::Menu)
             })
-            .add_systems(OnEnter(Screen::Lobby), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
-                spawn_showcase(c, a, s, art, m, h, cam, Screen::Lobby)
-            })
             .add_systems(OnEnter(Screen::Match), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
                 spawn_showcase(c, a, s, art, m, h, cam, Screen::Match)
             })
-            .add_systems(Update, showcase_turn.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Lobby | Screen::Match)))
+            .add_systems(Update, showcase_turn.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Match)))
             .add_systems(Update, (global_actions, refresh_showcase, render_settings, display_banner, apply_settings, fps_text));
     }
 }
@@ -121,9 +117,11 @@ fn showcase_turn(time: Res<Time>, state: Res<State<Screen>>, mut ship: Query<(&m
     let Ok((mut st, s)) = ship.single_mut() else { return };
     st.rotation = Quat::from_rotation_y(t * 0.22 + 2.4) * Quat::from_rotation_x(0.08 * (t * 0.5).sin());
     st.translation = Vec3::Y * (t * 0.8).sin() * 0.25;
-    let dist = s.0 * 3.6 + 18.0;
+    // the lobby makes the ship the centrepiece: closer than elsewhere
+    let dist = if *state.get() == Screen::Menu { s.0 * 3.0 + 11.0 } else { s.0 * 3.6 + 18.0 };
     let target = match state.get() {
-        Screen::Menu => Vec3::new(-s.0 * 1.1 - 6.0, -1.5, 0.0),
+        // the lobby: centred, a little high, above the ship bar
+        Screen::Menu => Vec3::new(0.0, -s.0 * 0.3 - 1.0, 0.0),
         _ => Vec3::new(s.0 * 0.15, 0.6, 0.0),
     };
     let sway = Vec3::new((t * 0.1).sin() * 2.0, 0.0, 0.0);

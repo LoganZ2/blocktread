@@ -134,11 +134,10 @@ impl Plugin for FlightPlugin {
             .add_systems(Startup, setup_assets)
             .add_systems(OnEnter(Screen::Flight), (enter_flight, hud::spawn_hud))
             .add_systems(OnExit(Screen::Flight), exit_flight)
-            // back at the mode select (or further): the session ends
-            .add_systems(OnEnter(Screen::Lobby), end_session)
+            // back in the lobby the session ends, unless it is queueing there
             .add_systems(OnEnter(Screen::Menu), end_session)
             .add_systems(OnEnter(Screen::Hangar), end_session)
-            .add_systems(Update, step_core.run_if(in_state(Screen::Match)).run_if(resource_exists::<Session>))
+            .add_systems(Update, step_core.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Match)).run_if(resource_exists::<Session>))
             .add_systems(
                 Update,
                 (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, exhaust::update_exhaust, fx::update_fx, env::orient_rocks, hud::update_hud, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum)
@@ -192,11 +191,17 @@ fn exit_flight(mut vis: ResMut<ships::ShipVisuals>) {
     vis.0.clear();
 }
 
-fn end_session(mut commands: Commands, session: Option<Res<Session>>) {
-    if let Some(s) = session {
-        s.core.leave();
-        commands.remove_resource::<Session>();
+fn end_session(mut commands: Commands, session: Option<Res<Session>>, screen: Res<State<Screen>>, mut toasts: ResMut<crate::ui::kit::Toasts>) {
+    let Some(s) = session else { return };
+    let queueing = !s.core.watching && (matches!(s.core.phase, Phase::Queued { .. }) || s.want.is_some());
+    if queueing && *screen.get() == Screen::Menu {
+        return;
     }
+    if queueing {
+        toasts.push("已取消匹配", crate::ui::kit::ToastKind::Info);
+    }
+    s.core.leave();
+    commands.remove_resource::<Session>();
 }
 
 fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>>, window: Single<&Window, With<PrimaryWindow>>, mut session: ResMut<Session>, time: Res<Time>, settings: Res<Settings>) {
@@ -252,7 +257,7 @@ fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButto
 
 /// Run the client core one frame (in flight and on the match screen); leave flight when the match
 /// is over, and the session when the connection fails.
-fn step_core(mut session: ResMut<Session>, time: Res<Time>, screen: Res<State<Screen>>, mut next: ResMut<NextState<Screen>>, mut last_err: ResMut<LastError>) {
+fn step_core(mut commands: Commands, mut session: ResMut<Session>, time: Res<Time>, screen: Res<State<Screen>>, mut next: ResMut<NextState<Screen>>, mut last_err: ResMut<LastError>) {
     let dt = time.delta_secs().min(0.1);
     let s = &mut *session;
     let (pitch, yaw, roll, throttle, buttons, target, locked) = (s.pitch, s.yaw, s.roll, s.throttle, s.buttons, s.target, s.locked);
@@ -285,7 +290,11 @@ fn step_core(mut session: ResMut<Session>, time: Res<Time>, screen: Res<State<Sc
     if let Some(e) = err {
         warn!("session ended: {}", e.1);
         last_err.0 = Some(e);
-        next.set(Screen::Lobby);
+        if *screen.get() == Screen::Menu {
+            commands.remove_resource::<Session>();
+        } else {
+            next.set(Screen::Menu);
+        }
     } else if *screen.get() == Screen::Flight && matches!(s.core.phase, Phase::Over { .. }) {
         next.set(Screen::Match);
     }
@@ -491,7 +500,7 @@ fn flight_actions(
     }
     if keys.just_pressed(KeyCode::Escape) && !overlays.any(&modal) {
         if session.core.state == ConnState::Connecting {
-            next.set(Screen::Lobby);
+            next.set(Screen::Menu);
         } else {
             session.paused = !session.paused;
             if !session.paused {
@@ -505,7 +514,7 @@ fn flight_actions(
                 session.paused = false;
                 focus.clear();
             }
-            UiAction::LeaveFlight => next.set(Screen::Lobby),
+            UiAction::LeaveFlight => next.set(Screen::Menu),
             _ => {}
         }
     }

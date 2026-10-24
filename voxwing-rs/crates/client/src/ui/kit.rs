@@ -181,17 +181,6 @@ pub fn spawn_btn(commands: &mut Commands, f: &UiFont, parent: Entity, kind: Kind
     e
 }
 
-/// Main-menu entry: index, title, English caption and shortcut.
-pub fn spawn_menu_item(commands: &mut Commands, f: &UiFont, parent: Entity, index: usize, zh: &str, en: &str, action: UiAction, hint: &str) -> Entity {
-    let e = spawn_btn(commands, f, parent, Kind::Menu, zh, action, Some(hint));
-    let idx = commands.spawn((tech(f, format!("{:02}", index + 1), 14.0, ACCENT), Node { width: px(20), ..default() }, UiTransform::default(), Shift, Pickable::IGNORE)).id();
-    let cap = commands.spawn((tech(f, en, 12.0, MUTED), LetterSpacing::Px(3.0), UiTransform::default(), Shift, Pickable::IGNORE)).id();
-    // children so far: bar, label, hint
-    commands.entity(e).insert_children(1, &[idx]);
-    commands.entity(e).insert_children(3, &[cap]);
-    e
-}
-
 /// Part tile: the part's rendered thumbnail with its shortcut in the corner. The name and details
 /// come from its [`Tip`] / [`TipDetail`].
 pub fn spawn_part_tile(commands: &mut Commands, f: &UiFont, parent: Entity, image: Handle<Image>, key: &str, action: UiAction) -> Entity {
