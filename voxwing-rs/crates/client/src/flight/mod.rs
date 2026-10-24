@@ -121,8 +121,11 @@ fn watch_order(core: &ClientCore) -> Vec<u16> {
 /// Seconds the camera lingers on a watched ship's wreck.
 pub const WRECK_LINGER: f32 = 2.2;
 
+/// The jet engine loop, and the afterburner loop over it.
 #[derive(Component)]
 struct Hum;
+#[derive(Component)]
+struct Burner;
 
 pub struct FlightPlugin;
 
@@ -184,6 +187,7 @@ fn enter_flight(
     }
     if sounds.enabled {
         commands.spawn((AudioPlayer(sounds.hum.clone()), PlaybackSettings::LOOP.with_volume(Volume::Linear(0.0)), Hum, DespawnOnExit(Screen::Flight)));
+        commands.spawn((AudioPlayer(sounds.burner.clone()), PlaybackSettings::LOOP.with_volume(Volume::Linear(0.0)), Burner, DespawnOnExit(Screen::Flight)));
     }
 }
 
@@ -520,13 +524,44 @@ fn flight_actions(
     }
 }
 
-fn engine_hum(session: Res<Session>, sounds: Res<Sounds>, mut sinks: Query<&mut AudioSink, With<Hum>>) {
-    for mut sink in &mut sinks {
-        let (v, sp) = match session.view() {
-            Some(m) if sounds.enabled && !session.paused => (0.08 + m.throttle * 0.14 + if m.boosting { 0.08 } else { 0.0 }, 0.8 + m.throttle * 0.5 + if m.boosting { 0.3 } else { 0.0 }),
-            _ => (0.0, 1.0),
-        };
-        sink.set_volume(Volume::Linear(v));
-        sink.set_speed(sp);
+/// Engine sound for the ship in view: the jet spools up in level and a little in pitch with the
+/// throttle, and under boost the afterburner fades in over it after its ignition. Everything is
+/// eased, so a change of throttle or boost never jumps.
+#[allow(clippy::type_complexity)]
+fn engine_hum(
+    mut commands: Commands,
+    session: Res<Session>,
+    mut sounds: ResMut<Sounds>,
+    time: Res<Time>,
+    mut hums: Query<&mut AudioSink, (With<Hum>, Without<Burner>)>,
+    mut burners: Query<&mut AudioSink, (With<Burner>, Without<Hum>)>,
+    // eased level, pitch and afterburner, and whether the ship was boosting last frame
+    mut eased: Local<(f32, f32, f32, bool)>,
+) {
+    let dt = time.delta_secs();
+    let (level, pitch, burn, boosting) = match session.view() {
+        Some(m) if sounds.enabled && !session.paused => {
+            let b = if m.boosting { 1.0 } else { 0.0 };
+            (0.45 + 0.55 * m.throttle, 0.9 + 0.2 * m.throttle + 0.05 * b, b, m.boosting)
+        }
+        _ => (0.0, 1.0, 0.0, false),
+    };
+    let e = &mut *eased;
+    let k = 1.0 - (-dt * 5.0).exp();
+    e.0 += (level - e.0) * k;
+    e.1 += (pitch - e.1) * k;
+    // the afterburner lights fast and dies away slower
+    let kb = 1.0 - (-dt * if burn > e.2 { 9.0 } else { 3.0 }).exp();
+    e.2 += (burn - e.2) * kb;
+    if boosting && !e.3 {
+        sounds.play(&mut commands, time.elapsed_secs_f64(), crate::audio::Sfx::Ignite, 0.8, 0.4);
+    }
+    e.3 = boosting;
+    for mut sink in &mut hums {
+        sink.set_volume(Volume::Linear(e.0 * crate::audio::ENGINE_GAIN * sounds.volume));
+        sink.set_speed(e.1);
+    }
+    for mut sink in &mut burners {
+        sink.set_volume(Volume::Linear(e.2 * crate::audio::BURNER_GAIN * sounds.volume));
     }
 }

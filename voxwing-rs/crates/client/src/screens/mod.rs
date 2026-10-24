@@ -202,6 +202,7 @@ fn global_actions(
                 match k {
                     SetKey::Sound => settings.sound = on,
                     SetKey::Volume => settings.volume = v,
+                    SetKey::Music => settings.music = v,
                     SetKey::Sensitivity => settings.sensitivity = v,
                     SetKey::InvertY => settings.invert_y = on,
                     SetKey::Bloom => settings.bloom = on,
@@ -284,6 +285,7 @@ fn render_settings(
     let audio = spawn_section(&mut commands, f, body, "声音|AUDIO");
     spawn_toggle(&mut commands, f, audio, "音效", settings.sound, SetKey::Sound);
     spawn_slider(&mut commands, f, audio, "音量", settings.volume, 0.0, 1.0, SetKey::Volume, pct);
+    spawn_slider(&mut commands, f, audio, "背景音乐", settings.music, 0.0, 1.0, SetKey::Music, pct);
     let controls = spawn_section(&mut commands, f, body, "操控|CONTROLS");
     spawn_slider(&mut commands, f, controls, "鼠标灵敏度", settings.sensitivity, 0.5, 2.0, SetKey::Sensitivity, mult);
     spawn_toggle(&mut commands, f, controls, "鼠标 Y 轴反转（推鼠标往上 = 机头向下）", settings.invert_y, SetKey::InvertY);

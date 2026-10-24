@@ -22,6 +22,8 @@ pub struct Settings {
     pub invert_y: bool,
     pub sound: bool,
     pub volume: f32,
+    /// Background music level (times `volume`); 0 = off.
+    pub music: f32,
     /// Mouse steering sensitivity multiplier.
     pub sensitivity: f32,
     pub bloom: bool,
@@ -44,7 +46,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { name: "飞行员".into(), host_mode: "ffa".into(), host_budget: String::new(), invert_y: false, sound: true, volume: 0.8, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true }
+        Settings { name: "飞行员".into(), host_mode: "ffa".into(), host_budget: String::new(), invert_y: false, sound: true, volume: 0.8, music: 0.6, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true }
     }
 }
 

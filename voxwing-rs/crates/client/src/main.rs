@@ -146,7 +146,7 @@ fn main() {
         .add_systems(Update, boot.run_if(in_state(Screen::Boot)))
         .add_systems(Update, dev_shot)
         .add_systems(Last, exit_watchdog)
-        .add_plugins((ui::UiPlugin, hangar::HangarPlugin, flight::FlightPlugin, screens::ScreensPlugin, thumbs::ThumbsPlugin, display::DisplayPlugin, pacing::PacingPlugin))
+        .add_plugins((ui::UiPlugin, hangar::HangarPlugin, flight::FlightPlugin, screens::ScreensPlugin, thumbs::ThumbsPlugin, display::DisplayPlugin, pacing::PacingPlugin, audio::MusicPlugin))
         .run();
 }
 

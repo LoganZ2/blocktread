@@ -122,6 +122,7 @@ pub fn display(font: &UiFont, s: impl Into<String>, size: f32, color: Color) -> 
 pub enum SetKey {
     Sound,
     Volume,
+    Music,
     Sensitivity,
     InvertY,
     Bloom,
