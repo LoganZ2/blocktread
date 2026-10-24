@@ -2,6 +2,21 @@
 
 用方块拼战机，在小行星带里联机空战。服务器权威、客户端预测，走 QUIC（UDP）。
 
+## 下载
+
+GitHub Actions（`.github/workflows/client.yml`）在每次推送到 main 和每个 PR 时编译客户端：
+
+- **macOS**：`Voxwing-macOS.zip`，解压得到 `Voxwing.app`，Apple Silicon 和 Intel 通用，macOS 11 以上。
+- **Windows**：`Voxwing-Windows.zip`，解压得到 `Voxwing.exe`，64 位，不需要另装 VC++ 运行库。
+
+在仓库的 Actions 页面打开最新一次 client 运行，底部 Artifacts 里下载。推送 `v` 开头的标签（例如 `git tag v0.2.0 && git push origin v0.2.0`）会把两个包发布成 GitHub Release，下载链接可以直接发给别人。
+
+两个包都没有付费签名，第一次打开会被系统拦一下：
+- macOS 提示「无法验证开发者」：右键（或按住 Control 点）`Voxwing.app` → 打开 → 打开；或者到「系统设置 → 隐私与安全性」里点「仍要打开」。
+- Windows 弹出 SmartScreen：点「更多信息」→「仍要运行」。
+
+CI 用 `dist` 配置编译（release 去掉符号，体积小三分之一左右）。
+
 ## 运行
 
 需要 Rust 1.97+（Bevy 0.20 的最低要求）。第一次编译 Bevy 要几分钟。

@@ -14,3 +14,8 @@ opt-level = 3
 
 [profile.release]
 codegen-units = 16
+
+# what CI ships: a release build without symbols (about a third smaller)
+[profile.dist]
+inherits = "release"
+strip = true
