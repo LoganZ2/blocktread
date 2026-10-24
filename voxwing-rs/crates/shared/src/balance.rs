@@ -2,7 +2,8 @@
 //!
 //! The file is built into the program. Setting `VOXWING_BALANCE` to a path loads that file instead,
 //! for trying changes without rebuilding (the duel simulator does this). Clients and servers
-//! compare `hash()` when a player joins, so both sides always simulate with the same numbers.
+//! compare `hash()` when a player joins, so both sides always simulate with the same numbers. The
+//! hash ignores line endings: a Windows checkout's CRLF file is the same table.
 
 use crate::blocks::{BlockType, DamageKind, TypeInfo};
 use serde::Deserialize;
@@ -57,6 +58,11 @@ pub struct Balance {
 }
 
 impl Balance {
+    /// This table's fingerprint (what `hash()` returns for the table in use).
+    pub fn fingerprint(&self) -> u64 {
+        self.hash
+    }
+
     pub fn tier(&self, key: &str) -> Option<&Tier> {
         self.tiers.iter().find(|t| t.key == key)
     }
@@ -101,6 +107,8 @@ pub fn hash() -> u64 {
 }
 
 pub fn parse(text: &str) -> Result<Balance, String> {
+    // the same table whatever line endings the checkout gave it
+    let text = &text.replace("\r\n", "\n");
     let f: File = ron::from_str(text).map_err(|e| e.to_string())?;
     let mut types = Vec::with_capacity(BlockType::ALL.len());
     for t in BlockType::ALL {

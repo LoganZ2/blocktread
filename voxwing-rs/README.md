@@ -64,7 +64,7 @@ cargo run -p voxwing-server --release
    ```bash
    ssh-keygen -t ed25519 -f ~/.ssh/voxwing-deploy -N "" -C voxwing-deploy
    ```
-4. 以这个用户登录服务器，跑一次 `deploy/setup.sh`（把 `voxwing-rs/deploy/` 传上去再运行；要输一次 sudo 密码）。它装好 systemd 用户服务：开机自启、崩溃自动重启，日志用 `journalctl --user -u voxwing-server -f` 看。
+4. 以这个用户登录服务器，跑一次 `deploy/setup.sh`（把 `voxwing-rs/deploy/` 传上去再运行；要输一次 sudo 密码）。它装好 systemd 用户服务：开机自启、崩溃自动重启，日志用 `journalctl --user-unit voxwing-server -f` 看。
 5. 仓库 Settings → Secrets and variables → Actions 里加四个 secret：
 
    | 名字 | 内容 |

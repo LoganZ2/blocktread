@@ -89,3 +89,13 @@ fn shields_shrug_off_energy_and_crack_under_explosions() {
     assert_eq!(b.on_shield(10.0, DamageKind::Kinetic), 10.0);
     assert!(b.on_shield(10.0, DamageKind::Explosive) > 10.0);
 }
+
+#[test]
+fn line_endings_do_not_change_the_fingerprint() {
+    // a Windows checkout turns the file's line endings into CRLF; it must still match a server
+    // built from an LF checkout
+    let lf = include_str!("../balance.ron").replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    assert_eq!(parse(&lf).unwrap().fingerprint(), parse(&crlf).unwrap().fingerprint());
+    assert_eq!(parse(&lf).unwrap().fingerprint(), voxwing_shared::balance::hash());
+}

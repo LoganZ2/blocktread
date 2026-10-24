@@ -41,7 +41,7 @@ for _ in $(seq 1 20); do
 done
 
 echo "::error::release $name did not come up; rolling back"
-journalctl --user -u voxwing-server -n 40 --no-pager || true
+journalctl --user-unit voxwing-server -n 40 --no-pager || true
 if [ -n "$prev" ]; then
   ln -sfn "$prev" "$base/current.new" && mv -Tf "$base/current.new" "$base/current"
   systemctl --user restart voxwing-server

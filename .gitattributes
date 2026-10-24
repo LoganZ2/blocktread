@@ -1,0 +1,3 @@
+# LF everywhere, Windows checkouts included: files built into the program (the balance table is
+# fingerprinted to check client and server agree) must be byte-identical on every platform
+* text=auto eol=lf
