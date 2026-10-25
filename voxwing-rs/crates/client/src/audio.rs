@@ -27,6 +27,11 @@ pub enum Sfx {
     Crash,
     /// The afterburner lighting up.
     Ignite,
+    /// Your round landed on a hull, on a shield, or finished a ship off: heard at full volume
+    /// however far away the target is.
+    ConfirmHull,
+    ConfirmShield,
+    ConfirmKill,
     Lock,
     Warn,
     Place,
@@ -57,6 +62,9 @@ const EFFECTS: &[(Sfx, &[&[u8]], f32, f32)] = &[
     (Sfx::Boom, takes!("boom_0", "boom_1"), 0.85, 0.05),
     (Sfx::Crash, takes!("crash_1", "crash_3"), 0.65, 0.06),
     (Sfx::Ignite, takes!("ignite"), 0.5, 0.04),
+    (Sfx::ConfirmHull, takes!("confirm_hull"), 0.34, 0.04),
+    (Sfx::ConfirmShield, takes!("confirm_shield"), 0.26, 0.04),
+    (Sfx::ConfirmKill, takes!("confirm_kill"), 0.5, 0.0),
     (Sfx::Lock, takes!("lock"), 0.35, 0.0),
     (Sfx::Warn, takes!("warn"), 0.3, 0.0),
     (Sfx::Deny, takes!("deny"), 0.32, 0.0),

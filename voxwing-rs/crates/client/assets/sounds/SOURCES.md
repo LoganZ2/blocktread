@@ -25,6 +25,9 @@
 | `pop_1..3` | explosionCrunch_001..003 | 截到 0.7 秒，淡出 |
 | `boom_0..1` | lowFrequency_explosion_000 + explosionCrunch_004 / 003 | 混合，短回声尾 |
 | `crash_1, crash_3` | impactMetal_001, 003 | 降调到 0.72 倍 |
+| `confirm_hull` | impactMetal_002 + click_001 | 升调到 1.5 倍，截到 0.18 秒，叠一声点击 |
+| `confirm_shield` | glass_003 | 截到 0.2 秒，淡出 |
+| `confirm_kill` | confirmation_002 + lowFrequency_explosion_001 | 确认音叠在低频爆炸的前 0.4 秒上 |
 | `engine` | Jet Engine（m_cel） | 取 0.5–9.5 秒的稳定运转段，末尾 1 秒和开头交叉淡化成 8 秒无缝循环 |
 | `burner` | Afterburner（TiesWijnen） | 取 2.0–5.2 秒的稳定燃烧段，交叉淡化成 2.6 秒无缝循环 |
 | `ignite` | Afterburner（TiesWijnen） | 开头 1.3 秒的点火，淡出 |

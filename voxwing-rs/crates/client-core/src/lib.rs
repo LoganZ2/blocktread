@@ -63,6 +63,8 @@ pub enum CoreEvent {
     Shot { ship: u16, weapon: BlockType, pos: Vec3, vel: Vec3, own: bool },
     Announce { title: String, sub: String },
     Feed { text: String, bad: bool },
+    /// One of our rounds landed on `target`: on its shield, or its hull.
+    HitConfirm { target: u16, shield: bool },
     YourShip(Option<u16>),
 }
 
@@ -473,6 +475,7 @@ impl ClientCore {
             ServerMsg::Crash { pos } => self.events.push(CoreEvent::Crash { pos }),
             ServerMsg::Announce { title, sub } => self.events.push(CoreEvent::Announce { title, sub }),
             ServerMsg::Feed { text, bad } => self.events.push(CoreEvent::Feed { text, bad }),
+            ServerMsg::HitConfirm { target, shield } => self.events.push(CoreEvent::HitConfirm { target, shield }),
             ServerMsg::Scores { rows, wave, enemies, limit, left } => {
                 self.scores = rows;
                 self.wave = wave;

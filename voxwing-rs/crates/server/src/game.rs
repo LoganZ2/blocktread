@@ -786,6 +786,8 @@ impl Game {
     }
 
     fn update_bolts(&mut self, t: u32) {
+        // (shooter ship, ship hit, on its shield) for the hit markers
+        let mut landed: Vec<(u16, u16, bool)> = Vec::new();
         let mut i = 0;
         while i < self.bolts.len() {
             let b = &mut self.bolts[i];
@@ -825,6 +827,7 @@ impl Game {
                         s.kin.shield_delay = 3.0;
                         s.recent_dmg += b.dmg * 0.5;
                         s.last_attacker = Some(b.owner);
+                        landed.push((b.owner, s.id, true));
                         self.events.push(ServerMsg::ShieldHit { ship: s.id, pos: pt });
                         if spec.splash > 0.0 {
                             self.events.push(ServerMsg::Explosion { pos: pt, size: 0.6 });
@@ -833,6 +836,7 @@ impl Game {
                         break;
                     }
                     if let Some((blk, pt)) = s.body.ray(sp, sr, b.prev, b.pos) {
+                        landed.push((b.owner, s.id, false));
                         if spec.splash > 0.0 {
                             self.events.push(ServerMsg::Explosion { pos: pt, size: spec.splash * 0.55 });
                             s.splash(sp, sr, pt, spec.splash, b.dmg, spec.kind, Some(b.owner));
@@ -869,6 +873,12 @@ impl Game {
                 self.bolts.swap_remove(i);
             } else {
                 i += 1;
+            }
+        }
+        // tell each shooter that has a player behind it
+        for (shooter, target, shield) in landed {
+            if let Some(p) = self.ships.get(&shooter).and_then(|s| s.owner).and_then(|pid| self.players.get(&pid)) {
+                p.send(&ServerMsg::HitConfirm { target, shield });
             }
         }
     }

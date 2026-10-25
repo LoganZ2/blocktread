@@ -120,6 +120,9 @@ pub enum ServerMsg {
     Feed { text: String, bad: bool },
     /// `limit`: kills that win the match (0 = none); `left`: seconds until it ends (0 = no clock).
     Scores { rows: Vec<ScoreRow>, wave: u32, enemies: u32, limit: u32, left: f32 },
+    /// To the shooter only: one of their rounds landed on `target`, on its shield or its hull.
+    /// Last, so the variants before it keep their numbers and older clients skip it unread.
+    HitConfirm { target: u16, shield: bool },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

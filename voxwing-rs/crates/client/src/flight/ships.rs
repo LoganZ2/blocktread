@@ -1,7 +1,7 @@
 //! Turns the client core's ship state and events into entities, effects and sounds.
 
 use super::fx::{self, Fx, Kind};
-use super::hud::Hud;
+use super::hud::{HitKind, Hud};
 use super::{Session, env};
 use crate::Screen;
 use crate::art::{BlockArt, Finish, dmg_level};
@@ -131,6 +131,10 @@ pub fn apply_events(
                     fx::debris(&mut commands, &mut fx, &mut mats, *p, v, *c);
                 }
                 sounds.play(&mut commands, now, Sfx::Boom, (falloff(ear, pos) * 2.0).min(1.0), 0.0);
+                if killer.is_some() && killer == me && Some(id) != me {
+                    hud.hit(id, HitKind::Kill);
+                    sounds.play(&mut commands, now, Sfx::ConfirmKill, 1.0, 0.0);
+                }
                 if Some(id) == me {
                     session.death = Some((pos, 0.0));
                     hud.dmg_flash = 1.0;
@@ -156,6 +160,8 @@ pub fn apply_events(
                     hud.dmg_flash = (hud.dmg_flash + 0.25).min(1.0);
                     session.shake = (session.shake + 0.3).min(1.2);
                     hud.silo_dirty = true;
+                    // being hit is heard up close, not from where the chase camera hangs
+                    sounds.play(&mut commands, now, Sfx::Hit, 1.0, 0.06);
                 } else {
                     sounds.play(&mut commands, now, Sfx::Hit, falloff(ear, s.pos) * 0.8, 0.04);
                 }
@@ -229,6 +235,11 @@ pub fn apply_events(
                 info!("announce: {title} · {sub}");
                 hud.announce(&title, &sub);
                 sounds.play(&mut commands, now, Sfx::Wave, 0.5, 0.5);
+            }
+            CoreEvent::HitConfirm { target, shield } => {
+                hud.hit(target, if shield { HitKind::Shield } else { HitKind::Hull });
+                let k = if shield { Sfx::ConfirmShield } else { Sfx::ConfirmHull };
+                sounds.play(&mut commands, now, k, 1.0, 0.06);
             }
             CoreEvent::Feed { text, bad } => {
                 info!("feed: {text}");

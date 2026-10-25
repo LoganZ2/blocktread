@@ -12,6 +12,7 @@ use bevy::text::LetterSpacing;
 use bevy::window::PrimaryWindow;
 use voxwing_client_core::ConnState;
 use voxwing_shared::blocks::BlockType;
+use voxwing_shared::flight::InputCmd;
 use voxwing_shared::protocol::{Mode, ScoreRow};
 use voxwing_shared::weapons::intercept;
 
@@ -20,6 +21,19 @@ const BRACKETS: usize = 16;
 const DOTS: usize = 48;
 const FEED: usize = 5;
 const WARNS: usize = 3;
+const SHIELD: Color = Color::srgb(0.4, 0.62, 1.0);
+/// The off-screen arrow: half its base, and its height.
+const ARROW_W: f32 = 11.0;
+const ARROW_H: f32 = 18.0;
+
+/// What the last of your rounds did, for the marker around the crosshair.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum HitKind {
+    #[default]
+    Hull,
+    Shield,
+    Kill,
+}
 
 #[derive(Resource, Default)]
 pub struct Hud {
@@ -30,6 +44,10 @@ pub struct Hud {
     pub silo_dirty: bool,
     help_t: f32,
     show_help: bool,
+    /// The hit marker: what it shows and how much of it is left (1 → 0).
+    hit: (HitKind, f32),
+    /// The ship your last round landed on, and how much its bracket still flashes.
+    hit_on: (u16, f32),
 }
 
 impl Hud {
@@ -39,6 +57,14 @@ impl Hud {
     pub fn feed(&mut self, t: &str, bad: bool) {
         self.feed.insert(0, (t.to_string(), bad, 4.5));
         self.feed.truncate(FEED);
+    }
+    /// One of your rounds landed on `target`, or finished it off.
+    pub fn hit(&mut self, target: u16, kind: HitKind) {
+        // the hits that land right after a kill don't cut its marker short
+        if kind == HitKind::Kill || self.hit.0 != HitKind::Kill || self.hit.1 <= 0.0 {
+            self.hit = (kind, 1.0);
+        }
+        self.hit_on = (target, 1.0);
     }
 }
 
@@ -60,6 +86,9 @@ pub enum El {
     Radar,
     Dot(usize),
     Cross,
+    /// Four ticks around the crosshair when your rounds land; `HitTick(0..4)` are the ticks.
+    HitMark,
+    HitTick(u8),
     Stick,
     Bracket(usize),
     BracketText(usize),
@@ -151,7 +180,7 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
     commands.entity(bl).insert((Pickable::IGNORE, El::Gauges));
     commands.spawn((Node { width: px(140), height: px(140), ..default() }, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.25)), El::Silo, Pickable::IGNORE, ChildOf(bl)));
     let bars = commands.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(9), width: px(210), ..default() }, Pickable::IGNORE, ChildOf(bl))).id();
-    for (i, (label, c)) in [("船体", OK), ("护盾", Color::srgb(0.4, 0.62, 1.0)), ("能量", WARN)].into_iter().enumerate() {
+    for (i, (label, c)) in [("船体", OK), ("护盾", SHIELD), ("能量", WARN)].into_iter().enumerate() {
         let r = commands.spawn((col(3.0), Pickable::IGNORE, ChildOf(bars))).id();
         let head = commands.spawn((Node { justify_content: JustifyContent::SpaceBetween, ..default() }, Pickable::IGNORE, ChildOf(r))).id();
         commands.spawn((text(f, label, 12.0, MUTED), Pickable::IGNORE, ChildOf(head)));
@@ -200,6 +229,18 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
     let cross = put(&mut commands, Node { width: px(32), height: px(32), border: px(2).all(), border_radius: BorderRadius::MAX, ..abs(0.0, 0.0) }, El::Cross);
     commands.entity(cross).insert(BorderColor::all(ACCENT));
     commands.spawn((Node { position_type: PositionType::Absolute, left: px(13), top: px(13), width: px(2), height: px(2), ..default() }, BackgroundColor(ACCENT), Pickable::IGNORE, ChildOf(cross)));
+    // hit marker: a tick at each edge of a box turned 45°, so they form an X around the crosshair
+    let mark = put(&mut commands, Node { width: px(0), height: px(0), ..abs(0.0, 0.0) }, El::HitMark);
+    commands.entity(mark).insert((Visibility::Hidden, UiTransform { rotation: Rot2::degrees(45.0), ..default() }));
+    for i in 0..4u8 {
+        let n = match i {
+            0 => Node { left: percent(50), top: px(0), ..abs(0.0, 0.0) },
+            1 => Node { left: percent(50), bottom: px(0), top: Val::Auto, ..abs(0.0, 0.0) },
+            2 => Node { top: percent(50), left: px(0), ..abs(0.0, 0.0) },
+            _ => Node { top: percent(50), right: px(0), left: Val::Auto, ..abs(0.0, 0.0) },
+        };
+        commands.spawn((n, BackgroundColor(INK), El::HitTick(i), Pickable::IGNORE, ChildOf(mark)));
+    }
     let stick = put(&mut commands, Node { width: px(12), height: px(12), border: px(1).all(), border_radius: BorderRadius::MAX, ..abs(0.0, 0.0) }, El::Stick);
     commands.entity(stick).insert(BorderColor::all(ACCENT.with_alpha(0.6)));
     let lead = put(&mut commands, Node { width: px(12), height: px(12), border: px(2).all(), ..abs(0.0, 0.0) }, El::Lead);
@@ -235,7 +276,7 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
         }
         commands.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(-8), height: px(3), ..default() }, BackgroundColor(DANGER), El::BracketHp(i), Pickable::IGNORE, ChildOf(b)));
         commands.spawn((text(f, "", 12.0, DANGER), Node { position_type: PositionType::Absolute, top: percent(100), margin: UiRect::top(px(10)), ..default() }, TextLayout::no_wrap(), El::BracketText(i), Pickable::IGNORE, ChildOf(b)));
-        let a = put(&mut commands, Node { width: px(0), height: px(0), border: UiRect { left: px(7), right: px(7), bottom: px(12), ..default() }, ..abs(0.0, 0.0) }, El::Arrow(i));
+        let a = put(&mut commands, Node { width: px(0), height: px(0), border: UiRect { left: px(ARROW_W), right: px(ARROW_W), bottom: px(ARROW_H), ..default() }, ..abs(0.0, 0.0) }, El::Arrow(i));
         commands.entity(a).insert((BorderColor { left: Color::NONE, right: Color::NONE, top: Color::NONE, bottom: DANGER }, Visibility::Hidden, UiTransform::default()));
     }
 
@@ -278,6 +319,7 @@ pub fn update_hud(
     mut els: Query<(Entity, &El, &mut Node, &mut Visibility, Option<&mut BackgroundColor>, Option<&mut BorderColor>, Option<&mut UiTransform>, Option<&Children>, Option<&mut Plate>)>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
     mut corners: Query<&mut BorderColor, Without<El>>,
+    dev: Res<crate::DevOpts>,
 ) {
     let dt = time.delta_secs();
     if keys.just_pressed(KeyCode::KeyH) {
@@ -292,6 +334,15 @@ pub fn update_hud(
     hud.feed.retain(|f| f.2 > 0.0);
     hud.dmg_flash *= (-dt * 3.0).exp();
     hud.shield_flash *= (-dt * 3.0).exp();
+    let hold = if hud.hit.0 == HitKind::Kill { 0.7 } else { 0.28 };
+    hud.hit.1 = (hud.hit.1 - dt / hold).max(0.0);
+    hud.hit_on.1 = (hud.hit_on.1 - dt / 0.15).max(0.0);
+    // dev: hold a marker up for screenshots
+    for (k, kind) in [("hit", HitKind::Hull), ("shieldhit", HitKind::Shield), ("kill", HitKind::Kill)] {
+        if dev.forced(k, time.elapsed_secs()) {
+            hud.hit = (kind, 0.9);
+        }
+    }
     let core = &session.core;
     let (camera, cgt) = *cam;
     let (w, h) = (window.width(), window.height());
@@ -308,6 +359,25 @@ pub fn update_hud(
             _ => (Vec2::new(w / 2.0, h / 2.0) + Vec2::new(v.x, -v.y).normalize_or(Vec2::Y) * 10000.0, true),
         }
     };
+    // the crosshair: where rounds fired now are when they reach the aim distance, straight out
+    // along the nose and carried along by the ship's own velocity, which they inherit (a sliding
+    // turn takes them off a plain boresight mark)
+    let aim = view.map(|m| {
+        let own = me.is_some_and(|x| x.id == m.id);
+        let d = core.pred.as_ref().filter(|_| own).and_then(|p| p.last_cmd()).map_or(InputCmd::default().aim_dist, |c| c.aim_dist).max(30) as f32;
+        let t = d / m.body.bolt_speed.max(1.0);
+        screen(m.pos + m.rot * Vec3::NEG_Z * d + m.vel * t)
+    });
+    // the hit marker starts just outside the crosshair's ring (radius 16) and opens out a little as
+    // it fades; a kill's is longer, thicker and red
+    let kill = hud.hit.0 == HitKind::Kill;
+    let (gap, len, thick) = if kill { (19.0 + 8.0 * (1.0 - hud.hit.1), 13.0, 3.0) } else { (19.0 + 4.0 * (1.0 - hud.hit.1), 8.0, 2.0) };
+    let mark_c = match hud.hit.0 {
+        HitKind::Hull => INK,
+        HitKind::Shield => SHIELD,
+        HitKind::Kill => DANGER,
+    }
+    .with_alpha((hud.hit.1 * 1.8).min(1.0));
     let view_id = view.map(|v| v.id);
     let enemies: Vec<_> = core.ships.values().filter(|s| Some(s.id) != view_id && view.is_none_or(|m| m.team != s.team)).collect();
     let friends: Vec<_> = core.ships.values().filter(|s| Some(s.id) != view_id && view.is_some_and(|m| m.team == s.team)).collect();
@@ -538,15 +608,37 @@ pub fn update_hud(
                     show(&mut vis, false);
                 }
             }
-            El::Cross => match view {
-                Some(m) => {
-                    let (s, off) = screen(m.pos + m.rot * Vec3::NEG_Z * 260.0);
+            El::Cross => match aim {
+                Some((s, off)) => {
                     node.left = px(s.x - 16.0);
                     node.top = px(s.y - 16.0);
                     show(&mut vis, !off);
                 }
                 None => show(&mut vis, false),
             },
+            El::HitMark => match aim {
+                Some((s, off)) if hud.hit.1 > 0.0 => {
+                    let r = gap + len;
+                    node.left = px(s.x - r);
+                    node.top = px(s.y - r);
+                    node.width = px(r * 2.0);
+                    node.height = px(r * 2.0);
+                    show(&mut vis, !off);
+                }
+                _ => show(&mut vis, false),
+            },
+            El::HitTick(i) => {
+                // 0, 1 run along the box's vertical axis, 2, 3 along its horizontal one
+                let (tw, th) = if i < 2 { (thick, len) } else { (len, thick) };
+                node.width = px(tw);
+                node.height = px(th);
+                node.margin = if i < 2 { UiRect::left(px(-thick / 2.0)) } else { UiRect::top(px(-thick / 2.0)) };
+                if let Some(mut b) = bg
+                    && b.0 != mark_c
+                {
+                    b.0 = mark_c;
+                }
+            }
             El::Stick => match window.cursor_position() {
                 Some(c) => {
                     node.left = px(c.x - 6.0);
@@ -573,10 +665,12 @@ pub fn update_hud(
                         node.top = px(sp.y - r);
                         node.width = px(r * 2.0);
                         node.height = px(r * 2.0);
+                        // the corners flash white when one of your rounds lands on it
+                        let flash = if hud.hit_on.0 == s.id { hud.hit_on.1 } else { 0.0 };
                         if let Some(k) = kids {
                             for c in k.iter() {
                                 if let Ok(mut b) = corners.get_mut(c) {
-                                    b.set_all(col);
+                                    b.set_all(col.mix(&INK, flash));
                                 }
                             }
                         }
@@ -607,8 +701,8 @@ pub fn update_hud(
                 }
                 let d = (sp - Vec2::new(w / 2.0, h / 2.0)).normalize_or(Vec2::Y);
                 let e = Vec2::new(w / 2.0, h / 2.0) + Vec2::new(d.x * (w / 2.0 - 46.0), d.y * (h / 2.0 - 46.0));
-                node.left = px(e.x - 7.0);
-                node.top = px(e.y - 6.0);
+                node.left = px(e.x - ARROW_W);
+                node.top = px(e.y - ARROW_H / 2.0);
                 if let Some(mut t) = ut {
                     t.rotation = Rot2::radians(d.y.atan2(d.x) + std::f32::consts::FRAC_PI_2);
                 }

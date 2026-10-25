@@ -61,6 +61,14 @@ one boom_0 "$TAIL" "$S/lowFrequency_explosion_000.ogg" "$S/explosionCrunch_004.o
 one boom_1 "$TAIL" "$S/lowFrequency_explosion_000.ogg" "$S/explosionCrunch_003.ogg"
 for i in 1 3; do one "crash_$i" "asetrate=44100*0.72,aresample=44100" "$S/impactMetal_00$i.ogg"; done
 
+# hit confirms, heard only by the shooter: a metal knock pitched up and cut short with a click on
+# its edge (hull), a short glassy ting (shield), a confirm tone over a low thump (kill)
+ff -i "$S/impactMetal_002.ogg" -i "$U/click_001.ogg" -filter_complex "[0:a]aformat=sample_fmts=fltp:channel_layouts=mono,asetrate=44100*1.5,aresample=44100,atrim=0:0.18,afade=t=out:st=0.08:d=0.1[a];[1:a]aformat=sample_fmts=fltp:channel_layouts=mono,aresample=44100,volume=0.7[b];[a][b]amix=inputs=2:normalize=0" -c:a pcm_s16le "$TMP/a.wav"
+finish "$TMP/a.wav" confirm_hull
+one confirm_shield "aformat=channel_layouts=mono,atrim=0:0.2,afade=t=out:st=0.1:d=0.1" "$U/glass_003.ogg"
+ff -i "$U/confirmation_002.ogg" -i "$S/lowFrequency_explosion_001.ogg" -filter_complex "[0:a]aformat=sample_fmts=fltp:channel_layouts=mono,aresample=44100[a];[1:a]aformat=sample_fmts=fltp:channel_layouts=mono,aresample=44100,atrim=0:0.4,afade=t=out:st=0.15:d=0.25,volume=0.5[b];[a][b]amix=inputs=2:normalize=0" -c:a pcm_s16le "$TMP/a.wav"
+finish "$TMP/a.wav" confirm_kill
+
 # interface and hangar
 one lock - "$U/confirmation_001.ogg"
 one warn - "$U/error_006.ogg"
