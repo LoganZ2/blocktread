@@ -43,12 +43,17 @@ enum Stage {
     Over,
 }
 
+/// Modes with no vehicle pick: the vehicle from the lobby goes straight in (into the
+/// free-for-all room, or onto the test range).
+pub fn straight_in(mode: Mode) -> bool {
+    matches!(mode, Mode::Ffa | Mode::Solo)
+}
+
 fn stage(s: &Session) -> Stage {
     match (&s.core.state, &s.core.phase) {
         (ConnState::Connecting, _) => Stage::Connecting,
         (_, Phase::Queued { .. }) => Stage::Queued,
-        // the test range has no one to pick against: the vehicle from the lobby goes straight in
-        (_, Phase::Picking(p)) if p.mode == Mode::Solo => Stage::Waiting,
+        (_, Phase::Picking(p)) if straight_in(p.mode) => Stage::Waiting,
         (_, Phase::Picking(_)) => Stage::Picking,
         (_, Phase::Over { .. }) => Stage::Over,
         _ => Stage::Waiting,
@@ -107,14 +112,14 @@ fn match_flow(mut session: ResMut<Session>, mut next: ResMut<NextState<Screen>>,
     if matches!(s.core.phase, Phase::Queued { .. }) || (matches!(s.core.phase, Phase::Idle) && !s.core.watching) {
         next.set(Screen::Menu);
     }
-    // autopilot runs (tests, screenshots) lock in by themselves, and the test range at once
+    // autopilot runs (tests, screenshots) lock in by themselves, and the modes without a pick at once
     if let Phase::Picking(p) = &s.core.phase
-        && (dev.autopilot || p.mode == Mode::Solo)
+        && (dev.autopilot || straight_in(p.mode))
         && p.ships[p.you].is_some()
         && !p.ready[p.you]
     {
         *held += time.delta_secs();
-        if *held > 1.5 || p.mode == Mode::Solo {
+        if *held > 1.5 || straight_in(p.mode) {
             *held = 0.0;
             s.core.ready();
         }
@@ -177,6 +182,7 @@ fn rebuild_stage(mut commands: Commands, session: Res<Session>, roots: Query<Ent
                 Stage::Connecting => ("正在连接", format!("{} · 5 秒无响应会自动放弃", session.addr)),
                 _ if core.watching => ("等待对局", "服务器上的下一局开始后就能观看".to_string()),
                 _ if matches!(&core.phase, Phase::Picking(p) if p.mode == Mode::Solo) => ("正在进入试车场", "本机 · 只有你自己".to_string()),
+                _ if matches!(&core.phase, Phase::Picking(p) if p.mode == Mode::Ffa) => ("正在进入自由混战", format!("{} · 随时可以退出", session.addr)),
                 _ => ("正在进入", session.addr.clone()),
             };
             let r = commands.spawn((row(GAP), ChildOf(p))).id();

@@ -139,6 +139,8 @@ pub struct ClientCore {
     /// Kills that win the match (0 = none) and seconds left on its clock (0 = no clock).
     pub limit: u32,
     pub left: f32,
+    /// The free-for-all room's round (`left` counts down the round, or the break after it).
+    pub round: Round,
     pub events: Vec<CoreEvent>,
     pub stats: NetStats,
     shots: Vec<Shot>,
@@ -177,6 +179,7 @@ impl ClientCore {
             enemies: 0,
             limit: 0,
             left: 0.0,
+            round: Round::None,
             events: Vec::new(),
             stats: NetStats::default(),
             shots: Vec::new(),
@@ -244,6 +247,7 @@ impl ClientCore {
         self.clock = ServerClock::default();
         self.limit = 0;
         self.left = 0.0;
+        self.round = Round::None;
     }
 
     pub fn my(&self) -> Option<&CoreShip> {
@@ -482,12 +486,13 @@ impl ClientCore {
             ServerMsg::Announce { title, sub } => self.events.push(CoreEvent::Announce { title, sub }),
             ServerMsg::Feed { text, bad } => self.events.push(CoreEvent::Feed { text, bad }),
             ServerMsg::HitConfirm { target, shield } => self.events.push(CoreEvent::HitConfirm { target, shield }),
-            ServerMsg::Scores { rows, wave, enemies, limit, left } => {
+            ServerMsg::Scores { rows, wave, enemies, limit, left, round } => {
                 self.scores = rows;
                 self.wave = wave;
                 self.enemies = enemies;
                 self.limit = limit;
                 self.left = left;
+                self.round = round;
             }
         }
     }

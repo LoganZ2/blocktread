@@ -28,6 +28,8 @@ pub struct GameConfig {
 
 /// The test range's map: the same hills and rocks every time.
 pub const SOLO_SEED: u64 = 2604;
+/// The break between two rounds of the free-for-all room, with the results up.
+pub const ROUND_BREAK_SECS: f32 = 10.0;
 const MAX_DATAGRAM: usize = 1100;
 const MAX_REWIND_TICKS: u32 = 30;
 
@@ -191,10 +193,25 @@ pub struct Game {
     /// Kills that win a match (0 = none) and the tick it ends at: shown on the scoreboard.
     pub limit: u32,
     pub ends_at: Option<u32>,
+    /// The free-for-all room's rounds: their length in seconds (None: no rounds), where the
+    /// current one stands, and the tick its clock (or the break after it) runs out.
+    pub rounds: Option<f32>,
+    round: Round,
+    round_end: u32,
 }
 
 fn secs(s: f32) -> u32 {
     (s * TICK_RATE as f32) as u32
+}
+
+/// "8 分钟", "2:30", "45 秒".
+fn span(s: f32) -> String {
+    let s = s.ceil() as u32;
+    match (s / 60, s % 60) {
+        (0, x) => format!("{x} 秒"),
+        (m, 0) => format!("{m} 分钟"),
+        (m, x) => format!("{m}:{x:02}"),
+    }
 }
 
 fn seg_sphere(a: Vec3, b: Vec3, c: Vec3, r: f32) -> Option<f32> {
@@ -237,6 +254,9 @@ impl Game {
             team_kills: BTreeMap::new(),
             limit: 0,
             ends_at: None,
+            rounds: None,
+            round: Round::None,
+            round_end: 0,
         }
     }
 
@@ -375,12 +395,15 @@ impl Game {
             Mode::Ffa | Mode::Teams => {
                 self.spawn_player(pid);
                 let sub = match (self.cfg.mode, self.limit) {
-                    (Mode::Teams, 0) => "击毁对方队伍的战车".to_string(),
-                    (Mode::Teams, n) => format!("先拿到 {n} 次击毁的队伍获胜"),
-                    (_, 0) => "击毁任何其他战车".to_string(),
-                    (_, n) => format!("先拿到 {n} 次击毁的人获胜"),
+                    _ if self.rounds.is_some() => self.room_status(),
+                    (Mode::Teams, 0) => Some("击毁对方队伍的战车".to_string()),
+                    (Mode::Teams, n) => Some(format!("先拿到 {n} 次击毁的队伍获胜")),
+                    (_, 0) => Some("击毁任何其他战车".to_string()),
+                    (_, n) => Some(format!("先拿到 {n} 次击毁的人获胜")),
                 };
-                if let Some(p) = self.players.get(&pid) {
+                if let Some(sub) = sub
+                    && let Some(p) = self.players.get(&pid)
+                {
                     p.send(&ServerMsg::Announce { title: self.cfg.mode.label().into(), sub });
                 }
             }
@@ -588,6 +611,25 @@ impl Game {
         if ps.is_empty() { PLAYER_SPAWN } else { ps.iter().copied().sum::<Vec3>() / ps.len() as f32 }
     }
 
+    /// Every player's vehicle as good as new, and those without one back in.
+    fn repair_players(&mut self) {
+        let ids: Vec<u16> = self.players.values().filter_map(|p| p.ship).collect();
+        for id in ids {
+            if let Some(s) = self.ships.get_mut(&id) {
+                s.body.repair();
+                s.ws = WeaponState::new(&s.body);
+                s.kin.energy = s.body.stats.energy_cap;
+                s.kin.shield = s.body.stats.shield_cap;
+                s.disabled_t = None;
+                self.events.push(ServerMsg::ShipRepaired { id });
+            }
+        }
+        let dead: Vec<u16> = self.players.iter().filter(|(_, p)| p.ship.is_none()).map(|(&k, _)| k).collect();
+        for pid in dead {
+            self.spawn_player(pid);
+        }
+    }
+
     fn run_timers(&mut self) {
         let now = self.tick;
         let due: Vec<Timer> = {
@@ -606,21 +648,7 @@ impl Game {
             match t {
                 Timer::StartWave => self.start_wave(),
                 Timer::RepairPlayers => {
-                    let ids: Vec<u16> = self.players.values().filter_map(|p| p.ship).collect();
-                    for id in ids {
-                        if let Some(s) = self.ships.get_mut(&id) {
-                            s.body.repair();
-                            s.ws = WeaponState::new(&s.body);
-                            s.kin.energy = s.body.stats.energy_cap;
-                            s.kin.shield = s.body.stats.shield_cap;
-                            s.disabled_t = None;
-                            self.events.push(ServerMsg::ShipRepaired { id });
-                        }
-                    }
-                    let dead: Vec<u16> = self.players.iter().filter(|(_, p)| p.ship.is_none()).map(|(&k, _)| k).collect();
-                    for pid in dead {
-                        self.spawn_player(pid);
-                    }
+                    self.repair_players();
                     self.feed("战车已完全修复".into(), false);
                 }
                 Timer::Restart => {
@@ -953,11 +981,13 @@ impl Game {
         let killer_name = killer.map(|k| k.name.clone());
         let killer_owner = killer.and_then(|k| k.owner);
         let killer_seat = killer.and_then(|k| k.seat);
-        if let Some(k) = killer.filter(|k| k.team != victim.team) {
+        // between two rounds the results stand: nothing counts until the next one
+        let counts = self.round != Round::Over;
+        if let Some(k) = killer.filter(|k| k.team != victim.team && counts) {
             *self.team_kills.entry(k.team).or_insert(0) += 1;
         }
         let pts = 100 + (victim.body.max_hp / 10.0) as u32;
-        if let Some(pid) = killer_owner
+        if let Some(pid) = killer_owner.filter(|_| counts)
             && let Some(p) = self.players.get_mut(&pid)
         {
             p.kills += 1;
@@ -974,7 +1004,7 @@ impl Game {
         if let Some(pid) = victim.owner
             && let Some(p) = self.players.get_mut(&pid)
         {
-            p.deaths += 1;
+            p.deaths += counts as u32;
             p.ship = None;
             p.send(&ServerMsg::YourShip { id: None });
             if matches!(self.cfg.mode, Mode::Ffa | Mode::Teams | Mode::Solo) {
@@ -1047,6 +1077,7 @@ impl Game {
         for pid in due {
             self.spawn_player(pid);
         }
+        self.round_logic();
         if self.players.is_empty() {
             return;
         }
@@ -1055,6 +1086,80 @@ impl Game {
             self.pending_bots += 1;
             let delay = if self.tick < secs(5.0) || bots == 0 { 1.5 } else { 5.0 };
             self.after(delay, Timer::SpawnBot);
+        }
+    }
+
+    /// The free-for-all room's clock: a round starts once two players are in and is ranked by
+    /// kills when its time is up; then, after a short break, the next one starts from nothing.
+    /// With fewer than two in, the room waits (and a round under way is called off).
+    fn round_logic(&mut self) {
+        let Some(len) = self.rounds else { return };
+        let enough = self.pilots() >= 2;
+        let due = self.tick >= self.round_end;
+        match self.round {
+            Round::None | Round::Waiting if enough => self.start_round(len),
+            Round::None => {
+                self.round = Round::Waiting;
+                self.scores_dirty = true;
+            }
+            Round::Running if !enough => {
+                self.round = Round::Waiting;
+                self.scores_dirty = true;
+                self.announce("等待中", "场上不到 2 人，本局取消 · 再来一名玩家就重新计时".into());
+            }
+            Round::Running if due => self.end_round(),
+            Round::Over if due && enough => self.start_round(len),
+            Round::Over if due => {
+                self.round = Round::Waiting;
+                self.scores_dirty = true;
+                self.announce("等待中", "再来一名玩家就开始下一局".into());
+            }
+            _ => {}
+        }
+    }
+
+    fn start_round(&mut self, len: f32) {
+        for p in self.players.values_mut() {
+            p.kills = 0;
+            p.deaths = 0;
+            p.score = 0;
+        }
+        self.team_kills.clear();
+        self.repair_players();
+        self.round = Round::Running;
+        self.round_end = self.tick + secs(len);
+        self.scores_dirty = true;
+        self.announce("开战", format!("{} 人混战 · {} 内击毁最多的人获胜", self.pilots(), span(len)));
+    }
+
+    fn end_round(&mut self) {
+        self.round = Round::Over;
+        self.round_end = self.tick + secs(ROUND_BREAK_SECS);
+        self.scores_dirty = true;
+        let rows = self.scores();
+        let next = format!("{:.0} 秒后开始下一局", ROUND_BREAK_SECS);
+        let Some(top) = rows.first().filter(|r| r.kills > 0) else {
+            self.announce("本局结束", format!("没有人击毁对手 · {next}"));
+            return;
+        };
+        // ranked by kills, then fewer deaths
+        let tied: Vec<&str> = rows.iter().filter(|r| (r.kills, r.deaths) == (top.kills, top.deaths)).map(|r| r.name.as_str()).collect();
+        let (title, sub) = if tied.len() > 1 {
+            ("平局".to_string(), format!("{} 并列第一 · {next}", tied.join("、")))
+        } else {
+            (format!("{} 获胜", top.name), format!("击毁 {} · 阵亡 {} · {next}", top.kills, top.deaths))
+        };
+        self.announce(&title, sub);
+    }
+
+    /// For someone driving into the room: where its round stands (None when one starts right away).
+    fn room_status(&self) -> Option<String> {
+        let left = self.round_end.saturating_sub(self.tick) as f32 / TICK_RATE as f32;
+        match self.round {
+            _ if self.pilots() >= 2 && matches!(self.round, Round::None | Round::Waiting) => None,
+            Round::None | Round::Waiting => Some("等待中 · 再来一名玩家就开始计时".into()),
+            Round::Running => Some(format!("本局还剩 {} · 击毁最多的人获胜", span(left))),
+            Round::Over => Some(format!("{:.0} 秒后开始下一局", left.ceil())),
         }
     }
 
@@ -1079,7 +1184,12 @@ impl Game {
                 team: s.team.unwrap_or(BOT_PID_BASE + i as u16),
             }))
             .collect();
-        rows.sort_by(|a, b| b.score.cmp(&a.score).then(b.kills.cmp(&a.kills)));
+        // co-op by points; the others by kills, then fewer deaths
+        if mode == Mode::Coop {
+            rows.sort_by(|a, b| b.score.cmp(&a.score).then(b.kills.cmp(&a.kills)));
+        } else {
+            rows.sort_by(|a, b| b.kills.cmp(&a.kills).then(a.deaths.cmp(&b.deaths)).then(b.score.cmp(&a.score)));
+        }
         rows
     }
 
@@ -1100,8 +1210,13 @@ impl Game {
             self.scores_dirty = false;
             let rows = self.scores();
             let enemies = self.ships.values().filter(|s| s.owner.is_none()).count() as u32;
-            let left = self.ends_at.map_or(0.0, |e| e.saturating_sub(self.tick) as f32 / TICK_RATE as f32);
-            self.events.push(ServerMsg::Scores { rows, wave: self.wave, enemies, limit: self.limit, left });
+            let end = match self.round {
+                Round::Running | Round::Over => Some(self.round_end),
+                Round::Waiting => None,
+                Round::None => self.ends_at,
+            };
+            let left = end.map_or(0.0, |e| e.saturating_sub(self.tick) as f32 / TICK_RATE as f32);
+            self.events.push(ServerMsg::Scores { rows, wave: self.wave, enemies, limit: self.limit, left, round: self.round });
         }
         self.send_events();
         if t % SNAPSHOT_INTERVAL != 0 {
@@ -1200,3 +1315,83 @@ fn spawn_msg(s: &Ship) -> ServerMsg {
     ServerMsg::ShipSpawn { id: s.id, team: s.team, name: s.name.clone(), owner: s.owner, design: (*s.body.design).clone(), kin: s.kin }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+
+    /// The free-for-all room with these players in, its round under way.
+    fn room(names: &[&str]) -> (Game, Vec<UnboundedReceiver<Outgoing>>) {
+        let mut g = Game::with_seed(GameConfig { mode: Mode::Ffa, bots: 0, budget: None, verbose: false }, 1);
+        g.rounds = Some(60.0);
+        let mut rxs = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let (out, rx) = unbounded_channel();
+            g.join(i as u16 + 1, name.to_string(), Some(preset("bison")), None, out);
+            rxs.push(rx);
+        }
+        g.tick();
+        assert_eq!(g.round, Round::Running);
+        (g, rxs)
+    }
+
+    /// `killer` takes out `victim` (by pid), who is straight back in.
+    fn frag(g: &mut Game, killer: u16, victim: u16) {
+        let ship = |g: &Game, pid: u16| g.players[&pid].ship.unwrap();
+        let (k, v) = (ship(g, killer), ship(g, victim));
+        g.kill(v, Some(k));
+        g.spawn_player(victim);
+    }
+
+    fn end_round(g: &mut Game) {
+        g.round_end = g.tick;
+        g.tick();
+        assert_eq!(g.round, Round::Over);
+    }
+
+    fn announces(rx: &mut UnboundedReceiver<Outgoing>) -> Vec<(String, String)> {
+        let mut v = Vec::new();
+        while let Ok(o) = rx.try_recv() {
+            if let Outgoing::Reliable(b) = o
+                && let Some(ServerMsg::Announce { title, sub }) = decode::<ServerMsg>(&b)
+            {
+                v.push((title, sub));
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn a_round_is_ranked_by_kills_and_the_break_counts_for_nothing() {
+        let (mut g, mut rxs) = room(&["甲", "乙", "丙"]);
+        // 乙 takes out 甲 twice and is taken out once; 丙 has one kill and no deaths
+        frag(&mut g, 2, 1);
+        frag(&mut g, 2, 1);
+        frag(&mut g, 3, 2);
+        let order: Vec<(String, u32, u32)> = g.scores().into_iter().map(|r| (r.name, r.kills, r.deaths)).collect();
+        assert_eq!(order, [("乙".to_string(), 2, 1), ("丙".to_string(), 1, 0), ("甲".to_string(), 0, 2)], "kills first, not points");
+        end_round(&mut g);
+        let said = announces(&mut rxs[0]);
+        assert!(said.iter().any(|(t, s)| t == "乙 获胜" && s.contains("击毁 2")), "{said:?}");
+        // between rounds nothing counts
+        frag(&mut g, 1, 2);
+        assert_eq!(g.scores()[0].kills, 2);
+        assert_eq!(g.players[&1].kills, 0);
+        // the next round starts from nothing
+        g.round_end = g.tick;
+        g.tick();
+        assert_eq!(g.round, Round::Running);
+        assert!(g.scores().iter().all(|r| r.kills == 0 && r.deaths == 0));
+    }
+
+    #[test]
+    fn level_on_kills_and_deaths_is_a_draw() {
+        let (mut g, mut rxs) = room(&["甲", "乙"]);
+        frag(&mut g, 1, 2);
+        frag(&mut g, 2, 1);
+        end_round(&mut g);
+        let said = announces(&mut rxs[1]);
+        assert!(said.iter().any(|(t, s)| t == "平局" && s.contains("甲、乙 并列第一")), "{said:?}");
+    }
+}

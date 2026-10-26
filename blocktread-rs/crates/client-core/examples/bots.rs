@@ -1,5 +1,6 @@
 //! Headless netcode check: AI-flown clients queue, pick a ship, play over real QUIC (with
 //! simulated ping) against an embedded server, then report how well prediction matched the server.
+//! Free-for-all (the default) drives them into the room, whose rounds are `--match-secs` long.
 //!
 //!   cargo run -p blocktread_client_core --example bots -- --clients 4 --secs 40 --latency 50 --mode 2v2
 
@@ -9,7 +10,7 @@ use blocktread_server::{HubConfig, ServerConfig, start};
 use blocktread_shared::ai::{AiPilot, Contact, Skill};
 use blocktread_shared::flight::InputCmd;
 use blocktread_shared::presets::{PRESETS, preset};
-use blocktread_shared::protocol::Mode;
+use blocktread_shared::protocol::{Mode, Round};
 
 fn main() -> anyhow::Result<()> {
     let mut clients = 3usize;
@@ -48,6 +49,7 @@ fn main() -> anyhow::Result<()> {
     let t0 = Instant::now();
     let mut last = Instant::now();
     let mut kills_seen = 0u32;
+    let (mut round, mut rounds_over) = (Round::None, 0u32);
     while t0.elapsed().as_secs_f32() < secs {
         std::thread::sleep(Duration::from_millis(8));
         let dt = last.elapsed().as_secs_f32().min(0.1);
@@ -61,6 +63,15 @@ fn main() -> anyhow::Result<()> {
             }
             core.update(dt, &mut |c: &ClientCore, _tick| ai_input(c, ai));
             lobby(core, ci, mode, &mut matches_over);
+            // the room's rounds, as the first client sees them
+            if ci == 0 && core.round != round {
+                round = core.round;
+                println!("t={:.1} room: {round:?}{}", t0.elapsed().as_secs_f32(), if core.left > 0.0 { format!(" · {:.0} s", core.left) } else { String::new() });
+                if round == Round::Over {
+                    rounds_over += 1;
+                    println!("  standings: {:?}", core.scores.iter().map(|r| (r.name.as_str(), r.kills, r.deaths)).collect::<Vec<_>>());
+                }
+            }
             for e in core.events.drain(..) {
                 match e {
                     CoreEvent::ShipKilled { .. } => kills_seen += 1,
@@ -98,7 +109,7 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some((core, _, _)) = cs.first() {
         println!("\nscores: {:?}", core.scores.iter().map(|r| (r.name.as_str(), r.kills, r.deaths)).collect::<Vec<_>>());
-        println!("ships visible to bot0: {} · kill events seen (all clients): {kills_seen} · match ends seen: {matches_over}", core.ships.len());
+        println!("ships visible to bot0: {} · kill events seen (all clients): {kills_seen} · match ends seen: {matches_over} · rounds ended: {rounds_over}", core.ships.len());
     }
     for (core, _, _) in &cs {
         core.leave();

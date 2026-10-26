@@ -12,7 +12,7 @@ use bevy::text::LetterSpacing;
 use bevy::window::PrimaryWindow;
 use blocktread_client_core::ConnState;
 use blocktread_shared::blocks::BlockType;
-use blocktread_shared::protocol::{Mode, ScoreRow};
+use blocktread_shared::protocol::{Mode, Round, ScoreRow};
 use blocktread_shared::weapons::intercept;
 
 pub const LOCK_T: f32 = 0.9;
@@ -422,7 +422,12 @@ pub fn update_hud(
                     Some(Mode::Solo) => "试车场 · 只有你".into(),
                     None => "连接中".into(),
                 };
-                let clock = if core.left > 0.0 { format!(" · 剩余 {}:{:02}", core.left as u32 / 60, core.left as u32 % 60) } else { String::new() };
+                let clock = match core.round {
+                    Round::Waiting => " · 等待其他玩家".into(),
+                    Round::Over => format!(" · 下一局 {} 秒后开始", core.left.ceil() as u32),
+                    _ if core.left > 0.0 => format!(" · 剩余 {}:{:02}", core.left as u32 / 60, core.left as u32 % 60),
+                    _ => String::new(),
+                };
                 set_text(kids, ent, format!("{}{mode}{clock}", if core.watching { "观战 · " } else { "" }), None);
             }
             El::Score => {
@@ -436,6 +441,12 @@ pub fn update_hud(
                     }
                     // nothing to keep score of on the test range
                     (Some(Mode::Solo), _) => "没有对手 · 不限时间".into(),
+                    // the room's rounds: ranked by kills, then fewer deaths (no rank while waiting alone)
+                    (_, Some(r)) if core.round == Round::Waiting => format!("击毁 {}  ·  阵亡 {}", r.kills, r.deaths),
+                    (_, Some(r)) if core.round != Round::None => {
+                        let ahead = core.scores.iter().filter(|o| o.kills > r.kills || (o.kills == r.kills && o.deaths < r.deaths)).count();
+                        format!("第 {} / {} 名  ·  击毁 {}  ·  阵亡 {}", ahead + 1, core.scores.len(), r.kills, r.deaths)
+                    }
                     (_, Some(r)) if core.limit > 0 => format!("击毁 {}/{}  ·  阵亡 {}  ·  {} 分", r.kills, core.limit, r.deaths, r.score),
                     (_, Some(r)) => format!("{} 分  ·  击毁 {}  ·  阵亡 {}", r.score, r.kills, r.deaths),
                     (_, None) => "0 分".into(),
@@ -811,7 +822,8 @@ pub fn flight_overlays(mut commands: Commands, session: Res<Session>, keys: Res<
         Shown::Connecting
     } else if session.paused {
         Shown::Paused
-    } else if keys.pressed(KeyCode::Tab) || dev.forced("board", time.elapsed_secs()) {
+    } else if keys.pressed(KeyCode::Tab) || dev.forced("board", time.elapsed_secs()) || core.round == Round::Over {
+        // and between two rounds of the room, the results
         Shown::Board
     } else if core.state == ConnState::InGame && !core.watching && core.my_ship.is_none() && session.death.is_some() {
         Shown::Dead
@@ -873,10 +885,14 @@ pub fn flight_overlays(mut commands: Commands, session: Res<Session>, keys: Res<
             commands.spawn((text(f, "按住 Tab 查看记分板 · Esc 暂停菜单", 12.0, MUTED), ChildOf(p)));
         }
         Shown::Board => {
-            let (o, p) = spawn_overlay(&mut commands, f, "记分板", 560.0);
+            let over = core.round == Round::Over;
+            let (o, p) = spawn_overlay(&mut commands, f, if over { "本局结果" } else { "记分板" }, 560.0);
             // refreshed twice a second while open: no entrance motion, and keep the game visible
             commands.entity(o).insert((OverlayRoot, DespawnOnExit(Screen::Flight), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.3))));
             commands.entity(p).remove::<SlideIn>();
+            if over {
+                commands.spawn((text(f, "按击毁数排名 · 下一局开始时比分清零", 13.0, MUTED), ChildOf(p)));
+            }
             spawn_score_table(&mut commands, f, p, &core.scores, core.mode, core.pid);
         }
     }

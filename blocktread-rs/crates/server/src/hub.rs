@@ -1,11 +1,18 @@
-//! The server's lobby: connections, a queue per mode (and budget tier), and the matches they
-//! turn into.
+//! The server's lobby: connections, a queue per mode (and budget tier), the matches they turn
+//! into, and the free-for-all room.
 //!
-//! A player connects and queues. When a queue holds a full match, or its first player has waited
-//! `queue_wait`, a match is made: players get seats and AI takes the rest. Everyone picks a ship
-//! and sees the others' picks; once all have locked in, or the pick time is up, the match plays
-//! out in a `Game` of its own until a side reaches the kill limit or time runs out. Then everyone
-//! gets the results and is back in the lobby.
+//! 2v2: a player connects and queues. When a queue holds a full match, or its first player has
+//! waited `queue_wait`, a match is made: players get seats and AI takes the rest. Everyone picks
+//! a ship and sees the others' picks; once all have locked in, or the pick time is up, the match
+//! plays out in a `Game` of its own until a side reaches the kill limit or time runs out. Then
+//! everyone gets the results and is back in the lobby.
+//!
+//! Free-for-all: one room per server, no AI, no seat limit. Queueing for it gets a one-seat pick
+//! (the client sends the vehicle in view at once) and then drives straight into the room, which
+//! opens with its first player and closes with its last. Players come and go as they like; the
+//! room's `Game` runs its rounds (see `Game::rounds`).
+//!
+//! The test range is the same one-seat pick, into a game of its own with nobody else.
 
 use crate::game::{Game, GameConfig, SOLO_SEED};
 use crate::{NetEvent, Outgoing};
@@ -32,7 +39,7 @@ pub fn team_name(team: u16) -> &'static str {
 pub struct HubConfig {
     /// Seconds a queue waits for more players before AI fills a match (0 for local play).
     pub queue_wait: f32,
-    /// A match's length, and the kills that end it early.
+    /// A 2v2 match's length (and a free-for-all round's), and the kills that end a 2v2 early.
     pub match_secs: f32,
     pub kill_limit: u32,
 }
@@ -60,6 +67,11 @@ fn ai_name(slots: &[Slot], ship: &str) -> String {
 
 fn secs(s: f32) -> u32 {
     (s * TICK_RATE as f32) as u32
+}
+
+/// What whoever didn't pick in time drives: the first preset that fits the budget.
+fn fallback(budget: Option<f32>) -> Design {
+    PRESETS.iter().map(|p| preset(p.key)).find(|d| budget.is_none_or(|b| analyze(d).stats.cost <= b + 1e-3)).unwrap_or_else(rover)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -172,7 +184,8 @@ impl Hub {
         }
         // co-op waves aren't matched (yet): queue for free-for-all instead
         let mode = if mode == Mode::Coop { Mode::Ffa } else { mode };
-        let tier = tier.filter(|k| mode != Mode::Solo && balance().tier(k).is_some());
+        // only 2v2 is matched by budget: the room and the test range take any vehicle
+        let tier = tier.filter(|k| mode == Mode::Teams && balance().tier(k).is_some());
         c.at = Where::Queued { mode, tier, since: now };
         self.queue_status();
     }
@@ -326,24 +339,12 @@ impl Hub {
         self.tell(m, &ServerMsg::SlotPick { slot: k as u8, design, ready: true });
     }
 
-    /// Watch a match: the one being played, or (with none going) a fresh all-AI one.
+    /// Watch the free-for-all room while anyone drives there, else a 2v2 being played, else the
+    /// room (opened empty if need be: players who come in later show up).
     fn watch(&mut self, pid: u16) {
-        let playing = self.matches.iter().find(|(_, m)| matches!(m.phase, Phase::Play(_))).map(|(&id, _)| id);
-        let id = match playing {
-            Some(id) => id,
-            None => {
-                let id = self.next_match;
-                self.next_match += 1;
-                let mode = Mode::Ffa;
-                let mut slots: Vec<Slot> = Vec::new();
-                for i in 0..mode.slots() {
-                    let design = self.ai_ship(None, &slots);
-                    slots.push(Slot { name: ai_name(&slots, &design.name), team: 100 + i as u16, pid: None, design: Some(design), ready: true });
-                }
-                self.matches.insert(id, Match { mode, tier: None, slots, watchers: Vec::new(), phase: Phase::Pick { until: 0 } });
-                id
-            }
-        };
+        let playing = |mode: Mode, m: &Match| m.mode == mode && matches!(m.phase, Phase::Play(_)) && !m.slots.is_empty();
+        let found = self.matches.iter().find(|(_, m)| playing(Mode::Ffa, m)).or_else(|| self.matches.iter().find(|(_, m)| playing(Mode::Teams, m))).map(|(&id, _)| id);
+        let id = found.unwrap_or_else(|| self.room());
         let c = self.conns.get_mut(&pid).unwrap();
         c.at = Where::Match(id);
         let (name, out) = (c.name.clone(), c.out.clone());
@@ -359,17 +360,26 @@ impl Hub {
         let Where::Match(id) = c.at else { return };
         let Some(m) = self.matches.get_mut(&id) else { return };
         m.watchers.retain(|&w| w != pid);
-        // the test range is that one player's: it goes with them
-        if m.mode == Mode::Solo && m.slots.iter().any(|s| s.pid == Some(pid)) {
-            self.matches.remove(&id);
-            return;
-        }
         let Some(k) = m.slots.iter().position(|s| s.pid == Some(pid)) else {
             if let Phase::Play(g) = &mut m.phase {
                 g.leave(pid);
             }
             return;
         };
+        match (m.mode, &mut m.phase) {
+            // the test range is that one player's, and so is a way into the room: they go with them
+            (Mode::Solo, _) | (Mode::Ffa, Phase::Pick { .. }) => {
+                self.matches.remove(&id);
+                return;
+            }
+            // the room just has one fewer (it closes once nobody is left: see `step_match`)
+            (Mode::Ffa, Phase::Play(g)) => {
+                g.leave(pid);
+                m.slots.remove(k);
+                return;
+            }
+            _ => {}
+        }
         // the seat stays filled: AI flies the ship that was picked (or would have been)
         let budget = m.budget();
         let slot = &mut m.slots[k];
@@ -428,6 +438,9 @@ impl Hub {
     }
 
     fn start(&mut self, id: u32) {
+        if self.matches[&id].mode == Mode::Ffa {
+            return self.enter_room(id);
+        }
         let budget = self.matches[&id].budget();
         let m = self.matches.get_mut(&id).unwrap();
         let cfg = GameConfig { mode: m.mode, bots: 0, budget, verbose: false };
@@ -440,8 +453,7 @@ impl Hub {
         let slots = std::mem::take(&mut m.slots);
         let watchers = m.watchers.clone();
         for s in &slots {
-            // whoever didn't pick in time drives the first preset that fits the budget
-            let design = s.design.clone().unwrap_or_else(|| PRESETS.iter().map(|p| preset(p.key)).find(|d| budget.is_none_or(|b| analyze(d).stats.cost <= b + 1e-3)).unwrap_or_else(rover));
+            let design = s.design.clone().unwrap_or_else(|| fallback(budget));
             match s.pid.and_then(|p| self.conns.get(&p).map(|c| (p, c))) {
                 Some((pid, c)) => game.join(pid, s.name.clone(), Some(design), Some(s.team), c.out.clone()),
                 None => game.add_seat(s.name.clone(), design, Some(s.team)),
@@ -455,6 +467,34 @@ impl Hub {
         let m = self.matches.get_mut(&id).unwrap();
         m.slots = slots;
         m.phase = Phase::Play(game);
+    }
+
+    /// The free-for-all room, opened (empty, no AI) if it isn't.
+    fn room(&mut self) -> u32 {
+        if let Some((&id, _)) = self.matches.iter().find(|(_, m)| m.mode == Mode::Ffa && matches!(m.phase, Phase::Play(_))) {
+            return id;
+        }
+        let id = self.next_match;
+        self.next_match += 1;
+        let mut game = Game::new(GameConfig { mode: Mode::Ffa, bots: 0, budget: None, verbose: false });
+        game.rounds = Some(self.cfg.match_secs);
+        self.matches.insert(id, Match { mode: Mode::Ffa, tier: None, slots: Vec::new(), watchers: Vec::new(), phase: Phase::Play(Box::new(game)) });
+        id
+    }
+
+    /// Someone's way into the room is through (vehicle locked in, or out of time to pick): in
+    /// they drive.
+    fn enter_room(&mut self, id: u32) {
+        let Some(entry) = self.matches.remove(&id) else { return };
+        let room = self.room();
+        let m = self.matches.get_mut(&room).unwrap();
+        let Phase::Play(g) = &mut m.phase else { return };
+        for s in entry.slots {
+            let Some(c) = s.pid.and_then(|p| self.conns.get_mut(&p)) else { continue };
+            c.at = Where::Match(room);
+            g.join(s.pid.unwrap(), s.name.clone(), Some(s.design.unwrap_or_else(|| fallback(None))), None, c.out.clone());
+            m.slots.push(Slot { name: s.name, team: 0, pid: s.pid, design: None, ready: true });
+        }
     }
 
     fn finish(&mut self, id: u32) {

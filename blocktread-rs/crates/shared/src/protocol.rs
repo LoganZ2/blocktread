@@ -14,7 +14,8 @@ pub const ALPN: &[u8] = b"voxwing/1";
 pub enum Mode {
     /// Everyone against waves of AI ships.
     Coop,
-    /// Free-for-all, topped up with bots.
+    /// Free-for-all: one room on the server that players drive in and out of, no AI. Its clock
+    /// runs while two or more are in; each round is ranked by kills.
     Ffa,
     /// Two teams of two.
     Teams,
@@ -32,14 +33,28 @@ impl Mode {
         }
     }
 
-    /// Seats in a match of this mode; AI fills the ones players don't.
+    /// Seats in a match of this mode; AI fills the ones players don't. The free-for-all room
+    /// takes players one at a time, and the test range is one player's.
     pub fn slots(self) -> usize {
         match self {
-            Mode::Ffa => 6,
             Mode::Teams | Mode::Coop => 4,
-            Mode::Solo => 1,
+            Mode::Ffa | Mode::Solo => 1,
         }
     }
+}
+
+/// Where the free-for-all room's round stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Round {
+    /// No rounds here (2v2, co-op, the test range).
+    #[default]
+    None,
+    /// Fewer than two players in: no clock.
+    Waiting,
+    /// The clock runs.
+    Running,
+    /// The round is over; the next one starts after a short break.
+    Over,
 }
 
 /// One seat in a match, as everyone sees it during the ship pick.
@@ -124,8 +139,9 @@ pub enum ServerMsg {
     Crash { pos: Vec3 },
     Announce { title: String, sub: String },
     Feed { text: String, bad: bool },
-    /// `limit`: kills that win the match (0 = none); `left`: seconds until it ends (0 = no clock).
-    Scores { rows: Vec<ScoreRow>, wave: u32, enemies: u32, limit: u32, left: f32 },
+    /// `limit`: kills that win the match (0 = none); `left`: seconds until it ends (0 = no clock),
+    /// or in the free-for-all room until the round (or the break after it) ends.
+    Scores { rows: Vec<ScoreRow>, wave: u32, enemies: u32, limit: u32, left: f32, round: Round },
     /// To the shooter only: one of their rounds landed on `target`, on its shield or its hull.
     /// Last, so the variants before it keep their numbers and older clients skip it unread.
     HitConfirm { target: u16, shield: bool },

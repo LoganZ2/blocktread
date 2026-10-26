@@ -16,6 +16,7 @@ use bevy::prelude::*;
 use bevy::text::{EditableText, LetterSpacing};
 use std::time::Duration;
 use super::entry::{Pings, RegionPing, region};
+use super::matching::straight_in;
 use blocktread_client_core::{ClientCore, ConnState, Phase};
 use blocktread_server::{HubConfig, ServerConfig};
 use blocktread_shared::protocol::Mode;
@@ -209,11 +210,13 @@ fn refresh_play(
     let q = queue_state(session.as_deref());
     let mode = mode_of(&settings.host_mode);
     let solo = mode == Mode::Solo;
-    let tier = blocktread_shared::balance::balance().tier(&settings.host_budget).filter(|_| !solo);
-    // the vehicle can be changed in the pick, but say so if this one won't do; the test range
-    // has no pick: it takes the vehicle in view, which has to pass its checks
+    // only 2v2 is matched by budget
+    let direct = straight_in(mode);
+    let tier = blocktread_shared::balance::balance().tier(&settings.host_budget).filter(|_| !direct);
+    // the vehicle can be changed in the 2v2 pick, but say so if this one won't do; the room and
+    // the test range have no pick: they take the vehicle in view, which has to pass its checks
     let cost = hangar.analysis.stats.cost;
-    let blocked = if solo { hangar.analysis.first_error().map(|e| format!("「{}」还没通过出车检查：{}", hangar.design.name, e.msg)) } else { None };
+    let blocked = if direct { hangar.analysis.first_error().map(|e| format!("「{}」还没通过出车检查：{}", hangar.design.name, e.msg)) } else { None };
     let warn = blocked.clone().or_else(|| tier.filter(|t| cost > t.budget + 1e-3).map(|t| format!("「{}」超出{}上限 {:.0}，匹配到之后要换一辆。", hangar.design.name, t.name, t.budget)));
     let here = region(&settings, &regions, pings.as_deref());
     let want = (settings.host_mode.clone(), settings.host_budget.clone(), here, q, warn.clone());
@@ -236,11 +239,11 @@ fn refresh_play(
     let desc = match mode {
         Mode::Teams => "蓝红两队各 2 人，空位由 AI 补齐。",
         Mode::Solo => "只有你自己：没有对手，不限时间，每次都是同一张地图。在本机运行，不连服务器。",
-        _ => "6 人各自为战，空位由 AI 补齐。",
+        _ => "服务器上的混战房间，随时进出，没有 AI，开着当前这辆车直接进场。场上有 2 人以上才开始计时，每局按击毁数排名。",
     };
     commands.spawn((para(f, desc, 12.0, MUTED), ChildOf(modes)));
 
-    if !solo {
+    if !direct {
         let budget = spawn_section(&mut commands, f, p, "造价上限|BUDGET");
         let seg = commands.spawn((row(0.0), ChildOf(budget))).id();
         let tiers = &blocktread_shared::balance::balance().tiers;
@@ -259,11 +262,12 @@ fn refresh_play(
         commands.spawn((para(f, w, 12.0, WARN), ChildOf(p)));
     }
     let go = commands.spawn((row(GAP_S), ChildOf(p))).id();
-    let label = match (busy, solo) {
-        (true, true) => "取消",
-        (true, false) => "取消匹配",
-        (false, true) => "进入试车场",
-        (false, false) => "开始匹配",
+    let label = match (busy, mode) {
+        (true, Mode::Teams) => "取消匹配",
+        (true, _) => "取消",
+        (false, Mode::Solo) => "进入试车场",
+        (false, Mode::Ffa) => "进入混战",
+        (false, _) => "开始匹配",
     };
     let lb = spawn_btn(&mut commands, f, go, Kind::Primary, label, UiAction::Launch, Some("Enter"));
     commands.entity(lb).insert(Node { flex_grow: 1.0, ..btn_node(Kind::Primary) });
@@ -271,8 +275,8 @@ fn refresh_play(
     let wb = spawn_btn(&mut commands, f, go, Kind::Normal, "观战", UiAction::Watch, Some("V"));
     commands.entity(wb).insert((
         Node { height: px(H_LG), padding: UiRect::horizontal(px(16)), ..btn_node(Kind::Normal) },
-        Tip("不驾驶，附身到 AI 或其他玩家身上看他们打".into()),
-        TipDetail("服务器上有对局时观看它；没有的话开一局全 AI 的自由混战。\n← → 换一辆车，C 切换驾驶室视角。".into()),
+        Tip("不驾驶，附身到其他玩家（或 AI）身上看他们打".into()),
+        TipDetail("混战房间里有人时看混战，没人时看正在打的 2v2；都没有的话在空房间里等人进来。\n← → 换一辆车，C 切换驾驶室视角。".into()),
     ));
     set_enabled(&mut commands, wb, !busy);
     // the server this lobby plays on, its ping, and the way back to pick another
@@ -298,6 +302,7 @@ fn queue_line(session: Option<Res<Session>>, settings: Res<Settings>, mut line: 
     let Some(s) = session else { return };
     let want = match &s.core.phase {
         _ if mode_of(&settings.host_mode) == Mode::Solo => "正在启动试车场…".to_string(),
+        _ if mode_of(&settings.host_mode) == Mode::Ffa => format!("正在进入自由混战 {}…", s.addr),
         Phase::Queued { waited, players, fill_in, .. } => {
             let t = format!("{}:{:02}", *waited as u32 / 60, *waited as u32 % 60);
             if *fill_in > 0.5 { format!("正在匹配 {t} · 队列中 {players} 人 · {} 秒后 AI 补位", fill_in.ceil() as u32) } else { format!("正在匹配 {t} · 队列中 {players} 人 · 正在组建对局…") }
@@ -334,6 +339,7 @@ fn menu_actions(
     mut msgs: MessageReader<UiAction>,
     mut settings: ResMut<Settings>,
     mut hosted: ResMut<Hosted>,
+    hangar: Res<Hangar>,
     session: Option<Res<Session>>,
     pings: Option<Res<Pings>>,
     regions: Res<Regions>,
@@ -357,6 +363,15 @@ fn menu_actions(
                         s.core.leave();
                         commands.remove_resource::<Session>();
                     }
+                    continue;
+                }
+                // straight in means with the vehicle in view: it has to pass its checks (Enter
+                // gets here even while the button is off)
+                if !watch
+                    && straight_in(mode_of(&settings.host_mode))
+                    && let Some(e) = hangar.analysis.first_error()
+                {
+                    toasts.push(format!("「{}」还没通过出车检查：{}", hangar.design.name, e.msg), ToastKind::Warn);
                     continue;
                 }
                 last.watch = watch;
@@ -393,8 +408,9 @@ fn menu_actions(
                 info!("{} {addr}", if watch { "watching" } else { "matchmaking on" });
                 let latency = Duration::from_millis(dev.latency_ms);
                 let core = if watch { ClientCore::watch(&addr, &settings.name, latency) } else { ClientCore::connect(&addr, &settings.name, latency) };
-                let tier = (!settings.host_budget.is_empty()).then(|| settings.host_budget.clone());
-                let want = (!watch).then(|| (mode_of(&settings.host_mode), tier));
+                let mode = mode_of(&settings.host_mode);
+                let tier = (!settings.host_budget.is_empty() && !straight_in(mode)).then(|| settings.host_budget.clone());
+                let want = (!watch).then_some((mode, tier));
                 commands.insert_resource(Session::new(core, addr, want));
                 focus.clear();
                 if watch {

@@ -6,12 +6,13 @@ use blocktread_shared::DEFAULT_PORT;
 
 const USAGE: &str = "用法: blocktread-server [--port 4433] [--bind 0.0.0.0] [--queue-wait 15] [--match-secs 480] [--kill-limit 10] [--status 文件]
   --bind ADDR       监听的本机地址（默认 0.0.0.0，即所有网卡；127.0.0.1 只允许本机）
-  --queue-wait S    排队多少秒还凑不齐人就用 AI 补位（默认 15）
-  --match-secs S    一局的时长（默认 480 秒）
-  --kill-limit N    先达到这么多击毁的一方提前获胜（默认 10）
+  --queue-wait S    2v2 排队多少秒还凑不齐人就用 AI 补位（默认 15）
+  --match-secs S    2v2 一局的时长，也是自由混战每局的时长（默认 480 秒）
+  --kill-limit N    2v2 中先达到这么多击毁的队伍提前获胜（默认 10）
   --status FILE     每 5 秒把在线人数等写进这个 JSON 文件（部署时据此判断能不能重启）
 
-玩家在客户端里选模式（自由混战 / 2v2）开始匹配，服务器凑局、补 AI、选完战车后开打。";
+自由混战：服务器上只有一个房间，玩家随进随出，没有 AI；场上有 2 人以上才计时，每局按击毁数排名。
+2v2：排队凑局、补 AI、选完战车后开打。";
 
 fn main() -> Result<()> {
     let mut port = DEFAULT_PORT;
@@ -37,8 +38,9 @@ fn main() -> Result<()> {
     let bind: SocketAddr = format!("{host}:{port}").parse().with_context(|| format!("--bind 地址无效：{host}"))?;
     let handle = start(ServerConfig { bind, hub: hub.clone(), verbose: true, status })?;
     println!(
-        "方块战车服务器 {BUILD} 已启动：{} · 匹配最多等 {} 秒，人不够就用 AI 补位 · 每局 {} 秒或 {} 击毁 · UDP 端口 {}",
+        "方块战车服务器 {BUILD} 已启动：{} · 自由混战每局 {} 秒 · 2v2 匹配最多等 {} 秒、每局 {} 秒或 {} 击毁 · UDP 端口 {}",
         handle.addr,
+        hub.match_secs,
         hub.queue_wait,
         hub.match_secs,
         hub.kill_limit,
