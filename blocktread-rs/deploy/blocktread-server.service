@@ -1,0 +1,16 @@
+# systemd user service for the game server, installed by setup.sh. Runs whichever release
+# ~/blocktread-server/current points at; deploys switch that link and restart.
+[Unit]
+Description=BLOCKTREAD game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# extra server flags (e.g. ARGS=--queue-wait 30), optional
+EnvironmentFile=-%h/blocktread-server/args.env
+ExecStart=%h/blocktread-server/current --bind 0.0.0.0 --port 4433 --status %h/blocktread-server/status.json $ARGS
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

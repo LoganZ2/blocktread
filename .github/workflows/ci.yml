@@ -21,7 +21,7 @@ env:
 
 defaults:
   run:
-    working-directory: voxwing-rs
+    working-directory: blocktread-rs
 
 jobs:
   test:
@@ -33,9 +33,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: voxwing-rs
+          workspaces: blocktread-rs
           key: test
-      - run: cargo test --release --locked -p voxwing_shared -p voxwing-server
+      - run: cargo test --release --locked -p blocktread_shared -p blocktread-server
 
   build:
     name: build ${{ matrix.target }}
@@ -45,10 +45,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: aarch64-apple-darwin, exe: voxwing-client }
-          - { os: macos-latest, target: x86_64-apple-darwin, exe: voxwing-client }
+          - { os: macos-latest, target: aarch64-apple-darwin, exe: blocktread-client }
+          - { os: macos-latest, target: x86_64-apple-darwin, exe: blocktread-client }
           # the C runtime linked in, so the game runs without the VC++ redistributable
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, exe: voxwing-client.exe, rustflags: "-C target-feature=+crt-static" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, exe: blocktread-client.exe, rustflags: "-C target-feature=+crt-static" }
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -59,13 +59,13 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: voxwing-rs
+          workspaces: blocktread-rs
           key: ${{ matrix.target }}
-      - run: cargo build --profile dist --locked -p voxwing-client --target ${{ matrix.target }}
+      - run: cargo build --profile dist --locked -p blocktread-client --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target }}
-          path: voxwing-rs/target/${{ matrix.target }}/dist/${{ matrix.exe }}
+          path: blocktread-rs/target/${{ matrix.target }}/dist/${{ matrix.exe }}
           if-no-files-found: error
 
   server:
@@ -84,7 +84,7 @@ jobs:
       CC_x86_64_unknown_linux_musl: musl-gcc
       CC_aarch64_unknown_linux_musl: musl-gcc
       # the version the server reports in its status file and log
-      VOXWING_BUILD: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+      BLOCKTREAD_BUILD: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -q && sudo apt-get install -yq musl-tools
@@ -93,19 +93,19 @@ jobs:
           targets: ${{ matrix.arch }}-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: voxwing-rs
+          workspaces: blocktread-rs
           key: server-${{ matrix.arch }}
-      - run: cargo build --profile dist --locked -p voxwing-server --target "$TARGET"
+      - run: cargo build --profile dist --locked -p blocktread-server --target "$TARGET"
       - name: check it is static and runs
         run: |
-          bin="target/$TARGET/dist/voxwing-server"
+          bin="target/$TARGET/dist/blocktread-server"
           file "$bin"
           "$bin" --help | head -2
-          mkdir -p out && cp "$bin" "out/voxwing-server-${{ matrix.arch }}-linux"
+          mkdir -p out && cp "$bin" "out/blocktread-server-${{ matrix.arch }}-linux"
       - uses: actions/upload-artifact@v4
         with:
           name: server-${{ matrix.arch }}-linux
-          path: voxwing-rs/out/voxwing-server-${{ matrix.arch }}-linux
+          path: blocktread-rs/out/blocktread-server-${{ matrix.arch }}-linux
           if-no-files-found: error
 
   package:
@@ -126,22 +126,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'bin-*' -D bin
-      - name: Voxwing.app (universal)
+      - name: Blocktread.app (universal)
         run: |
-          version=$(grep -m1 '^version' voxwing-rs/Cargo.toml | cut -d'"' -f2)
-          app=dist/Voxwing.app
+          version=$(grep -m1 '^version' blocktread-rs/Cargo.toml | cut -d'"' -f2)
+          app=dist/Blocktread.app
           mkdir -p "$app/Contents/MacOS"
-          lipo -create -output "$app/Contents/MacOS/voxwing" \
-            bin/bin-aarch64-apple-darwin/voxwing-client bin/bin-x86_64-apple-darwin/voxwing-client
-          chmod +x "$app/Contents/MacOS/voxwing"
+          lipo -create -output "$app/Contents/MacOS/blocktread" \
+            bin/bin-aarch64-apple-darwin/blocktread-client bin/bin-x86_64-apple-darwin/blocktread-client
+          chmod +x "$app/Contents/MacOS/blocktread"
           cat > "$app/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-            <key>CFBundleName</key><string>体素星翼</string>
-            <key>CFBundleDisplayName</key><string>体素星翼</string>
-            <key>CFBundleIdentifier</key><string>io.github.loganz2.voxwing</string>
-            <key>CFBundleExecutable</key><string>voxwing</string>
+            <key>CFBundleName</key><string>方块战车</string>
+            <key>CFBundleDisplayName</key><string>方块战车</string>
+            <key>CFBundleIdentifier</key><string>io.github.loganz2.blocktread</string>
+            <key>CFBundleExecutable</key><string>blocktread</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>${version}</string>
             <key>CFBundleVersion</key><string>${GITHUB_RUN_NUMBER}</string>
@@ -153,21 +153,21 @@ jobs:
           plutil -lint "$app/Contents/Info.plist"
           # ad-hoc signature: not notarised, but macOS then offers to open it instead of calling it damaged
           codesign --force --deep -s - "$app"
-          lipo -info "$app/Contents/MacOS/voxwing"
-          ditto -c -k --norsrc --keepParent "$app" dist/Voxwing-macOS.zip
-      - name: Voxwing.exe
+          lipo -info "$app/Contents/MacOS/blocktread"
+          ditto -c -k --norsrc --keepParent "$app" dist/Blocktread-macOS.zip
+      - name: Blocktread.exe
         run: |
-          cp bin/bin-x86_64-pc-windows-msvc/voxwing-client.exe dist/Voxwing.exe
-          (cd dist && zip -q Voxwing-Windows.zip Voxwing.exe)
+          cp bin/bin-x86_64-pc-windows-msvc/blocktread-client.exe dist/Blocktread.exe
+          (cd dist && zip -q Blocktread-Windows.zip Blocktread.exe)
       - uses: actions/upload-artifact@v4
         with:
-          name: Voxwing-macOS
-          path: dist/Voxwing-macOS.zip
+          name: Blocktread-macOS
+          path: dist/Blocktread-macOS.zip
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: Voxwing-Windows
-          path: dist/Voxwing-Windows.zip
+          name: Blocktread-Windows
+          path: dist/Blocktread-Windows.zip
           if-no-files-found: error
 
   release:
@@ -188,8 +188,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'Voxwing-*' -p 'server-*' -D dist
-          files=$(find dist -type f \( -name '*.zip' -o -name 'voxwing-server-*' \))
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'Blocktread-*' -p 'server-*' -D dist
+          files=$(find dist -type f \( -name '*.zip' -o -name 'blocktread-server-*' \))
           echo "$files"
           gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --generate-notes $files
 

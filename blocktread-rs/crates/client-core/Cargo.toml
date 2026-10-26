@@ -1,0 +1,17 @@
+[package]
+name = "blocktread_client_core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+blocktread_shared = { path = "../shared" }
+blocktread_net = { path = "../net" }
+quinn = "0.11.12"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+bytes = "1.12.1"
+crossbeam-channel = "0.5.17"
+anyhow = "1.0.104"
+glam = "0.33"
+
+[dev-dependencies]
+blocktread-server = { path = "../server" }
