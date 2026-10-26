@@ -4,7 +4,7 @@ use super::fx::{self, Fx, Kind};
 use super::hud::{HitKind, Hud};
 use super::{Session, env, ground};
 use crate::Screen;
-use crate::art::{BlockArt, Finish, dmg_level};
+use crate::art::{BlockArt, Finish, Hold, KINGPIN, dmg_level, wheel_hold};
 use crate::audio::{Sfx, Sounds, falloff};
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -22,8 +22,7 @@ pub struct ShipVis {
     pub engines: Vec<(Vec3, f32)>,
     bubble: Option<(Entity, Handle<StandardMaterial>)>,
     flash: f32,
-    /// Each wheel's pivot (and its radius): it rides the suspension, steers and turns.
-    wheels: Vec<(usize, Entity, f32)>,
+    wheels: Vec<WheelVis>,
     /// Each gun's pivot (it turns to where the gun points), and its mount: the face it sits on
     /// and the mount's entities. Those are also among the gun block's own entities, so whatever
     /// takes the gun away (shot off, broken off with a piece) takes its mount too.
@@ -31,6 +30,18 @@ pub struct ShipVis {
     mounts: HashMap<usize, (IVec3, Vec<Entity>)>,
     /// How far the wheels have rolled (rad).
     roll: f32,
+}
+
+/// A wheel: its pivot rides the suspension and steers about the kingpin, the spin under it rolls
+/// the wheel. Its strut's entities are also among the wheel block's own, so whatever takes the
+/// wheel takes its strut.
+struct WheelVis {
+    block: usize,
+    pivot: Entity,
+    spin: Entity,
+    radius: f32,
+    hold: Hold,
+    strut: Vec<Entity>,
 }
 
 #[derive(Resource, Default)]
@@ -58,21 +69,26 @@ fn spawn_vis(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<Stan
         let b = s.body.design.blocks[i];
         let level = dmg_level(s.body.hp_frac(i));
         // wheels and guns hang on pivots that move them; hover pads stay put
-        let wheel = b.ty.drive().filter(|d| !d.hover).map(|d| d.radius);
-        let (ents, paint) = if wheel.is_some() || b.ty.weapon().is_some() {
-            let pivot = commands.spawn((Transform::from_translation(s.body.local(i)), Visibility::default(), ChildOf(root))).id();
+        let local = s.body.local(i);
+        let (ents, paint) = if let Some(radius) = b.ty.drive().filter(|d| !d.hover).map(|d| d.radius) {
+            // the strut stays put on the vehicle; the wheel rides it
+            let hold = wheel_hold(&s.body.design.blocks, &s.body.occ, b.pos());
+            let pivot = commands.spawn((Transform::from_translation(local + Vec3::X * hold.side * KINGPIN), Visibility::default(), ChildOf(root))).id();
+            let spin = commands.spawn((Transform::from_translation(Vec3::X * -hold.side * KINGPIN), Visibility::default(), ChildOf(pivot))).id();
+            let (mut ents, paint) = art.spawn_block(commands, mats, spin, &b, Vec3::ZERO, level);
+            let strut = art.spawn_strut(commands, mats, &b, hold, (root, local), (pivot, Vec3::ZERO));
+            ents.extend(&strut);
+            vis.wheels.push(WheelVis { block: i, pivot, spin, radius, hold, strut });
+            (ents, paint)
+        } else if b.ty.weapon().is_some() {
+            let pivot = commands.spawn((Transform::from_translation(local), Visibility::default(), ChildOf(root))).id();
             let (mut ents, paint) = art.spawn_block(commands, mats, pivot, &b, Vec3::ZERO, level);
-            match wheel {
-                Some(r) => vis.wheels.push((i, pivot, r)),
-                None => {
-                    vis.guns.push((i, pivot));
-                    // the mount stays put on the vehicle; only the head turns
-                    if let Some(m) = s.body.mounts.iter().find(|m| m.block == i) {
-                        let mount = art.spawn_mount(commands, mats, root, &b, s.body.local(i), level, m.face);
-                        ents.extend(&mount);
-                        vis.mounts.insert(i, (m.face, mount));
-                    }
-                }
+            vis.guns.push((i, pivot));
+            // the mount stays put on the vehicle; only the head turns
+            if let Some(m) = s.body.mounts.iter().find(|m| m.block == i) {
+                let mount = art.spawn_mount(commands, mats, root, &b, local, level, m.face);
+                ents.extend(&mount);
+                vis.mounts.insert(i, (m.face, mount));
             }
             (ents, paint)
         } else {
@@ -244,6 +260,20 @@ pub fn apply_events(
                         *face = m.face;
                     }
                 }
+                // likewise a wheel's strut, to whatever holds the wheel now
+                for w in v.wheels.iter_mut().filter(|w| s.body.alive[w.block]) {
+                    let b = s.body.design.blocks[w.block];
+                    let hold = wheel_hold(&s.body.design.blocks, &s.body.occ, b.pos());
+                    if hold != w.hold {
+                        v.blocks[w.block].retain(|e| !w.strut.contains(e));
+                        for e in w.strut.drain(..) {
+                            commands.entity(e).despawn();
+                        }
+                        w.strut = art.spawn_strut(&mut commands, &mut mats, &b, hold, (v.root, s.body.local(w.block)), (w.pivot, Vec3::ZERO));
+                        v.blocks[w.block].extend(w.strut.iter().copied());
+                        w.hold = hold;
+                    }
+                }
                 // engines may have been lost: keep exhausting only from the survivors
                 v.engines.retain(|(at, _)| s.body.stats.engines.iter().any(|&i| nozzle(s, i).0.distance(*at) < 0.01));
                 sounds.play(&mut commands, now, Sfx::Pop, falloff(ear, s.pos), 0.03);
@@ -333,13 +363,16 @@ pub fn sync_ships(
         v.roll += fwd_speed * dt;
         let steer = if Some(*id) == me { core.pred.as_ref().and_then(|p| p.last_cmd()).map_or(0.0, |c| steer_angle(c.steer_f(), fwd_speed)) } else { 0.0 };
         let up = s.rot * Vec3::Y;
-        for &(i, pivot, r) in &v.wheels {
-            let local = s.body.local(i);
+        for w in &v.wheels {
+            let local = s.body.local(w.block);
             let dist = wheel_ray(&core.terrain, s.pos + s.rot * local, up).map(|(d, _)| d);
-            if let Ok(mut t) = tf.get_mut(pivot) {
-                t.translation = local - Vec3::Y * wheel_drop(dist, r);
-                let turn = if local.z < -0.5 { Quat::from_rotation_y(-steer) } else { Quat::IDENTITY };
-                t.rotation = turn * Quat::from_rotation_x(-v.roll / r);
+            if let Ok(mut t) = tf.get_mut(w.pivot) {
+                t.translation = local + Vec3::X * w.hold.side * KINGPIN - Vec3::Y * wheel_drop(dist, w.radius);
+                t.rotation = if local.z < -0.5 { Quat::from_rotation_y(-steer) } else { Quat::IDENTITY };
+            }
+            if let Ok(mut t) = tf.get_mut(w.spin) {
+                t.translation = Vec3::X * -w.hold.side * KINGPIN;
+                t.rotation = Quat::from_rotation_x(-v.roll / w.radius);
             }
         }
         // guns: turned to where they point (your own as predicted, others' as their aim turns them)

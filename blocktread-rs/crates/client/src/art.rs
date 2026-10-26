@@ -8,6 +8,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2 as HP;
 use blocktread_shared::blocks::{Block, BlockType};
+use blocktread_shared::grid::Occupancy;
 use blocktread_shared::rng::Rng;
 
 pub fn srgb(c: u32) -> Color {
@@ -57,6 +58,7 @@ pub struct BlockArt {
     pub parts: Vec<Vec<Part>>,
     /// A weapon's mount, for a weapon held from below.
     mount: Vec<Part>,
+    strut: StrutArt,
     pub cube: Handle<Mesh>,
     pub sphere: Handle<Mesh>,
     paint_tex: Handle<Image>,
@@ -66,6 +68,50 @@ pub struct BlockArt {
 
 /// A wheel's tyre, tyre shoulder, rim, rim lip and hub.
 type WheelMeshes = (Handle<Mesh>, Handle<Mesh>, Handle<Mesh>, Handle<Mesh>, Handle<Mesh>);
+
+/// What a wheel's suspension is made of: a coil-over strut standing beside the wheel, bolted to
+/// the block that holds it, and a hub carrier and a rod that ride up and down with the
+/// wheel, the rod sliding in the strut.
+struct StrutArt {
+    cube: Handle<Mesh>,
+    body: Handle<Mesh>,
+    cap: Handle<Mesh>,
+    coil: Handle<Mesh>,
+    rod: Handle<Mesh>,
+    dark: PartMat,
+    steel: PartMat,
+}
+
+/// How far from a wheel's centre (along x, towards the block holding it) its strut stands: the
+/// axis the wheel steers about.
+pub const KINGPIN: f32 = 0.46;
+
+/// What holds a wheel: the face of its cell towards the block it hangs from (zero when only
+/// wheels and hover pads touch it), and the side of the wheel its strut stands on (±1 along x).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Hold {
+    pub face: IVec3,
+    pub side: f32,
+}
+
+/// What holds the wheel at `at`: the block beside it, inwards first (wheels sit on a deck's
+/// sides), else the one above it, ahead or behind. The strut stands on the side it hangs from, or
+/// on the inner side when it hangs from above, ahead or behind.
+pub fn wheel_hold(blocks: &[Block], occ: &Occupancy, at: IVec3) -> Hold {
+    let inward = if at.x > 0 { IVec3::NEG_X } else { IVec3::X };
+    let holds = |d: IVec3| occ.get(at + d).is_some_and(|j| blocks[j].ty.drive().is_none());
+    let face = [inward, -inward, IVec3::Y, IVec3::NEG_Z, IVec3::Z].into_iter().find(|&d| holds(d)).unwrap_or(IVec3::ZERO);
+    Hold { face, side: if face.x != 0 { face.x as f32 } else { inward.x as f32 } }
+}
+
+/// A wheel's tyre width.
+fn tyre_width(t: BlockType) -> f32 {
+    match t {
+        BlockType::SmallWheel => 0.5,
+        BlockType::BigWheel => 0.8,
+        _ => 0.62,
+    }
+}
 
 /// Damage level 0..=3 from remaining hit points (3 = undamaged).
 pub fn dmg_level(frac: f32) -> u8 {
@@ -138,8 +184,61 @@ impl BlockArt {
             .collect()
     }
 
-    /// A whole design that doesn't move: every block, and every weapon on its mount. `offset`
-    /// moves the grid (e.g. minus the centre of mass).
+    /// A wheel's suspension: the strut, on the vehicle under `fixed` at the wheel's cell centre,
+    /// and what rides with the wheel under `riding` at its kingpin (at the hub's height). Nothing
+    /// when nothing holds the wheel.
+    pub fn spawn_strut(&mut self, commands: &mut Commands, mats: &mut Assets<StandardMaterial>, b: &Block, hold: Hold, fixed: (Entity, Vec3), riding: (Entity, Vec3)) -> Vec<Entity> {
+        if hold.face == IVec3::ZERO {
+            return Vec::new();
+        }
+        let (on, rides) = self.strut_parts(hold, tyre_width(b.ty));
+        let mut out = Vec::new();
+        for (parts, (parent, at)) in [(on, fixed), (rides, riding)] {
+            for part in &parts {
+                let mat = self.material_for(mats, part, b, 3);
+                out.push(commands.spawn((Mesh3d(part.mesh.clone()), MeshMaterial3d(mat), Transform::from_translation(at) * part.tf, ChildOf(parent))).id());
+            }
+        }
+        out
+    }
+
+    /// The strut's parts for a wheel `w` wide: those on the vehicle (about the wheel's cell
+    /// centre) and those that ride with the wheel (about its kingpin).
+    fn strut_parts(&self, hold: Hold, w: f32) -> (Vec<Part>, Vec<Part>) {
+        let s = &self.strut;
+        let k = KINGPIN;
+        // built for a strut on +x, then mirrored onto the wheel's side
+        let p = |mesh: &Handle<Mesh>, mat: &PartMat, pos: [f32; 3], scale: [f32; 3]| Part {
+            mesh: mesh.clone(),
+            mat: mat.clone(),
+            tf: Transform::from_xyz(pos[0] * hold.side, pos[1], pos[2]).with_scale(Vec3::from(scale)),
+        };
+        let one = [1.0; 3];
+        // the strut, its top and its coil; it reaches down to the knuckle with the wheel at rest
+        let mut on = vec![p(&s.body, &s.dark, [k, 0.22, 0.0], one), p(&s.cap, &s.dark, [k, 0.46, 0.0], one)];
+        for y in [0.07, 0.12, 0.17, 0.22, 0.27, 0.32, 0.37] {
+            on.push(p(&s.coil, &s.steel, [k, y, 0.0], one));
+        }
+        // bolted to the block that holds it: a plate on the face beside it, a flange under the
+        // block above, or an arm out to the block ahead or behind. Each stops just short of the
+        // block's face (a face coplanar with it would flicker).
+        match hold.face {
+            f if f.x != 0 => on.push(p(&s.cube, &s.dark, [0.492, 0.2, 0.0], [0.012, 0.56, 0.4])),
+            IVec3::Y => on.push(p(&s.cube, &s.dark, [k, 0.485, 0.0], [0.24, 0.02, 0.24])),
+            f => {
+                let dz = f.z as f32;
+                on.push(p(&s.cube, &s.dark, [k, 0.42, dz * 0.23], [0.07, 0.08, 0.46]));
+                on.push(p(&s.cube, &s.dark, [0.42, 0.3, dz * 0.485], [0.16, 0.3, 0.02]));
+            }
+        }
+        // the hub carrier, filling the gap from the tyre to the strut, and the rod up into it
+        let inner = w / 2.0 + 0.01;
+        let rides = vec![p(&s.cube, &s.dark, [(inner + k) / 2.0 + 0.005 - k, 0.0, 0.0], [k - inner + 0.01, 0.34, 0.3]), p(&s.rod, &s.steel, [0.0, 0.28, 0.0], one)];
+        (on, rides)
+    }
+
+    /// A whole design that doesn't move: every block, every weapon on its mount and every wheel
+    /// on its strut. `offset` moves the grid (e.g. minus the centre of mass).
     pub fn spawn_design(&mut self, commands: &mut Commands, mats: &mut Assets<StandardMaterial>, parent: Entity, blocks: &[Block], offset: Vec3) {
         let occ = blocktread_shared::analysis::occupancy(blocks, &vec![true; blocks.len()]);
         for b in blocks {
@@ -147,6 +246,10 @@ impl BlockArt {
             self.spawn_block(commands, mats, parent, b, at, 3);
             if b.ty.weapon().is_some() {
                 self.spawn_mount(commands, mats, parent, b, at, 3, blocktread_shared::weapons::attach_face(&occ, b.pos()));
+            }
+            if b.ty.drive().is_some_and(|d| !d.hover) {
+                let hold = wheel_hold(blocks, &occ, b.pos());
+                self.spawn_strut(commands, mats, b, hold, (parent, at), (parent, at + Vec3::X * hold.side * KINGPIN));
             }
         }
     }
@@ -249,6 +352,11 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let cone_s = m(Cone { radius: 0.08, height: 0.2 }.into());
     let stem = m(Cylinder::new(0.1, 0.32).into());
     let collar = m(Torus { minor_radius: 0.04, major_radius: 0.2 }.into());
+    // a wheel's strut: its body and top, the coil round it, the rod sliding in it
+    let strut_body = m(Cylinder::new(0.055, 0.52).into());
+    let strut_cap = m(Cylinder::new(0.08, 0.06).into());
+    let strut_coil = m(Torus { minor_radius: 0.017, major_radius: 0.07 }.into());
+    let strut_rod = m(Cylinder::new(0.028, 0.36).into());
 
     let mut fixed = |c: StandardMaterial| PartMat::Fixed(mats.add(c));
     let dark = fixed(StandardMaterial { base_color: srgb(0x262b33), metallic: 0.8, perceptual_roughness: 0.35, ..default() });
@@ -415,11 +523,11 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         v
     };
     // 小轮: a slick tyre, three spokes
-    let mut v = body(&small, 0.5, 0.04, &rim);
+    let mut v = body(&small, tyre_width(SmallWheel), 0.04, &rim);
     v.extend(spokes(3, 0.52, 0.2, 0.2));
     parts[SmallWheel.index()] = v;
     // 车轮: shallow ribs round the tread, five spokes
-    let mut v = body(&road, 0.62, 0.06, &rim);
+    let mut v = body(&road, tyre_width(Wheel), 0.06, &rim);
     for k in 0..18 {
         let a = k as f32 * tau / 18.0;
         v.push(p(&cube, &rubber, round(0.0, rw - 0.02, a), [a, 0.0, 0.0], [0.54, 0.05, 0.1]));
@@ -427,7 +535,7 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     v.extend(spokes(5, 0.64, 0.28, 0.26));
     parts[Wheel.index()] = v;
     // 越野轮: big knobby lugs, staggered side to side, a deep dark rim with a bead ring and bolts
-    let mut v = body(&big, 0.8, 0.07, &rim_dark);
+    let mut v = body(&big, tyre_width(BigWheel), 0.07, &rim_dark);
     for k in 0..14 {
         let a = k as f32 * tau / 14.0;
         let x = if k % 2 == 0 { 0.17 } else { -0.17 };
@@ -453,5 +561,6 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         p(&collar, &dark, [0.0, -0.38, 0.0], z, one),
         p(&stem, &dark, [0.0, -0.26, 0.0], z, one),
     ];
-    BlockArt { parts, mount, cube, sphere, paint_tex, armor_tex, cache: HashMap::new() }
+    let strut = StrutArt { cube: cube.clone(), body: strut_body, cap: strut_cap, coil: strut_coil, rod: strut_rod, dark: dark.clone(), steel: rim.clone() };
+    BlockArt { parts, mount, strut, cube, sphere, paint_tex, armor_tex, cache: HashMap::new() }
 }
