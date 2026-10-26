@@ -166,14 +166,7 @@ pub struct WeaponSpec {
     /// damage before it.
     #[serde(default = "one")]
     pub pierce: u8,
-    /// How fast it turns to the aim (degrees per second).
-    #[serde(default = "turn")]
-    pub turn: f32,
     pub sfx: WeaponSfx,
-}
-
-fn turn() -> f32 {
-    120.0
 }
 
 fn one() -> u8 {

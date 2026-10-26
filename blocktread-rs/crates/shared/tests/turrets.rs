@@ -1,6 +1,6 @@
-//! Guns turn to the aim point, every one of them all the way round and up and down, but never
-//! point (or fire) through their own vehicle: where they can't get, they stop at the limit and hold
-//! their fire. Each sits on a mount on the face that holds it.
+//! Guns point at the aim point at once, every one of them all the way round and up and down, but
+//! never point (or fire) through their own vehicle: where they can't get, they stop at the limit
+//! and hold their fire. Each sits on a mount on the face that holds it.
 
 use std::sync::Arc;
 use blocktread_shared::DT;
@@ -55,20 +55,21 @@ fn crosses_itself(body: &ShipBody, s: &Shot) -> bool {
 #[test]
 fn guns_follow_the_aim_but_never_through_their_own_vehicle() {
     let body = ShipBody::new(Arc::new(preset("bison")));
-    // off to the right and up: every gun gets there (the roof railgun exactly, up and all)
+    // off to the right and up: every gun is there on the very next tick
     let target = Vec3::new(60.0, 20.0, -40.0);
-    let (ws, shots) = aim(&body, target, 2.0);
+    let (ws, _) = aim(&body, target, DT);
     for m in &body.mounts {
         let (yaw, pitch) = ws.aim[m.block];
         let dir = barrel_dir(yaw, pitch);
         let want = (target - body.local(m.block)).normalize();
         assert!(dir.angle_between(want) < 0.03, "{:?} points {dir} for {want}", body.design.blocks[m.block].ty);
     }
+    let (_, shots) = aim(&body, target, 1.0);
     assert!(!shots.is_empty());
     assert!(!shots.iter().any(|s| crosses_itself(&body, s)), "no round leaves through its own blocks");
     // straight behind: the roof railgun turns all the way round; the cannons down by the cab
     // can't see past it, so they turn as far as is clear and hold their fire
-    let (ws, shots) = aim(&body, Vec3::new(0.0, 1.0, 80.0), 3.0);
+    let (ws, shots) = aim(&body, Vec3::new(0.0, 1.0, 80.0), 1.0);
     assert!(!shots.iter().any(|s| crosses_itself(&body, s)));
     let railgun = body.mounts.iter().find(|m| body.design.blocks[m.block].ty == BlockType::Railgun).unwrap();
     assert!(ws.aim[railgun.block].0.abs() > 2.9, "the roof gun turns all the way round");

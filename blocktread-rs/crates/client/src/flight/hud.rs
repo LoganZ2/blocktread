@@ -12,7 +12,6 @@ use bevy::text::LetterSpacing;
 use bevy::window::PrimaryWindow;
 use blocktread_client_core::ConnState;
 use blocktread_shared::blocks::BlockType;
-use blocktread_shared::weapons::barrel_dir;
 use blocktread_shared::protocol::{Mode, ScoreRow};
 use blocktread_shared::weapons::intercept;
 
@@ -87,7 +86,6 @@ pub enum El {
     Dot(usize),
     Cross,
     /// Where the guns actually point (they turn to the crosshair at their own pace).
-    GunMark,
     /// Four ticks around the crosshair when your rounds land; `HitTick(0..4)` are the ticks.
     HitMark,
     HitTick(u8),
@@ -256,8 +254,6 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
         };
         commands.spawn((n, BackgroundColor(INK), El::HitTick(i), Pickable::IGNORE, ChildOf(mark)));
     }
-    let gun = put(&mut commands, Node { width: px(12), height: px(12), border: px(2).all(), ..abs(0.0, 0.0) }, El::GunMark);
-    commands.entity(gun).insert((BorderColor::all(INK.with_alpha(0.85)), Visibility::Hidden, UiTransform { rotation: Rot2::degrees(45.0), ..default() }));
     let stick = put(&mut commands, Node { width: px(12), height: px(12), border: px(1).all(), border_radius: BorderRadius::MAX, ..abs(0.0, 0.0) }, El::Stick);
     commands.entity(stick).insert(BorderColor::all(ACCENT.with_alpha(0.6)));
     let lead = put(&mut commands, Node { width: px(12), height: px(12), border: px(2).all(), ..abs(0.0, 0.0) }, El::Lead);
@@ -379,17 +375,6 @@ pub fn update_hud(
     };
     // the crosshair: the middle of the screen, where the camera looks and the guns turn to
     let aim = view.map(|_| (Vec2::new(w / 2.0, h / 2.0), false));
-    // the gun mark: where the guns point now, at the crosshair's distance (their average barrel)
-    let guns = view.and_then(|m| {
-        let own = me.is_some_and(|x| x.id == m.id);
-        let angles = if own { &core.pred.as_ref()?.ws.aim } else { &m.ws.aim };
-        if m.body.mounts.is_empty() {
-            return None;
-        }
-        let dir = m.body.mounts.iter().map(|g| angles.get(g.block).map_or(Vec3::NEG_Z, |&(y, p)| barrel_dir(y, p))).sum::<Vec3>().normalize_or(Vec3::NEG_Z);
-        let reach = m.pos.distance(session.aim).max(20.0);
-        Some(screen(m.pos + m.rot * dir * reach))
-    });
     // the hit marker starts just outside the crosshair's ring (radius 16) and opens out a little as
     // it fades; a kill's is longer, thicker and red
     let kill = hud.hit.0 == HitKind::Kill;
@@ -637,14 +622,6 @@ pub fn update_hud(
                 Some((s, off)) => {
                     node.left = px(s.x - 16.0);
                     node.top = px(s.y - 16.0);
-                    show(&mut vis, !off);
-                }
-                None => show(&mut vis, false),
-            },
-            El::GunMark => match guns {
-                Some((s, off)) => {
-                    node.left = px(s.x - 6.0);
-                    node.top = px(s.y - 6.0);
                     show(&mut vis, !off);
                 }
                 None => show(&mut vis, false),

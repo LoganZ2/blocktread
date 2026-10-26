@@ -26,8 +26,8 @@ const STEP: f32 = 5.0 * std::f32::consts::PI / 180.0;
 pub const BARREL: f32 = 1.4;
 /// How far out a line of fire must stay clear of its own vehicle.
 const CLEAR: f32 = 14.0;
-/// A gun fires only while it points this close to its aim point (radians): one that is still
-/// turning, or can't turn that far, holds its fire.
+/// A gun fires only while it points this close to its aim point (radians): one that can't turn
+/// that far holds its fire.
 const ON_TARGET: f32 = 10.0 * std::f32::consts::PI / 180.0;
 
 /// One weapon's mount: the face of its cell where its plate sits (towards the block holding it),
@@ -86,20 +86,29 @@ impl Mount {
         })
     }
 
-    /// One tick of turning from `now` toward `want`, at most `turn` on each axis. It goes the short
-    /// way round unless only the long way gets there clear, and it never turns into its own
-    /// vehicle: toward a direction it can't get to, it turns as far as is clear and stops there
-    /// (no detours over or round the vehicle).
-    fn turn(&self, now: (f32, f32), want: (f32, f32), turn: f32) -> (f32, f32) {
+    /// Where the weapon points for `want`, coming from `now`: there at once if the way is clear,
+    /// else as far toward it as it gets before its own vehicle is in the way. It goes the short way
+    /// round unless only the long way gets there, and makes no detours over or round the vehicle.
+    fn follow(&self, now: (f32, f32), want: (f32, f32)) -> (f32, f32) {
         let to = want.1.clamp(PITCH_DOWN, PITCH_UP);
         let short = wrap(want.0 - now.0);
         let long = short - std::f32::consts::TAU.copysign(short);
         let dy = if !self.path_clear(now, short, to) && self.path_clear(now, long, to) { long } else { short };
-        let (y, p) = (dy.clamp(-turn, turn), (to - now.1).clamp(-turn, turn));
-        // pointing into the vehicle already (it can't, short of a bug): any way out will do
-        let stuck = !self.is_clear(now.0, now.1);
-        // both axes if it can; else whichever one alone still gets closer
-        [(y, p), (y, 0.0), (0.0, p)].into_iter().map(|(y, p)| (wrap(now.0 + y), now.1 + p)).find(|&(y, p)| stuck || self.is_clear(y, p)).unwrap_or(now)
+        // pointing into the vehicle already (it can't, short of a bug): straight there
+        if !self.is_clear(now.0, now.1) {
+            return (wrap(now.0 + dy), to);
+        }
+        // the way there in small steps: both axes while it can, else whichever one alone still
+        // gets closer, until it arrives or neither can
+        let s = STEP * 0.5;
+        let (mut at, mut left) = (now, (dy, to - now.1));
+        while left != (0.0, 0.0) {
+            let (y, p) = (left.0.clamp(-s, s), left.1.clamp(-s, s));
+            let Some((y, p)) = [(y, p), (y, 0.0), (0.0, p)].into_iter().filter(|&m| m != (0.0, 0.0)).find(|&(y, p)| self.is_clear(at.0 + y, at.1 + p)) else { break };
+            at = (at.0 + y, at.1 + p);
+            left = (left.0 - y, left.1 - p);
+        }
+        (wrap(at.0), at.1)
     }
 }
 
@@ -162,7 +171,8 @@ impl WeaponState {
     }
 }
 
-/// Turn every weapon toward the aim point, then fire whatever is ready and points at it.
+/// Point every weapon at the aim point (as far as it gets), then fire whatever is ready and points
+/// at it.
 /// Cooldown jitter and spread come from `hash01(tick, block)` so the client predicts exactly the
 /// shots the server will spawn. `free_energy` is for cosmetic remote vehicles.
 #[allow(clippy::too_many_arguments)]
@@ -175,11 +185,10 @@ pub fn step_weapons(k: &mut Kin, body: &ShipBody, ws: &mut WeaponState, inp: &In
     for m in &body.mounts {
         let i = m.block;
         ws.cds[i] -= dt;
-        let spec = blocks[i].ty.weapon().unwrap();
         // the aim point seen from the weapon, in the vehicle's frame
         let d = (to_local * (target - body.world(k.pos, k.rot, i))).normalize_or(Vec3::NEG_Z);
         let want = (d.x.atan2(-d.z), d.y.clamp(-1.0, 1.0).asin());
-        let (yaw, pitch) = m.turn(ws.aim[i], want, spec.turn.to_radians() * dt);
+        let (yaw, pitch) = m.follow(ws.aim[i], want);
         ws.aim[i] = (yaw, pitch);
         on.push(m.is_clear(yaw, pitch) && barrel_dir(yaw, pitch).angle_between(d) < ON_TARGET);
     }
