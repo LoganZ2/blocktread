@@ -1,5 +1,5 @@
 use crate::ARENA_R;
-use crate::flight::{BTN_BOOST, BTN_FIRE, BTN_MISSILE, InputCmd, Kin, NO_LOCK, q_axis};
+use crate::flight::{BTN_BOOST, BTN_FIRE, BTN_FLIP, BTN_MISSILE, InputCmd, Kin, NO_LOCK, q_axis};
 use crate::rng::Rng;
 use crate::ship::ShipBody;
 use crate::weapons::intercept;
@@ -39,26 +39,35 @@ pub struct Contact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Attack,
+    /// Drive off in `away` for a while, then come back around.
     Evade,
+    /// Stuck against something: back out, wheel turned the other way.
+    Reverse,
 }
 
-/// Dogfighting bot: chase and lead the nearest enemy, break off now and then, dodge rocks.
+/// Driving bot: run at the nearest enemy, circle it at gun range, break away now and then, steer
+/// round rocks, back out when stuck and right itself when it rolls over.
 #[derive(Clone, Debug)]
 pub struct AiPilot {
     pub skill: Skill,
     state: State,
     t: f32,
-    evade: Vec3,
+    away: Vec3,
     wob: Vec3,
     wob_t: f32,
     lock: f32,
     missile_t: f32,
     chase: f32,
     chase_max: f32,
-    yaw: f32,
-    pitch: f32,
-    roll: f32,
+    stuck: f32,
+    steer: f32,
     rng: Rng,
+}
+
+/// Signed angle (rad) from `a` to `b` around the vertical, both flattened: positive is right.
+fn heading_to(a: Vec3, b: Vec3) -> f32 {
+    let (a, b) = (a.with_y(0.0), b.with_y(0.0));
+    (a.x * b.z - a.z * b.x).atan2(a.x * b.x + a.z * b.z)
 }
 
 impl AiPilot {
@@ -68,16 +77,15 @@ impl AiPilot {
             skill,
             state: State::Attack,
             t: 0.0,
-            evade: Vec3::Z,
+            away: Vec3::Z,
             wob: Vec3::ZERO,
             wob_t: 0.0,
             lock: 0.0,
             missile_t: rng.range(2.0, 5.0),
             chase: 0.0,
-            chase_max: rng.range(7.0, 11.0),
-            yaw: 0.0,
-            pitch: 0.0,
-            roll: 0.0,
+            chase_max: rng.range(9.0, 14.0),
+            stuck: 0.0,
+            steer: 0.0,
             rng,
         }
     }
@@ -85,9 +93,9 @@ impl AiPilot {
     #[allow(clippy::too_many_arguments)]
     pub fn think(&mut self, me: &Kin, body: &ShipBody, recent_dmg: f32, my_team: u16, others: &[Contact], rocks: &[Asteroid], dt: f32) -> InputCmd {
         let k = self.skill;
-        let st = &body.stats;
         let fwd = me.fwd();
         let mut des = fwd;
+        let mut drive = 1.0;
         self.t -= dt;
         self.missile_t -= dt;
         self.wob_t -= dt;
@@ -99,110 +107,106 @@ impl AiPilot {
             .iter()
             .filter(|o| o.team != my_team)
             .min_by(|a, b| a.pos.distance_squared(me.pos).total_cmp(&b.pos.distance_squared(me.pos)));
-        let mut cmd = InputCmd { throttle: 150, ..Default::default() };
+        let mut cmd = InputCmd::default();
         let mut aim_dist = 320.0;
         if let Some(t) = tgt {
             let to = t.pos - me.pos;
             let dist = to.length();
             let lead = intercept(me.pos, me.vel, t.pos, t.vel, body.bolt_speed) + self.wob * dist * k.aim_err;
             let to_lead = (lead - me.pos).normalize_or(fwd);
-            match self.state {
-                State::Attack => {
-                    des = to_lead;
-                    cmd.throttle = if dist > 420.0 { 255 } else if dist < 140.0 { 140 } else { 217 };
-                    if dist > 750.0 && me.energy > st.energy_cap * 0.5 {
-                        cmd.buttons |= BTN_BOOST;
-                    }
-                    self.chase += dt;
-                    if dist < 38.0 + body.radius + t.radius || (recent_dmg > 30.0 && self.rng.f32() < dt * 0.9) {
-                        self.state = State::Evade;
-                        self.t = self.rng.range(1.4, 2.6);
-                        self.chase = 0.0;
-                        self.evade = (self.rng.unit() - to / dist.max(1.0) * 1.3).normalize_or(Vec3::Y);
-                    } else if self.chase > self.chase_max {
-                        // break off and extend past the target, then come back around
-                        self.state = State::Evade;
-                        self.t = self.rng.range(2.2, 3.6);
-                        self.chase = 0.0;
-                        self.chase_max = self.rng.range(7.0, 11.0);
-                        self.evade = (self.rng.unit() + fwd * 1.6).normalize_or(fwd);
-                    }
-                    let ang = fwd.angle_between(to_lead);
-                    let fire = body.gun_range > 0.0 && dist < body.gun_range && ang < k.cone * 0.6 + (t.radius * 0.9).atan2(dist.max(1.0));
-                    if fire {
-                        cmd.buttons |= BTN_FIRE;
-                    }
-                    if body.has_missile {
-                        if ang < 0.35 && dist < 800.0 { self.lock += dt } else { self.lock = 0.0 }
-                        if self.lock > 1.4 && self.missile_t <= 0.0 {
-                            cmd.buttons |= BTN_MISSILE;
-                            self.missile_t = self.rng.range(3.0, 6.0);
-                        }
-                    }
-                    aim_dist = (lead - me.pos).length();
-                    cmd.lock = t.id;
+            if self.state == State::Attack {
+                // close in, then circle the target at gun range
+                des = if dist > 70.0 { to_lead } else { (to_lead + to.cross(Vec3::Y).normalize_or(fwd) * 1.2).normalize_or(fwd) };
+                if dist > 250.0 && me.energy > body.stats.energy_cap * 0.5 {
+                    cmd.buttons |= BTN_BOOST;
                 }
-                State::Evade => {
-                    des = self.evade;
-                    cmd.throttle = 255;
-                    if me.energy > 20.0 {
-                        cmd.buttons |= BTN_BOOST;
-                    }
-                    if self.t <= 0.0 {
-                        self.state = State::Attack;
+                self.chase += dt;
+                if self.chase > self.chase_max || (recent_dmg > 30.0 && self.rng.f32() < dt * 0.7) {
+                    self.state = State::Evade;
+                    self.t = self.rng.range(2.5, 4.0);
+                    self.chase = 0.0;
+                    self.chase_max = self.rng.range(9.0, 14.0);
+                    self.away = (self.rng.unit().with_y(0.0) - to / dist.max(1.0)).normalize_or(-fwd);
+                }
+                let ang = fwd.angle_between(to_lead);
+                if body.gun_range > 0.0 && dist < body.gun_range && ang < k.cone * 0.6 + (t.radius * 0.9).atan2(dist.max(1.0)) {
+                    cmd.buttons |= BTN_FIRE;
+                }
+                if body.has_missile {
+                    if ang < 0.35 && dist < 800.0 { self.lock += dt } else { self.lock = 0.0 }
+                    if self.lock > 1.4 && self.missile_t <= 0.0 {
+                        cmd.buttons |= BTN_MISSILE;
+                        self.missile_t = self.rng.range(3.0, 6.0);
                     }
                 }
+                aim_dist = (lead - me.pos).length();
+                cmd.lock = t.id;
             }
         }
-        // rocks ahead
-        let look = me.vel.length().max(30.0) * 2.2;
+        match self.state {
+            State::Evade => {
+                des = self.away;
+                if self.t <= 0.0 {
+                    self.state = State::Attack;
+                }
+            }
+            State::Reverse => {
+                drive = -1.0;
+                if self.t <= 0.0 {
+                    self.state = State::Attack;
+                }
+            }
+            State::Attack => {}
+        }
+        // rocks in the way: steer round them
+        let look = me.vel.length().max(10.0) * 2.5;
         for a in rocks {
-            let rel = a.pos - me.pos;
+            let rel = (a.pos - me.pos).with_y(0.0);
             let ahead = rel.dot(fwd);
-            if ahead < -a.r || ahead > look + a.r {
+            if ahead < 0.0 || ahead > look + a.r {
                 continue;
             }
-            let perp = rel - fwd * ahead;
+            let perp = rel - fwd.with_y(0.0) * ahead;
             let pl = perp.length();
-            let safe = a.r + body.radius + 14.0;
+            let safe = a.r + body.radius + 4.0;
             if pl < safe {
-                let push = (1.0 - pl / safe) * 3.5;
-                if pl < 0.01 { des += me.up() * push } else { des -= perp * (push / pl) }
+                let push = (1.0 - pl / safe) * 3.0;
+                if pl < 0.01 { des += fwd.cross(Vec3::Y) * push } else { des -= perp * (push / pl) }
             }
         }
         // spread out from teammates
         for o in others.iter().filter(|o| o.team == my_team) {
-            let rel = me.pos - o.pos;
+            let rel = (me.pos - o.pos).with_y(0.0);
             let d = rel.length();
-            if d > 0.01 && d < 35.0 + body.radius + o.radius {
+            if d > 0.01 && d < 20.0 + body.radius + o.radius {
                 des += rel * (0.9 / d);
             }
         }
-        let dl = me.pos.length();
-        if dl > ARENA_R * 0.8 {
-            des -= me.pos * (1.6 / dl);
+        let dl = me.pos.with_y(0.0).length();
+        if dl > ARENA_R * 0.75 {
+            des -= me.pos.with_y(0.0) * (1.6 / dl);
         }
-        let des = des.normalize_or(fwd);
-        let l = me.rot.inverse() * des;
-        // angle controller: command a turn rate proportional to the remaining angle so aim settles
-        let off = l.x.hypot(l.y).atan2(-l.z);
-        let lift_pen = if st.lift_ratio < 1.0 { st.lift_ratio.max(0.3) } else { 1.0 };
-        let (tp, ty) = ((st.pitch_rate * lift_pen).max(0.2), (st.yaw_rate * lift_pen).max(0.16));
-        let (yaw, pitch) = if off > 1.2 {
-            let m = l.x.hypot(l.y);
-            if m < 0.05 { (0.0, 1.0) } else { (l.x / m, l.y / m) }
+        // stuck: pushing with the engine but going nowhere
+        if self.state != State::Reverse && me.vel.length() < 1.5 && me.up().y > 0.5 {
+            self.stuck += dt;
+            if self.stuck > 1.5 {
+                self.state = State::Reverse;
+                self.t = self.rng.range(1.2, 2.0);
+                self.stuck = 0.0;
+            }
         } else {
-            ((l.x.atan2(-l.z) * 4.5 / ty).clamp(-1.0, 1.0), (l.y.atan2(-l.z) * 4.5 / tp).clamp(-1.0, 1.0))
-        };
-        let bank = ((off - 0.35) / 0.5).clamp(0.0, 1.0);
-        let roll = (l.x.atan2(l.y) * 1.1).clamp(-1.0, 1.0) * bank - (me.ang.z / st.roll_rate.max(0.5)).clamp(-1.0, 1.0) * 0.3 * (1.0 - bank);
-        let r = (dt * k.react).min(1.0);
-        self.yaw += (yaw - self.yaw) * r;
-        self.pitch += (pitch - self.pitch) * r;
-        self.roll += (roll - self.roll) * r;
-        cmd.yaw = q_axis(self.yaw);
-        cmd.pitch = q_axis(self.pitch);
-        cmd.roll = q_axis(self.roll);
+            self.stuck = 0.0;
+        }
+        if me.up().y < 0.4 {
+            cmd.buttons |= BTN_FLIP;
+        }
+        let mut steer = (heading_to(fwd, des) * 2.5).clamp(-1.0, 1.0);
+        if drive < 0.0 {
+            steer = -steer;
+        }
+        self.steer += (steer - self.steer) * (dt * k.react).min(1.0);
+        cmd.drive = q_axis(drive);
+        cmd.steer = q_axis(self.steer);
         cmd.aim_dist = aim_dist.clamp(30.0, 2000.0) as u16;
         if tgt.is_none() {
             cmd.lock = NO_LOCK;

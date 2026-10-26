@@ -54,7 +54,7 @@ pub const REVERT_AFTER: f64 = 15.0;
 pub fn initial_window(s: &Settings, hidden: bool) -> Window {
     let mode = if hidden { WindowMode::Windowed } else { startup_mode(&s.display) };
     Window {
-        title: "体素星翼 VOXWING".into(),
+        title: "方块战车 BLOCKTREAD".into(),
         resolution: (s.window_size[0].max(640), s.window_size[1].max(400)).into(),
         mode,
         present_mode: present_mode(s.vsync),

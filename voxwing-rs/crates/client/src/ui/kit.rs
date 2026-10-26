@@ -26,10 +26,16 @@ pub fn register(app: &mut App) {
 
 // ---------------------------------------------------------------- surfaces
 
-/// The standard panel surface: flat, chamfered top-right and bottom-left, accent strip, grain.
+/// The standard panel surface: flat and square, hairline edge, an amber line along the top, grain.
 pub fn panel_plate() -> Plate {
-    Plate { fill: PANEL, edge: LINE, mark: ACCENT, chamfer: 14.0, corners: TR | BL, accent: 28.0, grain: 1.0, ..default() }
+    Plate { fill: PANEL, edge: LINE, mark: ACCENT, accent: FULL, grain: 1.0, ..default() }
 }
+
+/// An accent strip that runs the whole top edge.
+pub const FULL: f32 = 10_000.0;
+
+/// Width of the hazard stripes on the main action button (they widen on hover).
+const STRIPES: f32 = 16.0;
 
 /// Opaque variant for dialogs and other surfaces that sit over busy backgrounds.
 pub fn solid_plate() -> Plate {
@@ -103,15 +109,11 @@ pub fn btn_node(kind: Kind) -> Node {
 }
 
 fn btn_plate(kind: Kind) -> Option<Plate> {
-    let p = Plate { mark: ACCENT, chamfer: 7.0, corners: BR, ..default() };
+    let p = Plate { mark: ACCENT, ..default() };
     match kind {
         Kind::Ghost => None,
-        Kind::Primary => Some(Plate { chamfer: 14.0, corners: TL | BR, ..p }),
-        Kind::Accent => Some(Plate { chamfer: 8.0, corners: TL | BR, ..p }),
-        // the accent bar closes the left side, so only the far corner is cut
-        Kind::Menu => Some(Plate { chamfer: 12.0, corners: BR, edge_w: 0.0, ..p }),
-        Kind::Card => Some(Plate { chamfer: 12.0, corners: TL | BR, ..p }),
-        Kind::Segment => Some(Plate { chamfer: 0.0, corners: 0, ..p }),
+        Kind::Primary => Some(Plate { stripes: STRIPES, stripe: ON_ACCENT, ..p }),
+        Kind::Menu => Some(Plate { edge_w: 0.0, ..p }),
         _ => Some(p),
     }
 }
@@ -247,29 +249,28 @@ fn animate_buttons(
         let h1 = h.min(1.0);
         let press = (h - 1.0).max(0.0) * 4.0;
         let white = |a: f32| Color::srgba(1.0, 1.0, 1.0, a);
-        // flat colours only: (fill, edge, label ink, accent strip)
+        // flat colours only, and the fill never changes on hover: hover shows as an amber line
+        // (the bar at the left, or the hazard band widening on the main action), pressing dims
+        // a little. (fill, edge, label ink, accent strip along the top)
         let (fill, edge, ink, accent) = match b.kind {
             Kind::Primary | Kind::Accent if disabled => (tone(Color::WHITE, 0.08), Color::NONE, MUTED, 0.0),
-            // hover flips the accent fill to off-white; pressing dips it back a little
-            Kind::Primary | Kind::Accent => (ACCENT.mix(&INK, h1 * 0.9 - press * 0.3), if focused { INK } else { Color::NONE }, ON_ACCENT, 0.0),
+            Kind::Primary | Kind::Accent => (ACCENT.mix(&ON_ACCENT, press * 0.12), if focused { INK } else { Color::NONE }, ON_ACCENT, 0.0),
             Kind::Ghost => (Color::NONE, Color::NONE, MUTED.mix(&INK, h1), 0.0),
-            Kind::Danger => (tone(DANGER, 0.2 + 0.14 * h1 + 0.1 * press), DANGER.with_alpha(0.4 + 0.4 * h1), INK, 0.0),
+            Kind::Danger => (tone(DANGER, 0.14 + 0.08 * press), DANGER.with_alpha(0.5 + 0.4 * h1), INK, 0.0),
             Kind::Menu => (tone(Color::WHITE, 0.05 + 0.04 * press).with_alpha(0.85 * h1), Color::NONE, MUTED.mix(&INK, (0.4 + h).min(1.0)), 0.0),
+            // chosen: a lighter fill, the amber line along the top (an amber frame on part tiles)
             Kind::Segment | Kind::Part | Kind::Card | Kind::Normal | Kind::Icon if sel.0 => (
-                tone(ACCENT, 0.16 + 0.06 * h1),
-                ACCENT,
+                tone(INK, 0.1 + 0.03 * press),
+                if b.kind == Kind::Part { ACCENT } else { white(0.16 + 0.2 * h1) },
                 INK,
-                match b.kind {
-                    Kind::Part => 18.0,
-                    Kind::Card => 40.0,
-                    _ => 0.0,
-                },
+                if b.kind == Kind::Part { 0.0 } else { FULL },
             ),
-            _ => (tone(Color::WHITE, 0.06 + 0.05 * h1 + 0.05 * press), if focused { ACCENT } else { white(0.08 + 0.22 * h1) }, INK, 0.0),
+            _ => (tone(Color::WHITE, 0.04 + 0.04 * press), if focused { ACCENT } else { white(0.16 + 0.24 * h1) }, MUTED.mix(&INK, 0.75 + 0.25 * h1), 0.0),
         };
         if let Some(mut p) = plate {
             let dim = if disabled && !matches!(b.kind, Kind::Primary | Kind::Accent) { 0.5 } else { 1.0 };
-            let next = Plate { fill: fill.with_alpha(fill.alpha() * dim), edge: edge.with_alpha(edge.alpha() * dim), accent, ..*p };
+            let stripes = if b.kind == Kind::Primary && !disabled { STRIPES + 10.0 * h1 } else { p.stripes };
+            let next = Plate { fill: fill.with_alpha(fill.alpha() * dim), edge: edge.with_alpha(edge.alpha() * dim), accent, stripes, ..*p };
             p.set_if_neq(next);
         }
         for c in children.iter() {
@@ -356,7 +357,7 @@ fn show_scrollbars(mut bars: Query<(&Scrollbar, &mut Node)>, areas: Query<&Compu
 pub fn spawn_header(commands: &mut Commands, f: &UiFont, parent: Entity, label: &str) -> Entity {
     let (zh, en) = label.split_once('|').unwrap_or((label, ""));
     let h = commands.spawn((Node { height: px(16), column_gap: px(8), align_items: AlignItems::Center, ..default() }, ChildOf(parent))).id();
-    commands.spawn((Node { width: px(3), height: px(12), ..default() }, BackgroundColor(ACCENT), ChildOf(h)));
+    commands.spawn((Node { width: px(7), height: px(7), ..default() }, BackgroundColor(ACCENT), ChildOf(h)));
     commands.spawn((strong(f, zh, 13.0, INK.with_alpha(0.85)), LetterSpacing::Px(1.0), ChildOf(h)));
     if !en.is_empty() {
         commands.spawn((tech(f, en, 11.0, MUTED), LetterSpacing::Px(2.5), ChildOf(h)));
@@ -373,12 +374,38 @@ pub fn spawn_section(commands: &mut Commands, f: &UiFont, parent: Entity, label:
     s
 }
 
-/// Screen title: heading with a Latin caption and an accent slash, `H_MD` tall like the
-/// controls next to it.
+/// A full-width bar along the top of a screen, over the scene: solid, with an amber line along
+/// its bottom edge. Returns the bar; its children sit in a row, `H_MD` tall controls centred.
+pub fn spawn_top_bar(commands: &mut Commands, parent: Entity) -> Entity {
+    let bar = commands
+        .spawn((
+            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(0), height: px(TOP_BAR), padding: UiRect::horizontal(px(EDGE)), column_gap: px(GAP), align_items: AlignItems::Center, ..default() },
+            Plate { fill: PANEL_SOLID.with_alpha(0.94), grain: 1.0, edge_w: 0.0, ..default() },
+            ChildOf(parent),
+        ))
+        .id();
+    commands.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(0), height: px(2), ..default() }, BackgroundColor(ACCENT), Pickable::IGNORE, ChildOf(bar)));
+    bar
+}
+
+/// Height of [`spawn_top_bar`].
+pub const TOP_BAR: f32 = 64.0;
+
+/// The wordmark: 方块战车 in the display face, BLOCKTREAD stenciled after it.
+pub fn spawn_brand(commands: &mut Commands, f: &UiFont, parent: Entity, size: f32) -> Entity {
+    let b = commands.spawn((Node { column_gap: px(size * 0.4), align_items: AlignItems::Center, flex_shrink: 0.0, ..default() }, ChildOf(parent))).id();
+    commands.spawn((Node { width: px(6), height: px(size * 0.8), ..default() }, BackgroundColor(ACCENT), ChildOf(b)));
+    commands.spawn((display(f, "方块战车", size, INK), LetterSpacing::Px(size * 0.08), ChildOf(b)));
+    commands.spawn((stencil(f, "BLOCKTREAD", size * 0.46, ACCENT), LetterSpacing::Px(size * 0.2), ChildOf(b)));
+    b
+}
+
+/// Screen title: the display face with a Latin caption after an amber block, `H_MD` tall like
+/// the controls next to it.
 pub fn spawn_title(commands: &mut Commands, f: &UiFont, parent: Entity, zh: &str, en: &str) -> Entity {
     let t = commands.spawn((Node { height: px(H_MD), align_items: AlignItems::Center, column_gap: px(12), flex_shrink: 0.0, ..default() }, ChildOf(parent))).id();
-    commands.spawn((Node { width: px(3), height: px(22), ..default() }, BackgroundColor(ACCENT), UiTransform { rotation: Rot2::degrees(14.0), ..default() }, ChildOf(t)));
-    commands.spawn((heading(f, zh, 24.0, INK), ChildOf(t)));
+    commands.spawn((Node { width: px(6), height: px(24), ..default() }, BackgroundColor(ACCENT), ChildOf(t)));
+    commands.spawn((display(f, zh, 30.0, INK), LetterSpacing::Px(2.0), ChildOf(t)));
     commands.spawn((tech(f, en, 12.0, MUTED), LetterSpacing::Px(4.0), ChildOf(t)));
     t
 }
@@ -387,7 +414,7 @@ pub fn spawn_title(commands: &mut Commands, f: &UiFont, parent: Entity, zh: &str
 pub fn chip(f: &UiFont, s: impl Into<String>, color: Color) -> impl Bundle {
     (
         Node { height: px(22), padding: UiRect::horizontal(px(8)), align_items: AlignItems::Center, ..default() },
-        Plate { fill: tone(color, 0.16), edge: color.with_alpha(0.5), chamfer: 6.0, corners: BR, ..default() },
+        Plate { fill: tone(color, 0.12), edge: color.with_alpha(0.6), ..default() },
         children![strong(f, s, 12.0, color)],
     )
 }
@@ -427,8 +454,8 @@ pub fn spawn_toggle(commands: &mut Commands, f: &UiFont, parent: Entity, label: 
         ))
         .id();
     commands.spawn((text(f, label, 14.0, INK), Pickable::IGNORE, ChildOf(e)));
-    let track = commands.spawn((Node { width: px(40), height: px(20), ..default() }, Plate { chamfer: 6.0, corners: TL | BR, ..default() }, Pickable::IGNORE, ChildOf(e))).id();
-    let knob = commands.spawn((Node { position_type: PositionType::Absolute, width: px(14), height: px(14), top: px(3), left: px(3), ..default() }, Plate { chamfer: 4.0, corners: TL | BR, edge_w: 0.0, ..default() }, Pickable::IGNORE, ChildOf(track))).id();
+    let track = commands.spawn((Node { width: px(40), height: px(20), ..default() }, Plate { ..default() }, Pickable::IGNORE, ChildOf(e))).id();
+    let knob = commands.spawn((Node { position_type: PositionType::Absolute, width: px(14), height: px(14), top: px(3), left: px(3), ..default() }, Plate { edge_w: 0.0, ..default() }, Pickable::IGNORE, ChildOf(track))).id();
     commands.entity(e).insert(ToggleVis { track, knob });
     if on {
         commands.entity(e).insert(Checked);
@@ -488,7 +515,7 @@ pub fn spawn_slider(commands: &mut Commands, f: &UiFont, parent: Entity, label: 
     let fill = commands.spawn((Node { position_type: PositionType::Absolute, left: px(0), width: percent(50), top: px(9), height: px(4), ..default() }, BackgroundColor(ACCENT), Pickable::IGNORE, ChildOf(s))).id();
     let lane = commands.spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(12), top: px(0), bottom: px(0), ..default() }, Pickable::IGNORE, ChildOf(s))).id();
     let knob = commands
-        .spawn((SliderThumb, Node { position_type: PositionType::Absolute, width: px(12), height: px(22), left: percent(50), ..default() }, Plate { fill: INK, chamfer: 4.0, corners: TL | BR, edge_w: 0.0, ..default() }, ChildOf(lane)))
+        .spawn((SliderThumb, Node { position_type: PositionType::Absolute, width: px(12), height: px(22), left: percent(50), ..default() }, Plate { fill: INK, edge_w: 0.0, ..default() }, ChildOf(lane)))
         .id();
     let readout = commands.spawn((tech(f, fmt(value), 14.0, INK), Node { width: px(56), justify_content: JustifyContent::FlexEnd, ..default() }, TextLayout::justify(Justify::Right), ChildOf(r))).id();
     commands.entity(s).insert(SliderVis { fill, knob, readout, fmt });
@@ -542,7 +569,7 @@ pub fn spawn_choice(commands: &mut Commands, f: &UiFont, icons: &Icons, parent: 
     let ctl = commands
         .spawn((
             Node { width: px(232), height: px(H_MD), align_items: AlignItems::Center, ..default() },
-            Plate { fill: Color::srgba(0.0, 0.0, 0.0, 0.4), edge: LINE_HI, chamfer: 8.0, corners: BR, ..default() },
+            Plate { fill: Color::srgba(0.0, 0.0, 0.0, 0.4), edge: LINE_HI, ..default() },
             ChildOf(r),
         ))
         .id();
@@ -605,7 +632,7 @@ pub fn spawn_field(commands: &mut Commands, f: &UiFont, parent: Entity, value: &
         .spawn((
             // 9 + 18 (15px text line) + 9 = H_MD
             Node { padding: UiRect::axes(px(12), px(9)), min_width: px(chars * 15.0), ..default() },
-            Plate { fill: Color::srgba(0.0, 0.0, 0.0, 0.4), edge: LINE_HI, mark: ACCENT, chamfer: 8.0, corners: BR, ..default() },
+            Plate { fill: Color::srgba(0.0, 0.0, 0.0, 0.4), edge: LINE_HI, mark: ACCENT, ..default() },
             TextInput,
             EditableText { visible_width: Some(chars), allow_newlines: false, ..EditableText::new(value) },
             TextLayout::no_wrap(),
@@ -638,7 +665,8 @@ pub fn typing(focus: &InputFocus, fields: &Query<(), With<EditableText>>) -> boo
 /// [`Plate::frac`] to change the fill.
 pub fn spawn_stat(commands: &mut Commands, f: &UiFont, parent: Entity, label: &str, color: Color) -> (Entity, Entity) {
     let r = commands.spawn((Node { height: px(20), ..row(12.0) }, ChildOf(parent))).id();
-    commands.spawn((text(f, label, 13.0, MUTED), Node { width: px(36), ..default() }, ChildOf(r)));
+    // room for a three-character label on one line
+    commands.spawn((text(f, label, 13.0, MUTED), Node { width: px(44), flex_shrink: 0.0, ..default() }, TextLayout::no_wrap(), ChildOf(r)));
     let gauge = commands.spawn((Node { flex_grow: 1.0, height: px(8), ..default() }, Plate::gauge(color, 24.0, 0.0), ChildOf(r))).id();
     let val = commands.spawn((tech(f, "", 14.0, INK), Node { width: px(88), justify_content: JustifyContent::FlexEnd, ..default() }, TextLayout::justify(Justify::Right), ChildOf(r))).id();
     (gauge, val)
@@ -752,7 +780,7 @@ fn spawn_global_layer(mut commands: Commands) {
     ));
     commands.spawn((
         Node { position_type: PositionType::Absolute, padding: UiRect::axes(px(12), px(8)), max_width: px(300), flex_direction: FlexDirection::Column, row_gap: px(4), ..default() },
-        Plate { chamfer: 8.0, corners: BR, grain: 0.0, accent: 18.0, ..solid_plate() },
+        Plate { grain: 0.0, accent: 18.0, ..solid_plate() },
         Visibility::Hidden,
         GlobalZIndex(95),
         Pickable::IGNORE,
@@ -786,7 +814,7 @@ fn render_toasts(mut commands: Commands, time: Res<Time>, mut toasts: ResMut<Toa
         };
         commands.spawn((
             Node { column_gap: px(10), align_items: AlignItems::Center, padding: UiRect { left: px(0), right: px(16), top: px(9), bottom: px(9) }, ..default() },
-            Plate { edge: c.with_alpha(0.45), chamfer: 8.0, corners: TL | BR, grain: 0.0, accent: 0.0, ..solid_plate() },
+            Plate { edge: c.with_alpha(0.45), grain: 0.0, accent: 0.0, ..solid_plate() },
             Pickable::IGNORE,
             ChildOf(*layer),
             children![(Node { width: px(3), height: px(18), ..default() }, BackgroundColor(c)), text(&f, s.clone(), 14.0, INK)],

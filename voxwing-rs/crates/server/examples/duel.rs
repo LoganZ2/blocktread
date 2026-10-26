@@ -33,11 +33,11 @@ fn main() {
     let mut ships: Vec<(String, Design)> = PRESETS.iter().map(|p| (p.name.to_string(), preset(p.key))).collect();
     if weapons {
         for t in BlockType::ALL.into_iter().filter(|t| t.weapon().is_some()) {
-            let mut d = preset("falcon");
+            let mut d = preset("bison");
             for b in d.blocks.iter_mut().filter(|b| b.ty.weapon().is_some()) {
                 b.ty = t;
             }
-            ships.push((format!("游隼·{}", t.info().name), d));
+            ships.push((format!("野牛·{}", t.info().name), d));
         }
         if equal {
             let target = ships[PRESETS.len()..].iter().map(|(_, d)| analyze(d).stats.cost).fold(0.0, f32::max);

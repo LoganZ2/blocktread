@@ -29,6 +29,10 @@ pub struct ShipBody {
     pub bolt_speed: f32,
     pub gun_range: f32,
     pub has_missile: bool,
+    /// The wheels still on, and the engines' combined power (an engine needs no clear exhaust
+    /// to turn wheels).
+    pub wheels: Vec<usize>,
+    pub power: f32,
 }
 
 impl ShipBody {
@@ -52,6 +56,8 @@ impl ShipBody {
             bolt_speed: 400.0,
             gun_range: 0.0,
             has_missile: false,
+            wheels: Vec::new(),
+            power: 0.0,
         };
         body.rebuild();
         body
@@ -73,6 +79,8 @@ impl ShipBody {
         self.bolt_speed = if guns.is_empty() { 400.0 } else { guns.iter().map(|w| w.speed).sum::<f32>() / guns.len() as f32 };
         self.gun_range = guns.iter().map(|w| w.speed * w.life).fold(0.0, f32::max) * 0.9;
         self.has_missile = self.stats.weapons.iter().any(|&i| blocks[i].ty.weapon().unwrap().homing);
+        self.wheels = (0..blocks.len()).filter(|&i| self.alive[i] && blocks[i].ty == BlockType::Wheel).collect();
+        self.power = (0..blocks.len()).filter(|&i| self.alive[i]).map(|i| blocks[i].ty.thrust()).sum();
     }
 
     pub fn repair(&mut self) {

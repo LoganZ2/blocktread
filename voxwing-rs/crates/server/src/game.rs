@@ -7,13 +7,15 @@ use voxwing_shared::ai::{AiPilot, Contact, Skill};
 use voxwing_shared::analysis::analyze;
 use voxwing_shared::balance::balance;
 use voxwing_shared::blocks::{BlockType, DamageKind, Design};
-use voxwing_shared::flight::{InputCmd, Kin, NO_LOCK, collide_asteroids, look_rotation, step_flight};
+use voxwing_shared::drive::{spawn_height, step_drive};
+use voxwing_shared::flight::{InputCmd, Kin, NO_LOCK, collide_asteroids, look_rotation};
 use voxwing_shared::presets::{PRESETS, enemy_colors, preset};
 use voxwing_shared::protocol::*;
 use voxwing_shared::rng::Rng;
 use voxwing_shared::ship::ShipBody;
 use voxwing_shared::weapons::{Shot, WeaponState, step_weapons};
-use voxwing_shared::world::{Asteroid, PLAYER_SPAWN, generate_asteroids, tick_time};
+use voxwing_shared::terrain::Terrain;
+use voxwing_shared::world::{Asteroid, PLAYER_SPAWN, generate_boulders, tick_time};
 use voxwing_shared::{DT, HISTORY_TICKS, SNAPSHOT_INTERVAL, TICK_RATE};
 
 pub struct GameConfig {
@@ -25,7 +27,6 @@ pub struct GameConfig {
 }
 
 const MAX_DATAGRAM: usize = 1100;
-const PLAYER_TURN_BONUS: f32 = 1.12;
 const MAX_REWIND_TICKS: u32 = 30;
 
 struct Player {
@@ -170,6 +171,7 @@ pub struct Game {
     next_ship: u16,
     bolts: Vec<Bolt>,
     next_bolt: u16,
+    terrain: Arc<Terrain>,
     rocks: Vec<Asteroid>,
     seed: u64,
     wave: u32,
@@ -207,6 +209,7 @@ impl Game {
 
     /// A game whose asteroids and randomness come from `seed` (for reproducible simulations).
     pub fn with_seed(cfg: GameConfig, seed: u64) -> Self {
+        let terrain = Arc::new(Terrain::generate(seed));
         Game {
             cfg,
             tick: 0,
@@ -216,7 +219,8 @@ impl Game {
             next_ship: 1,
             bolts: Vec::new(),
             next_bolt: 1,
-            rocks: generate_asteroids(seed),
+            rocks: generate_boulders(seed, &terrain),
+            terrain,
             seed,
             wave: 0,
             between: true,
@@ -302,7 +306,7 @@ impl Game {
     pub fn join(&mut self, pid: u16, name: String, design: Option<Design>, team: Option<u16>, out: tokio::sync::mpsc::UnboundedSender<Outgoing>) {
         let mut name: String = name.trim().chars().filter(|c| !c.is_control()).take(12).collect();
         if name.is_empty() {
-            name = format!("飞行员{pid}");
+            name = format!("车长{pid}");
         }
         self.joins += 1;
         // what happened before this join goes to those already here: the newcomer gets the world
@@ -345,7 +349,7 @@ impl Game {
         if watching {
             self.feed(format!("{name} 开始观战"), false);
             if let Some(p) = self.players.get(&pid) {
-                p.send(&ServerMsg::Announce { title: "观战".into(), sub: format!("{} · 附身到任意一架飞机上看", self.cfg.mode.label()) });
+                p.send(&ServerMsg::Announce { title: "观战".into(), sub: format!("{} · 附身到任意一辆战车上看", self.cfg.mode.label()) });
             }
             return;
         }
@@ -357,7 +361,7 @@ impl Game {
                     self.spawn_player(pid);
                 }
                 if self.wave == 0 && self.between && !self.timers.iter().any(|t| matches!(t.1, Timer::StartWave)) {
-                    self.announce("准备战斗", "第一波敌机即将抵达".into());
+                    self.announce("准备战斗", "第一波敌车即将抵达".into());
                     self.after(3.0, Timer::StartWave);
                 } else if !self.wiped {
                     let sub = format!("第 {} 波进行中", self.wave);
@@ -369,10 +373,10 @@ impl Game {
             Mode::Ffa | Mode::Teams => {
                 self.spawn_player(pid);
                 let sub = match (self.cfg.mode, self.limit) {
-                    (Mode::Teams, 0) => "击落对方队伍的飞机".to_string(),
-                    (Mode::Teams, n) => format!("先拿到 {n} 次击落的队伍获胜"),
-                    (_, 0) => "击落任何其他飞机".to_string(),
-                    (_, n) => format!("先拿到 {n} 次击落的人获胜"),
+                    (Mode::Teams, 0) => "击毁对方队伍的战车".to_string(),
+                    (Mode::Teams, n) => format!("先拿到 {n} 次击毁的队伍获胜"),
+                    (_, 0) => "击毁任何其他战车".to_string(),
+                    (_, n) => format!("先拿到 {n} 次击毁的人获胜"),
                 };
                 if let Some(p) = self.players.get(&pid) {
                     p.send(&ServerMsg::Announce { title: self.cfg.mode.label().into(), sub });
@@ -395,8 +399,11 @@ impl Game {
     fn add_ship(&mut self, design: Arc<Design>, name: String, team: u16, owner: Option<u16>, pos: Vec3, rot: Quat, ai: Option<Skill>) -> u16 {
         let id = self.alloc_ship();
         let body = ShipBody::new(design);
-        let mut kin = Kin::new(pos, rot, &body.stats);
-        kin.vel = rot * Vec3::NEG_Z * 40.0;
+        // set down on the ground, level, facing the way it was told
+        let f = (rot * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
+        let rot = look_rotation(Vec3::ZERO, f, Vec3::Y);
+        let pos = pos.with_y(spawn_height(&body, &self.terrain, pos.x, pos.z, rot));
+        let kin = Kin::new(pos, rot, &body.stats);
         let ws = WeaponState::new(&body);
         let dmg_mul = ai.map_or(1.0, |s| s.dmg_mul);
         let ship = Ship {
@@ -407,7 +414,7 @@ impl Game {
             kin,
             ws,
             ai: ai.map(|s| AiPilot::new(s, self.rng.next_u64())),
-            input: InputCmd { throttle: 180, ..Default::default() },
+            input: InputCmd::default(),
             hist: vec![(pos, rot); HISTORY_TICKS],
             spawn_tick: self.tick,
             last_attacker: None,
@@ -499,8 +506,8 @@ impl Game {
         }
         let side = if team % 2 == 1 { 1.0 } else { -1.0 };
         for _ in 0..30 {
-            let pos = Vec3::new(side * self.rng.range(550.0, 700.0), self.rng.range(-80.0, 80.0), self.rng.range(-220.0, 220.0));
-            let clear = self.rocks.iter().all(|a| a.pos.distance(pos) > a.r + 40.0) && self.ships.values().all(|s| s.kin.pos.distance(pos) > 60.0);
+            let pos = Vec3::new(side * self.rng.range(330.0, 420.0), 0.0, self.rng.range(-150.0, 150.0));
+            let clear = self.clear_ground(pos, 15.0) && self.ships.values().all(|s| s.kin.pos.with_y(0.0).distance(pos) > 25.0);
             if clear {
                 return (pos, look_rotation(pos, Vec3::ZERO, Vec3::Y));
             }
@@ -510,16 +517,20 @@ impl Game {
 
     fn ffa_spawn_point(&mut self) -> (Vec3, Quat) {
         for _ in 0..30 {
-            let mut d = self.rng.unit();
-            d.y *= 0.4;
-            let pos = d.normalize_or(Vec3::Z) * self.rng.range(450.0, 750.0);
-            let clear = self.rocks.iter().all(|a| a.pos.distance(pos) > a.r + 40.0) && self.ships.values().all(|s| s.kin.pos.distance(pos) > 150.0);
+            let a = self.rng.range(0.0, std::f32::consts::TAU);
+            let pos = Vec3::new(a.cos(), 0.0, a.sin()) * self.rng.range(150.0, 420.0);
+            let clear = self.clear_ground(pos, 15.0) && self.ships.values().all(|s| s.kin.pos.with_y(0.0).distance(pos) > 80.0);
             if clear {
                 let rot = look_rotation(pos, Vec3::ZERO, Vec3::Y);
                 return (pos, rot);
             }
         }
         (PLAYER_SPAWN, Quat::IDENTITY)
+    }
+
+    /// No rock within `gap` of (x, z).
+    fn clear_ground(&self, pos: Vec3, gap: f32) -> bool {
+        self.rocks.iter().all(|a| a.pos.with_y(0.0).distance(pos.with_y(0.0)) > a.r + gap)
     }
 
     fn start_wave(&mut self) {
@@ -558,7 +569,7 @@ impl Game {
             self.add_ship(d, format!("敌方·{}", PRESETS[i].name), 1, None, pos, rot, Some(Skill::for_wave(w)));
         }
         self.between = false;
-        self.announce(&format!("第 {w} 波"), format!("{n} 架敌机来袭"));
+        self.announce(&format!("第 {w} 波"), format!("{n} 辆敌车来袭"));
         self.scores_dirty = true;
     }
 
@@ -600,7 +611,7 @@ impl Game {
                     for pid in dead {
                         self.spawn_player(pid);
                     }
-                    self.feed("战机已完全修复".into(), false);
+                    self.feed("战车已完全修复".into(), false);
                 }
                 Timer::Restart => {
                     self.wiped = false;
@@ -609,7 +620,7 @@ impl Game {
                     for pid in pids {
                         self.spawn_player(pid);
                     }
-                    self.announce("重新开始", "第一波敌机即将抵达".into());
+                    self.announce("重新开始", "第一波敌车即将抵达".into());
                     self.after(3.0, Timer::StartWave);
                 }
                 Timer::SpawnBot => {
@@ -660,8 +671,7 @@ impl Game {
         // flight + weapons
         let mut crashes = Vec::new();
         for s in self.ships.values_mut() {
-            let bonus = if s.owner.is_some() { PLAYER_TURN_BONUS } else { 1.0 };
-            step_flight(&mut s.kin, &s.body.stats, &s.input, DT, bonus);
+            step_drive(&mut s.kin, &s.body, &s.input, &self.terrain, DT);
             if let Some(imp) = collide_asteroids(&mut s.kin, &s.body, &self.rocks, tick_time(t))
                 && s.collide_cd <= 0.0
             {
@@ -703,10 +713,10 @@ impl Game {
         self.update_bolts(t);
         self.settle_ships();
 
-        // ships that lost every engine and every gun give up after a few seconds
+        // vehicles that can neither drive nor shoot give up after a few seconds
         let mut give_up = Vec::new();
         for s in self.ships.values_mut() {
-            if s.body.stats.thrust == 0.0 && s.body.stats.weapons.is_empty() {
+            if (s.body.power == 0.0 || s.body.wheels.len() < 2) && s.body.stats.weapons.is_empty() {
                 let left = s.disabled_t.get_or_insert(3.0);
                 *left -= DT;
                 if *left <= 0.0 {
@@ -856,6 +866,13 @@ impl Game {
                     }
                 }
             }
+            if !dead && b.pos.y < self.terrain.height(b.pos.x, b.pos.z) {
+                // into the ground
+                if spec.splash > 0.0 {
+                    self.events.push(ServerMsg::Explosion { pos: b.pos, size: 0.7 });
+                }
+                dead = true;
+            }
             if !dead {
                 for a in &self.rocks {
                     if let Some(tt) = a.hit_segment(b.prev, b.pos, a.rotation(tick_time(t))) {
@@ -956,7 +973,7 @@ impl Game {
         }
         let text = match killer_name {
             Some(k) => format!("{k} 击毁了 {}", victim.name),
-            None => format!("{} 坠毁了", victim.name),
+            None => format!("{} 报废了", victim.name),
         };
         self.feed(text, victim.owner.is_some());
         self.scores_dirty = true;
@@ -1009,7 +1026,7 @@ impl Game {
             }
         }
         self.scores_dirty = true;
-        self.announce("波次清除", format!("奖励 +{bonus} · 正在修复战机"));
+        self.announce("波次清除", format!("奖励 +{bonus} · 正在修复战车"));
         self.after(2.2, Timer::RepairPlayers);
         self.after(5.5, Timer::StartWave);
     }
@@ -1089,7 +1106,7 @@ impl Game {
                 rot: quantize_quat(s.kin.rot),
                 vel: s.kin.vel,
                 flags: (if s.input.has(voxwing_shared::flight::BTN_FIRE) { FLAG_FIRING } else { 0 }) | (if s.kin.boosting { FLAG_BOOST } else { 0 }),
-                throttle: s.input.throttle,
+                throttle: (s.input.throttle_f() * 255.0) as u8,
                 shield: if s.body.stats.shield_cap > 0.0 { (s.kin.shield / s.body.stats.shield_cap * 255.0) as u8 } else { 0 },
             })
             .collect();
@@ -1135,12 +1152,12 @@ pub fn duel(a: &Design, b: &Design, seed: u64, max_secs: f32) -> Duel {
     let mut g = Game::with_seed(GameConfig { mode: Mode::Ffa, bots: 0, budget: None, verbose: false }, seed);
     // full damage on both sides: free-for-all bots normally hit a little softer than players
     let skill = Skill { dmg_mul: 1.0, ..Skill::ffa_bot() };
-    // two spots 700 m apart, clear of rocks, facing each other
-    let clear = |g: &Game, p: Vec3| g.rocks.iter().all(|r| r.pos.distance(p) > r.r + 40.0);
-    let mut spots = (Vec3::new(-350.0, 0.0, 0.0), Vec3::new(350.0, 0.0, 0.0));
+    // two spots 300 m apart, clear of rocks, facing each other
+    let clear = |g: &Game, p: Vec3| g.clear_ground(p, 20.0);
+    let mut spots = (Vec3::new(-150.0, 0.0, 0.0), Vec3::new(150.0, 0.0, 0.0));
     for _ in 0..60 {
-        let c = g.rng.unit() * g.rng.range(0.0, 400.0);
-        let d = g.rng.unit().normalize_or(Vec3::X) * 350.0;
+        let c = g.rng.unit().with_y(0.0) * g.rng.range(0.0, 250.0);
+        let d = g.rng.unit().with_y(0.0).normalize_or(Vec3::X) * 150.0;
         if clear(&g, c - d) && clear(&g, c + d) {
             spots = (c - d, c + d);
             break;

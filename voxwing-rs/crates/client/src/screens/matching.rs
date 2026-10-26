@@ -12,6 +12,7 @@ use crate::ui::kit::*;
 use crate::ui::*;
 use crate::{DevOpts, Screen};
 use bevy::prelude::*;
+use bevy::text::LetterSpacing;
 use voxwing_client_core::{ConnState, Phase, Pick};
 use voxwing_shared::balance::balance;
 use voxwing_shared::protocol::Mode;
@@ -82,13 +83,13 @@ fn tier_text(tier: Option<&str>) -> String {
     tier.and_then(|k| balance().tier(k)).map_or("造价不限".into(), |t| format!("{} ≤ {:.0}", t.name, t.budget))
 }
 
-/// Why the current ship can't fly this match, if it can't.
+/// Why the current vehicle can't drive in this match, if it can't.
 fn pick_problem(hangar: &Hangar, p: &Pick) -> Option<String> {
     let a = &hangar.analysis;
     if let Some(e) = a.first_error() {
-        return Some(format!("没有通过起飞检查：{}", e.msg));
+        return Some(format!("没有通过出车检查：{}", e.msg));
     }
-    budget(p).filter(|b| a.stats.cost > b + 1e-3).map(|b| format!("造价 {:.0}，超出本局上限 {b:.0}。换一架。", a.stats.cost))
+    budget(p).filter(|b| a.stats.cost > b + 1e-3).map(|b| format!("造价 {:.0}，超出本局上限 {b:.0}。换一辆。", a.stats.cost))
 }
 
 /// Into flight when the match starts; back to the lobby to queue again.
@@ -186,22 +187,16 @@ fn rebuild_stage(mut commands: Commands, session: Res<Session>, roots: Query<Ent
 
 fn build_pick(commands: &mut Commands, f: &UiFont, p: &Pick) {
     let root = commands.spawn((Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() }, Pickable::IGNORE, IgnoreHover, StageRoot, DespawnOnExit(Screen::Match))).id();
-    let top = commands
-        .spawn((
-            Node { position_type: PositionType::Absolute, left: px(EDGE), right: px(EDGE), top: px(EDGE), height: px(H_MD), column_gap: px(GAP), align_items: AlignItems::Center, ..default() },
-            IgnoreHover,
-            ChildOf(root),
-        ))
-        .id();
-    spawn_title(commands, f, top, "选择战机", "SHIP SELECT");
-    commands.spawn((chip(f, p.mode.label(), ACCENT), ChildOf(top)));
+    let top = spawn_top_bar(commands, root);
+    spawn_title(commands, f, top, "选择战车", "VEHICLE SELECT");
+    commands.spawn((chip(f, p.mode.label(), OLIVE), ChildOf(top)));
     commands.spawn((chip(f, tier_text(p.tier.as_deref()), MUTED), ChildOf(top)));
     commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(top)));
     commands.spawn((text(f, "开战倒计时", 13.0, MUTED), ChildOf(top)));
-    commands.spawn((tech(f, "", 26.0, INK), PickTimer, Node { width: px(48), justify_content: JustifyContent::FlexEnd, ..default() }, TextLayout::justify(Justify::Right), ChildOf(top)));
+    commands.spawn((tech(f, "", 38.0, ACCENT), PickTimer, Node { width: px(56), justify_content: JustifyContent::FlexEnd, ..default() }, TextLayout::justify(Justify::Right), ChildOf(top)));
 
-    let panel_top = EDGE + H_MD + GAP;
-    // left: your ship, flipped through with ‹ ›
+    let panel_top = TOP_BAR + GAP;
+    // left: your vehicle, flipped through with ‹ ›
     let left = spawn_panel(commands, Some(root), Node { position_type: PositionType::Absolute, left: px(EDGE), top: px(panel_top), bottom: px(EDGE), width: px(344), padding: px(PAD).all(), flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() });
     commands.entity(left).insert(SlideIn::new(0.05, -40.0, 0.0));
     commands.spawn((col(GAP), PickMine, ChildOf(left)));
@@ -209,50 +204,39 @@ fn build_pick(commands: &mut Commands, f: &UiFont, p: &Pick) {
     let cb = spawn_btn(commands, f, left, Kind::Primary, "确认出战", UiAction::ConfirmPick, Some("Enter"));
     commands.entity(cb).insert(ConfirmBtn);
 
-    // right: everyone in the match and what they fly
+    // right: everyone in the match and what they drive
     let right = spawn_panel(commands, Some(root), Node { position_type: PositionType::Absolute, right: px(EDGE), top: px(panel_top), bottom: px(EDGE), width: px(400), padding: px(PAD).all(), flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() });
     commands.entity(right).insert(SlideIn::new(0.1, 40.0, 0.0));
     let body = spawn_scroll_body(commands, right);
     commands.entity(body).insert(Roster);
 
-    // what the showcase shows, when it isn't your own ship
-    commands.spawn((
-        text(f, "", 13.0, INK),
-        ViewLabel,
-        Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(EDGE + 8.0), justify_content: JustifyContent::Center, ..default() },
-        TextLayout::justify(Justify::Center),
-        Pickable::IGNORE,
-        ChildOf(root),
-    ));
+    // what the showcase shows, when it isn't your own vehicle: a plate under it, hidden while empty
+    let under = commands
+        .spawn((Node { position_type: PositionType::Absolute, left: px(0), right: px(0), bottom: px(EDGE + 8.0), justify_content: JustifyContent::Center, ..default() }, Pickable::IGNORE, IgnoreHover, ChildOf(root)))
+        .id();
+    commands.spawn((text(f, "", 13.0, INK), ViewLabel, Node { padding: UiRect::axes(px(14), px(8)), ..default() }, BackgroundColor(PANEL_SOLID.with_alpha(0.92)), Visibility::Hidden, Pickable::IGNORE, ChildOf(under)));
 }
 
-/// Your ship's card in the pick: name with ‹ ›, its numbers, and whether it can fly this match.
+/// Your vehicle's card in the pick: name with ‹ ›, its numbers, and whether it can drive in this
+/// match.
 fn build_mine(commands: &mut Commands, f: &UiFont, icons: &Icons, parent: Entity, hangar: &Hangar, p: &Pick) {
     let locked = p.ready[p.you];
     let a = &hangar.analysis;
     let s = &a.stats;
-    let sec = spawn_section(commands, f, parent, "你的战机|YOUR SHIP");
+    let sec = spawn_section(commands, f, parent, "你的战车|YOUR VEHICLE");
     let r = commands.spawn((Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, ..default() }, ChildOf(sec))).id();
     let pick = commands.spawn((row(GAP_S), ChildOf(r))).id();
     if !locked {
         spawn_icon_btn(commands, f, pick, icons.left.clone(), UiAction::ShipPrev);
     }
-    commands.spawn((heading(f, hangar.design.name.clone(), 22.0, INK), ChildOf(pick)));
+    commands.spawn((display(f, hangar.design.name.clone(), 28.0, INK), LetterSpacing::Px(2.0), ChildOf(pick)));
     if !locked {
         spawn_icon_btn(commands, f, pick, icons.right.clone(), UiAction::ShipNext);
         commands.spawn((tech(f, format!("{} / {}", hangar.fleet.current + 1, hangar.fleet.ships.len()), 12.0, MUTED), ChildOf(r)));
     } else {
         commands.spawn((chip(f, "已确认", OK), ChildOf(r)));
     }
-    for (label, frac, val, c) in [
-        ("造价", s.cost / budget(p).unwrap_or(350.0), cost_label(s.cost), INK.with_alpha(0.7)),
-        ("速度", s.max_speed / 125.0, format!("{:.0} m/s", s.max_speed), ACCENT),
-        ("转向", s.pitch_rate / 2.0, format!("{:.0} 度/秒", s.pitch_rate.to_degrees()), ACCENT),
-        ("火力", s.dps / 200.0, format!("{:.0} DPS", s.dps), SIGNAL),
-        ("持续", s.dps_sustained / 200.0, format!("{:.0} DPS", s.dps_sustained), SIGNAL),
-        ("耐久", s.hp / 3500.0, format!("{:.0}", s.hp), OK),
-        ("护盾", s.shield_cap / 200.0, if s.shield_cap > 0.0 { format!("{:.0}", s.shield_cap) } else { "无".into() }, Color::srgb(0.4, 0.62, 1.0)),
-    ] {
+    for (label, frac, val, c) in super::menu::vehicle_stats(s, p.tier.as_deref().unwrap_or("")) {
         let (gauge, v) = spawn_stat(commands, f, sec, label, c);
         commands.entity(gauge).insert(Plate::gauge(c, 24.0, frac.clamp(0.0, 1.0)));
         commands.entity(v).insert(Text::new(val));
@@ -260,12 +244,12 @@ fn build_mine(commands: &mut Commands, f: &UiFont, icons: &Icons, parent: Entity
     let note = match (locked, pick_problem(hangar, p)) {
         (true, _) => ("已锁定。等其他人确认，或倒计时结束后开战。".to_string(), MUTED),
         (false, Some(why)) => (why, WARN),
-        (false, None) => ("其他人能看到你正在选的飞机。← → 换一架，Enter 确认。".to_string(), MUTED),
+        (false, None) => ("其他人能看到你正在选的战车。← → 换一辆，Enter 确认。".to_string(), MUTED),
     };
     commands.spawn((para(f, note.0, 13.0, note.1), ChildOf(parent)));
 }
 
-/// One seat in the roster: team stripe, name, ship and cost, picking or locked in.
+/// One seat in the roster: team stripe, name, vehicle and cost, picking or locked in.
 #[allow(clippy::too_many_arguments)]
 fn spawn_seat(commands: &mut Commands, f: &UiFont, parent: Entity, p: &Pick, k: usize, viewing: bool) {
     let slot = &p.slots[k];
@@ -285,9 +269,9 @@ fn spawn_seat(commands: &mut Commands, f: &UiFont, parent: Entity, p: &Pick, k: 
     let line = match &p.ships[k] {
         Some(d) => {
             let a = voxwing_shared::analysis::analyze(d);
-            // an AI seat is already named after its ship
-            let ship = if slot.bot { String::new() } else { format!("{} · ", d.name) };
-            format!("{ship}造价 {} · {:.0} m/s · {:.0} DPS", cost_label(a.stats.cost), a.stats.max_speed, a.stats.dps)
+            // an AI seat is already named after its vehicle
+            let ride = if slot.bot { String::new() } else { format!("{} · ", d.name) };
+            format!("{ride}造价 {} · {:.0} km/h · {:.0} DPS", cost_label(a.stats.cost), a.stats.max_speed * 3.6, a.stats.dps)
         }
         None => "还没选".into(),
     };
@@ -308,6 +292,7 @@ fn refresh_pick(
     roster: Query<Entity, With<Roster>>,
     confirm: Query<(Entity, &Children), With<ConfirmBtn>>,
     mut texts: ParamSet<(Query<&mut Text, With<PickTimer>>, Query<&mut Text, With<ViewLabel>>, Query<&mut Text, With<BtnText>>)>,
+    mut label_vis: Query<&mut Visibility, With<ViewLabel>>,
     mut last: Local<Option<(bool, PickSig)>>,
 ) {
     let Phase::Picking(p) = &session.core.phase else {
@@ -349,10 +334,10 @@ fn refresh_pick(
                 spawn_seat(&mut commands, f, sec, p, k, view.view == Some(k));
             }
         }
-        commands.spawn((para(f, "点一名对手，中间会换成他选的飞机。", 12.0, MUTED), ChildOf(roster)));
+        commands.spawn((para(f, "点一名对手，中间会换成他选的战车。", 12.0, MUTED), ChildOf(roster)));
     }
     *last = Some((locked, sig));
-    // the confirm button: off once locked in, or while the ship can't fly this match
+    // the confirm button: off once locked in, or while the vehicle can't drive in this match
     if let Ok((cb, kids)) = confirm.single() {
         set_enabled(&mut commands, cb, !locked && pick_problem(&hangar, p).is_none());
         let want = if locked { "等待其他人…" } else { "确认出战" };
@@ -365,13 +350,17 @@ fn refresh_pick(
         }
     }
     let label = match view.view.and_then(|k| Some((&p.slots[k], p.ships[k].as_ref()?))) {
-        Some((s, d)) => format!("正在查看 {} 的「{}」 · 点自己的名字回到你的飞机", s.name, d.name),
+        Some((s, d)) => format!("正在查看 {} 的「{}」 · 点自己的名字回到你的战车", s.name, d.name),
         None => String::new(),
     };
     for mut t in &mut texts.p1() {
         if t.0 != label {
             t.0 = label.clone();
         }
+    }
+    let shown = if label.is_empty() { Visibility::Hidden } else { Visibility::Inherited };
+    for mut v in &mut label_vis {
+        v.set_if_neq(shown);
     }
 }
 

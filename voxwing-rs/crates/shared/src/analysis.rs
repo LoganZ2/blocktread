@@ -5,6 +5,11 @@ use glam::{IVec3, Vec2, Vec3};
 
 pub const MAX_BLOCKS: usize = 380;
 
+/// Least power-to-weight a vehicle needs to get going (and up a slope).
+pub const MIN_POWER: f32 = 0.2;
+/// Below this tip-over angle (degrees) the checks warn that a vehicle rolls too easily.
+pub const TIP_WARN: f32 = 35.0;
+
 // Turning. Each axis turns at a rate set by its control torque over its moment of inertia, so
 // where blocks sit matters: weight far from the centre of mass makes that axis sluggish, wings
 // steer harder the longer their lever arm, gyros push the same wherever they are.
@@ -82,6 +87,14 @@ pub struct Stats {
     pub dps_sustained: f32,
     /// Energy per second the guns use at full fire.
     pub energy_draw: f32,
+    /// Wheel blocks; those in the lowest row are the ones on the ground.
+    pub wheels: Vec<usize>,
+    pub grounded: Vec<usize>,
+    /// The engines' combined power (an engine turns wheels wherever it sits).
+    pub power: f32,
+    /// How far the vehicle leans before it tips over (degrees), side to side or nose to tail,
+    /// whichever comes first (0 when it has fewer than three wheels on the ground).
+    pub tip: f32,
     /// Seconds of full fire before the battery runs dry, if the reactors can't keep up.
     pub fire_endurance: Option<f32>,
 }
@@ -233,8 +246,23 @@ pub fn compute_stats(blocks: &[Block], alive: &[bool]) -> Stats {
         let share = (-off * lift * LIFT_LEVER / s.control.z.max(1.0)).clamp(-MAX_ROLL_DRIFT, MAX_ROLL_DRIFT);
         s.roll_drift = share * s.roll_rate;
     }
-    s.max_speed = if s.thrust > 0.0 { (28.0 + 52.0 * s.twr.sqrt()).min(125.0) } else { 0.0 };
-    s.accel = (18.0 + 30.0 * s.twr).min(90.0);
+    // driving: wheels, power, and how far it leans before it tips
+    s.wheels = (0..blocks.len()).filter(|&i| alive[i] && blocks[i].ty == BlockType::Wheel).collect();
+    let wheel_row = s.wheels.iter().map(|&i| blocks[i].y).min();
+    s.grounded = s.wheels.iter().copied().filter(|&i| Some(blocks[i].y) == wheel_row).collect();
+    s.power = (0..blocks.len()).filter(|&i| alive[i]).map(|i| blocks[i].ty.thrust()).sum();
+    (s.accel, s.max_speed) = crate::drive::performance_of(s.power, s.mass, s.wheels.len());
+    if s.grounded.len() >= 3 {
+        let span = |f: fn(&Block) -> i8| {
+            let v = s.grounded.iter().map(|&i| f(&blocks[i]) as f32);
+            (v.clone().fold(f32::MAX, f32::min), v.fold(f32::MIN, f32::max))
+        };
+        let ((x0, x1), (z0, z1)) = (span(|b| b.x), span(|b| b.z));
+        // the centre of mass over the ground: wheels sit REST_DROP below their blocks
+        let h = (s.com.y - wheel_row.unwrap() as f32 + crate::drive::WHEEL_R + crate::drive::REST_DROP).max(0.1);
+        let reach = (s.com.x - x0).min(x1 - s.com.x).min(s.com.z - z0).min(z1 - s.com.z);
+        s.tip = reach.max(0.0).atan2(h).to_degrees();
+    }
     let bal = balance();
     let (mut energy_cap, mut energy_regen, mut shield_cap, mut shield_regen) = (bal.base_energy_cap, bal.base_energy_regen, 0.0, 0.0);
     for (i, b) in blocks.iter().enumerate() {
@@ -330,12 +358,8 @@ impl Analysis {
     }
 }
 
-fn fmt(n: f32) -> String {
-    if (n - n.round()).abs() < 1e-4 { format!("{}", n.round() as i64) } else { format!("{n:.1}") }
-}
-
 /// Why a block of type `t` may not go into `cell`, given the current blocks. Barrels stick one
-/// cell forward (-z) and engine nozzles one cell back (+z); those cells must stay empty.
+/// cell forward (-z); that cell must stay empty.
 pub fn place_reason(blocks: &[Block], cell: IVec3, t: BlockType) -> Option<String> {
     if !in_grid(cell) {
         return Some("超出搭建范围".into());
@@ -351,16 +375,8 @@ pub fn place_reason(blocks: &[Block], cell: IVec3, t: BlockType) -> Option<Strin
     {
         return Some(format!("这一格是{}的枪管位置，不能放方块", b.ty.info().name));
     }
-    if let Some(a) = ahead
-        && a.ty.thrust() > 0.0
-    {
-        return Some(format!("这一格是{}尾喷口的位置，不能放方块", a.ty.info().name));
-    }
     if t.weapon().is_some() && ahead.is_some() {
         return Some(format!("{}的枪管前方已经有方块，放不下", t.info().name));
-    }
-    if t.thrust() > 0.0 && behind.is_some() {
-        return Some(format!("{}尾喷口后方已经有方块，放不下", t.info().name));
     }
     None
 }
@@ -388,9 +404,9 @@ pub fn analyze(design: &Design) -> Analysis {
     }
 
     if s.cockpits.is_empty() {
-        add(Level::Err, "驾驶舱", "缺少驾驶舱：每架飞机需要且只能有 1 个".into(), vec![]);
+        add(Level::Err, "驾驶室", "缺少驾驶室：每辆车需要且只能有 1 个".into(), vec![]);
     } else if s.cockpits.len() > 1 {
-        add(Level::Err, "驾驶舱", format!("只能有 1 个驾驶舱（现在有 {} 个）", s.cockpits.len()), s.cockpits.clone());
+        add(Level::Err, "驾驶室", format!("只能有 1 个驾驶室（现在有 {} 个）", s.cockpits.len()), s.cockpits.clone());
     } else {
         let c = &blocks[s.cockpits[0]];
         let occ = occupancy(blocks, &alive);
@@ -405,9 +421,9 @@ pub fn analyze(design: &Design) -> Analysis {
             true
         };
         if clear_dir(IVec3::Y) || clear_dir(IVec3::NEG_Z) {
-            add(Level::Ok, "驾驶舱", "视野通畅".into(), vec![]);
+            add(Level::Ok, "驾驶室", "视野通畅".into(), vec![]);
         } else {
-            add(Level::Err, "驾驶舱视野", "顶部和正前方都被挡住了，飞行员看不见路。清空其中一个方向".into(), vec![s.cockpits[0]]);
+            add(Level::Err, "驾驶室视野", "顶部和正前方都被挡住了，车长看不见路。清空其中一个方向".into(), vec![s.cockpits[0]]);
         }
     }
     if s.cockpits.len() == 1 {
@@ -416,76 +432,56 @@ pub fn analyze(design: &Design) -> Analysis {
         if dis.is_empty() {
             add(Level::Ok, "结构连接", format!("{} 个方块全部相连", blocks.len()), vec![]);
         } else {
-            add(Level::Err, "结构连接", format!("{} 个方块没有连到驾驶舱（方块之间要面贴面）", dis.len()), dis);
+            add(Level::Err, "结构连接", format!("{} 个方块没有连到驾驶室（方块之间要面贴面）", dis.len()), dis);
         }
         let occ = occupancy(blocks, &alive);
         let nb = DIRS6.iter().filter(|&&d| occ.has(blocks[root].pos() + d)).count();
         if nb == 1 && blocks.len() > 4 {
-            add(Level::Warn, "结构", "驾驶舱只有 1 个面和机身相连，那块被打掉整架飞机就会散架。多加几个支撑".into(), vec![root]);
+            add(Level::Warn, "结构", "驾驶室只有 1 个面和车身相连，那块被打掉整辆车就会散架。多加几个支撑".into(), vec![root]);
         }
     }
-    if s.count(BlockType::Engine) + s.count(BlockType::Thruster) == 0 {
-        add(Level::Err, "引擎", "缺少引擎：至少需要 1 台".into(), vec![]);
-    } else if s.engines.is_empty() {
-        add(Level::Err, "引擎", "所有引擎的尾喷口都被挡住了，引擎正后方必须空着".into(), s.eng_blocked.clone());
-    } else if s.twr < 0.35 {
-        add(Level::Err, "推力", format!("推力不足：推重比 {:.2}，至少 0.35。加引擎或减重", s.twr), s.engines.clone());
+    // driving
+    if s.power == 0.0 {
+        add(Level::Err, "发动机", "缺少发动机：至少需要 1 台".into(), vec![]);
+    } else if s.power / s.mass.max(1.0) < MIN_POWER {
+        add(Level::Err, "功重比", format!("动力不足：功重比 {:.2}，至少 {MIN_POWER:.2}。加发动机或减重", s.power / s.mass.max(1.0)), vec![]);
     } else {
-        add(Level::Ok, "引擎", format!("{} 台 · 推重比 {:.2}", s.engines.len(), s.twr), vec![]);
+        add(Level::Ok, "功重比", format!("{:.2}（需要 ≥ {MIN_POWER:.2}）", s.power / s.mass.max(1.0)), vec![]);
     }
-    if !s.eng_blocked.is_empty() && !s.engines.is_empty() {
-        add(Level::Warn, "引擎", format!("{} 台引擎尾喷口被挡住，不产生推力", s.eng_blocked.len()), s.eng_blocked.clone());
-    }
-    let drift = s.thrust_drift(1.0);
-    if drift.length() > 2f32.to_radians() {
-        let mut dir = String::new();
-        if drift.y.abs() > 1e-3 {
-            dir.push(if drift.y > 0.0 { '右' } else { '左' });
-        }
-        if drift.x.abs() > 1e-3 {
-            dir.push(if drift.x > 0.0 { '上' } else { '下' });
-        }
-        add(Level::Warn, "推力偏心", format!("引擎的推力中心没对准重心，全速时机头会往{dir}偏 {:.0} 度/秒，加速时更明显。挪动引擎或配重，让推力中心和重心对齐", drift.length().to_degrees()), s.engines.clone());
-    }
-    if s.count(BlockType::Wing) == 0 {
-        add(Level::Err, "机翼", "缺少机翼：至少需要 1 片".into(), vec![]);
-    } else if s.wings.is_empty() {
-        add(Level::Err, "机翼", "所有机翼上下都被包住了，无法产生升力".into(), s.wings_buried.clone());
+    let row = s.grounded.first().map(|&i| blocks[i].y);
+    if s.grounded.len() < 3 {
+        let msg = if s.wheels.is_empty() { "缺少车轮：至少需要 3 个".to_string() } else { format!("着地的车轮只有 {} 个，至少需要 3 个（车轮要在同一层，最低的那层）", s.grounded.len()) };
+        add(Level::Err, "车轮", msg, s.grounded.clone());
     } else {
-        add(Level::Ok, "机翼", format!("左 {} 片 / 右 {} 片", s.left, s.right), vec![]);
+        add(Level::Ok, "车轮", format!("{} 个，都能着地", s.grounded.len()), vec![]);
     }
-    if !s.fins_buried.is_empty() {
-        add(Level::Warn, "尾翼", format!("{} 片尾翼左右都被挡住，不起作用", s.fins_buried.len()), s.fins_buried.clone());
+    let floating: Vec<usize> = s.wheels.iter().copied().filter(|i| !s.grounded.contains(i)).collect();
+    if !floating.is_empty() {
+        add(Level::Warn, "车轮", format!("{} 个车轮比最低的那层高，碰不到地", floating.len()), floating);
     }
-    if !s.wings_buried.is_empty() && !s.wings.is_empty() {
-        add(Level::Warn, "机翼", format!("{} 片机翼上下都被包住，不产生升力", s.wings_buried.len()), s.wings_buried.clone());
-    }
-    if !s.wings.is_empty() {
-        let need = (s.mass / BlockType::Wing.info().lift).ceil() as usize;
-        if s.wings.len() < need {
-            add(Level::Err, "升力", format!("升力不足：质量 {} 至少需要 {} 片有效机翼（现有 {}）", fmt(s.mass), need, s.wings.len()), vec![]);
-        } else {
-            add(Level::Ok, "升力", format!("升力比 {:.2}（需要 ≥ 1.00）", s.lift_ratio), vec![]);
-        }
-        if s.com.z < s.w_min_z as f32 - 3.0 || s.com.z > s.w_max_z as f32 + 3.0 {
-            add(Level::Err, "重心", "重心离机翼太远，机翼要放在重心前后 3 格以内".into(), s.wings.clone());
-        } else {
-            add(Level::Ok, "重心", "重心落在机翼区域内".into(), vec![]);
+    if let Some(row) = row {
+        let low: Vec<usize> = (0..blocks.len()).filter(|&i| blocks[i].y < row).collect();
+        if !low.is_empty() {
+            add(Level::Err, "离地间隙", format!("{} 个方块比车轮还低，会拖在地上。车轮要装在最低的一层", low.len()), low);
         }
     }
-    if s.roll_drift.abs() > 2f32.to_radians() {
-        let (side, key) = if s.roll_drift > 0.0 { ("右", "A") } else { ("左", "D") };
-        add(Level::Warn, "升力偏心", format!("升力中心没对准重心，飞机会一直往{side}侧滚 {:.0} 度/秒，要压着 {key} 修正。两侧的机翼和重物配平一些就好", s.roll_drift.abs().to_degrees()), s.wings.clone());
+    if s.grounded.len() >= 3 {
+        if !s.grounded.iter().any(|&i| (blocks[i].z as f32) < s.com.z - 0.5) {
+            add(Level::Err, "转向", "重心前面没有车轮，转不了向。前面的车轮负责转向".into(), vec![]);
+        }
+        let (xs, zs): (Vec<f32>, Vec<f32>) = s.grounded.iter().map(|&i| (blocks[i].x as f32, blocks[i].z as f32)).unzip();
+        let inside = |v: &[f32], c: f32| c > v.iter().copied().fold(f32::MAX, f32::min) + 0.25 && c < v.iter().copied().fold(f32::MIN, f32::max) - 0.25;
+        if !(inside(&xs, s.com.x) && inside(&zs, s.com.z)) {
+            add(Level::Err, "重心", "重心不在车轮围成的范围里，车会翻。把重物挪到车轮中间".into(), vec![]);
+        } else if s.tip < TIP_WARN {
+            add(Level::Warn, "侧翻角", format!("{:.0}°，太容易翻（最好 ≥ {TIP_WARN:.0}°）。降低重心，或者把车轮装得更开", s.tip), vec![]);
+        } else {
+            add(Level::Ok, "重心", format!("在车轮围成的范围里 · 侧翻角 {:.0}°", s.tip), vec![]);
+        }
     }
     let mut clash = Vec::new();
     for b in blocks.iter() {
-        let probe = if b.ty.weapon().is_some() {
-            Some(b.pos() - IVec3::Z)
-        } else if b.ty.thrust() > 0.0 {
-            Some(b.pos() + IVec3::Z)
-        } else {
-            None
-        };
+        let probe = b.ty.weapon().is_some().then(|| b.pos() - IVec3::Z);
         if let Some(p) = probe
             && let Some(j) = blocks.iter().position(|o| o.pos() == p)
         {
@@ -493,7 +489,7 @@ pub fn analyze(design: &Design) -> Analysis {
         }
     }
     if !clash.is_empty() {
-        add(Level::Err, "重叠", format!("{} 个方块插进了枪管或尾喷口，把它们删掉", clash.len()), clash);
+        add(Level::Err, "重叠", format!("{} 个方块插进了枪管，把它们删掉", clash.len()), clash);
     }
     if !s.wpn_blocked.is_empty() {
         add(Level::Warn, "武器", format!("{} 门武器正前方被挡住，无法开火", s.wpn_blocked.len()), s.wpn_blocked.clone());

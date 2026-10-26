@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use voxwing_shared::analysis::analyze;
 use voxwing_shared::balance::balance;
 use voxwing_shared::blocks::Design;
-use voxwing_shared::presets::{PRESETS, preset};
+use voxwing_shared::presets::{PRESETS, preset, rover};
 use voxwing_shared::protocol::*;
 use voxwing_shared::rng::Rng;
 use voxwing_shared::TICK_RATE;
@@ -130,7 +130,7 @@ impl Hub {
             NetEvent::Connect { pid, name, watch, out } => {
                 let mut name: String = name.trim().chars().filter(|c| !c.is_control()).take(12).collect();
                 if name.is_empty() {
-                    name = format!("飞行员{pid}");
+                    name = format!("车长{pid}");
                 }
                 send(&out, &ServerMsg::Connected { pid });
                 self.conns.insert(pid, Conn { name, out, at: Where::Idle });
@@ -299,8 +299,8 @@ impl Hub {
         }
         let a = analyze(&design);
         let refuse = match (a.first_error(), m.budget()) {
-            (Some(e), _) => Some(format!("这架没有通过起飞检查：{}", e.msg)),
-            (None, Some(b)) if a.stats.cost > b + 1e-3 => Some(format!("这架造价 {:.0}，超出本局上限 {b:.0}", a.stats.cost)),
+            (Some(e), _) => Some(format!("这辆没有通过出车检查：{}", e.msg)),
+            (None, Some(b)) if a.stats.cost > b + 1e-3 => Some(format!("这辆造价 {:.0}，超出本局上限 {b:.0}", a.stats.cost)),
             _ => None,
         };
         if let Some(text) = refuse {
@@ -373,7 +373,7 @@ impl Hub {
         slot.ready = true;
         if let Phase::Play(g) = &mut m.phase {
             g.leave(pid);
-            let design = slot.design.clone().unwrap_or_else(|| preset("falcon"));
+            let design = slot.design.clone().unwrap_or_else(rover);
             g.add_seat(slot.name.clone(), design, Some(slot.team));
             return;
         }
@@ -431,10 +431,8 @@ impl Hub {
         let slots = std::mem::take(&mut m.slots);
         let watchers = m.watchers.clone();
         for s in &slots {
-            // whoever didn't pick in time flies the ship that fits the budget best: a preset
-            let design = s.design.clone().unwrap_or_else(|| {
-                PRESETS.iter().map(|p| preset(p.key)).find(|d| budget.is_none_or(|b| analyze(d).stats.cost <= b + 1e-3)).unwrap_or_else(|| preset("hummingbird"))
-            });
+            // whoever didn't pick in time drives the first preset that fits the budget
+            let design = s.design.clone().unwrap_or_else(|| PRESETS.iter().map(|p| preset(p.key)).find(|d| budget.is_none_or(|b| analyze(d).stats.cost <= b + 1e-3)).unwrap_or_else(rover));
             match s.pid.and_then(|p| self.conns.get(&p).map(|c| (p, c))) {
                 Some((pid, c)) => game.join(pid, s.name.clone(), Some(design), Some(s.team), c.out.clone()),
                 None => game.add_seat(s.name.clone(), design, Some(s.team)),

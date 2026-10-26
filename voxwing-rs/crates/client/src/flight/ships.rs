@@ -2,7 +2,7 @@
 
 use super::fx::{self, Fx, Kind};
 use super::hud::{HitKind, Hud};
-use super::{Session, env};
+use super::{Session, env, ground};
 use crate::Screen;
 use crate::art::{BlockArt, Finish, dmg_level};
 use crate::audio::{Sfx, Sounds, falloff};
@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 use voxwing_client_core::{CoreEvent, CoreShip};
 use voxwing_shared::blocks::{BlockType, WeaponSfx};
+use voxwing_shared::drive::{WHEEL_R, steer_angle, wheel_drop, wheel_ray};
 
 pub struct ShipVis {
     pub root: Entity,
@@ -21,6 +22,10 @@ pub struct ShipVis {
     pub engines: Vec<(Vec3, f32)>,
     bubble: Option<(Entity, Handle<StandardMaterial>)>,
     flash: f32,
+    /// Each wheel block's pivot: it rides the suspension, steers and turns.
+    wheels: Vec<(usize, Entity)>,
+    /// How far the wheels have rolled (rad).
+    roll: f32,
 }
 
 #[derive(Resource, Default)]
@@ -38,15 +43,21 @@ pub struct MissileVis(pub u16);
 fn spawn_vis(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<StandardMaterial>, s: &CoreShip) -> ShipVis {
     let root = commands.spawn((Transform::from_translation(s.pos).with_rotation(s.rot), Visibility::default(), DespawnOnExit(Screen::Flight))).id();
     let n = s.body.design.blocks.len();
-    let engines = s.body.stats.engines.iter().map(|&i| nozzle(s, i)).collect();
-    let mut vis = ShipVis { root, blocks: vec![Vec::new(); n], paint: vec![None; n], levels: vec![3; n], engines, bubble: None, flash: 0.0 };
+    // vehicles' engines don't blow jet flames
+    let mut vis = ShipVis { root, blocks: vec![Vec::new(); n], paint: vec![None; n], levels: vec![3; n], engines: Vec::new(), bubble: None, flash: 0.0, wheels: Vec::new(), roll: 0.0 };
     for i in 0..n {
         if !s.body.alive[i] {
             continue;
         }
         let b = s.body.design.blocks[i];
         let level = dmg_level(s.body.hp_frac(i));
-        let (ents, paint) = art.spawn_block(commands, mats, root, &b, s.body.local(i), level);
+        let (ents, paint) = if b.ty == BlockType::Wheel {
+            let pivot = commands.spawn((Transform::from_translation(s.body.local(i)), Visibility::default(), ChildOf(root))).id();
+            vis.wheels.push((i, pivot));
+            art.spawn_block(commands, mats, pivot, &b, Vec3::ZERO, level)
+        } else {
+            art.spawn_block(commands, mats, root, &b, s.body.local(i), level)
+        };
         vis.blocks[i] = ents;
         vis.paint[i] = paint;
         vis.levels[i] = level;
@@ -88,6 +99,7 @@ pub fn apply_events(
     mut hud: ResMut<Hud>,
     time: Res<Time>,
     cam: Single<&GlobalTransform, With<crate::MainCamera>>,
+    old_ground: Query<Entity, With<ground::Ground>>,
 ) {
     let now = time.elapsed_secs_f64();
     let ear = cam.translation();
@@ -96,6 +108,7 @@ pub fn apply_events(
     for ev in events {
         match ev {
             CoreEvent::Welcome => {
+                ground::spawn_terrain(&mut commands, &mut meshes, &mut mats, &session.core.terrain, old_ground.iter());
                 let rocks = session.core.rocks.clone();
                 env::spawn_rocks(&mut commands, &mut meshes, &mut mats, &rocks);
             }
@@ -192,7 +205,7 @@ pub fn apply_events(
                     let c = cubes.iter().map(|c| c.0).sum::<Vec3>() / cubes.len().max(1) as f32;
                     fx::wreck(&mut commands, &mut fx, &mut art, &mut mats, cubes, s.rot, s.vel, c - s.pos);
                     if Some(ship) == me {
-                        hud.feed("结构断裂：一部分机体脱落了", true);
+                        hud.feed("结构断裂：一部分车体脱落了", true);
                     }
                 }
                 // engines may have been lost: keep exhausting only from the survivors
@@ -276,6 +289,21 @@ pub fn sync_ships(
         if let Ok(mut t) = tf.get_mut(v.root) {
             t.translation = s.pos;
             t.rotation = s.rot;
+        }
+        // wheels: hang each where its spring puts it, turn the front ones (only your own vehicle's
+        // steering is known) and roll them all with the speed
+        let fwd_speed = s.vel.dot(s.rot * Vec3::NEG_Z);
+        v.roll += fwd_speed * dt / WHEEL_R;
+        let steer = if Some(*id) == me { core.pred.as_ref().and_then(|p| p.last_cmd()).map_or(0.0, |c| steer_angle(c.steer_f(), fwd_speed)) } else { 0.0 };
+        let up = s.rot * Vec3::Y;
+        for &(i, pivot) in &v.wheels {
+            let local = s.body.local(i);
+            let dist = wheel_ray(&core.terrain, s.pos + s.rot * local, up).map(|(d, _)| d);
+            if let Ok(mut t) = tf.get_mut(pivot) {
+                t.translation = local - Vec3::Y * wheel_drop(dist);
+                let turn = if local.z < -0.5 { Quat::from_rotation_y(-steer) } else { Quat::IDENTITY };
+                t.rotation = turn * Quat::from_rotation_x(-v.roll);
+            }
         }
         if let Some((_, m)) = &v.bubble {
             v.flash *= (-dt * 4.0).exp();

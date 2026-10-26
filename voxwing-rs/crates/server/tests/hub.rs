@@ -65,7 +65,7 @@ fn two_players_get_a_2v2_filled_with_ai_and_play_once_both_lock_in() {
     }
 
     // a's pick shows up for b, and the match waits for both to lock in
-    msg(&mut h, 1, ClientMsg::Pick { design: preset("falcon") });
+    msg(&mut h, 1, ClientMsg::Pick { design: preset("bison") });
     msg(&mut h, 1, ClientMsg::Ready);
     ticks(&mut h, 1);
     let seen = drain(&mut b);
@@ -108,7 +108,7 @@ fn a_player_who_leaves_during_the_pick_is_replaced_by_ai() {
     let m = drain(&mut a);
     assert!(m.iter().any(|m| matches!(m, ServerMsg::SlotPick { slot, design: Some(_), ready: true } if *slot as usize == k)), "{m:?}");
     // with everyone else set, a's lock-in starts the match
-    msg(&mut h, 1, ClientMsg::Pick { design: preset("falcon") });
+    msg(&mut h, 1, ClientMsg::Pick { design: preset("bison") });
     msg(&mut h, 1, ClientMsg::Ready);
     ticks(&mut h, 2);
     assert!(drain(&mut a).iter().any(|m| matches!(m, ServerMsg::Welcome { .. })));
@@ -120,7 +120,7 @@ fn the_match_ends_on_time_with_results_and_everyone_can_queue_again() {
     let mut a = connect(&mut h, 1, "甲");
     msg(&mut h, 1, ClientMsg::Queue { mode: Mode::Ffa, tier: None });
     ticks(&mut h, 15);
-    msg(&mut h, 1, ClientMsg::Pick { design: preset("falcon") });
+    msg(&mut h, 1, ClientMsg::Pick { design: preset("bison") });
     msg(&mut h, 1, ClientMsg::Ready);
     ticks(&mut h, 2);
     assert!(drain(&mut a).iter().any(|m| matches!(m, ServerMsg::Welcome { .. })));
@@ -137,4 +137,18 @@ fn the_match_ends_on_time_with_results_and_everyone_can_queue_again() {
     msg(&mut h, 1, ClientMsg::Queue { mode: Mode::Teams, tier: None });
     ticks(&mut h, 15);
     assert!(found(&drain(&mut a)).is_some_and(|(_, s)| s.len() == 4));
+}
+
+#[test]
+fn a_vehicle_that_cant_drive_is_refused() {
+    let mut h = hub(0.0, 60.0);
+    let mut a = connect(&mut h, 1, "甲");
+    msg(&mut h, 1, ClientMsg::Queue { mode: Mode::Ffa, tier: None });
+    ticks(&mut h, 15);
+    found(&drain(&mut a)).unwrap();
+    // just a cab: no wheels, no engine
+    msg(&mut h, 1, ClientMsg::Pick { design: preset("blank") });
+    let m = drain(&mut a);
+    assert!(m.iter().any(|m| matches!(m, ServerMsg::Notice { text } if text.contains("出车检查"))), "told why: {m:?}");
+    assert!(!m.iter().any(|m| matches!(m, ServerMsg::SlotPick { slot: 0, .. })));
 }

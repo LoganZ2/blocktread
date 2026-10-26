@@ -1,6 +1,7 @@
-//! Screen flow: lobby (main screen, matchmaking) → ship pick → flight → results → lobby, with the
-//! hangar and settings reachable from the lobby. This module holds what several screens share: the 3D ship showcase,
-//! navigation and design-picking actions, the settings overlay and the FPS readout.
+//! Screen flow: entry → lobby (main screen, matchmaking) → vehicle pick → battle → results →
+//! lobby, with the garage and settings reachable from the lobby. This module holds what several
+//! screens share: the stage vehicles park on and the showcase, navigation and design-picking
+//! actions, the settings overlay and the FPS readout.
 
 pub mod carousel;
 pub mod entry;
@@ -10,7 +11,7 @@ pub mod menu;
 use crate::art::BlockArt;
 use crate::audio::Sounds;
 use crate::display::{DISPLAY_MODES, DisplayRevert, Monitors, fps_caps, fullscreen_sizes, window_sizes};
-use crate::flight::env::{self, EnvAssets, SkyImage};
+use crate::flight::ground::{self, DaySky, Stage};
 use crate::hangar::Hangar;
 use crate::settings::{self, Settings};
 use crate::ui::icons::Icons;
@@ -18,7 +19,6 @@ use crate::ui::kit::*;
 use crate::ui::*;
 use crate::{MainCamera, Screen};
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
-use bevy::light::Skybox;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use voxwing_shared::analysis::analyze;
@@ -32,13 +32,15 @@ impl Plugin for ScreensPlugin {
         app.add_plugins((entry::EntryPlugin, menu::MenuPlugin, carousel::CarouselPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
             .init_resource::<Overlays>()
             .init_resource::<Showcase>()
-            // the lobby's ships are the carousel's
-            .add_systems(OnEnter(Screen::Menu), |mut c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| spawn_stage(&mut c, &a, &s, cam, Screen::Menu))
-            .add_systems(OnEnter(Screen::Entry), |mut c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| spawn_stage(&mut c, &a, &s, cam, Screen::Entry))
-            .add_systems(OnEnter(Screen::Match), |c: Commands, a: Res<EnvAssets>, s: Res<SkyImage>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
+            // the lobby's vehicles are the carousel's
+            .add_systems(OnEnter(Screen::Menu), |mut c: Commands, a: Res<Stage>, s: Res<DaySky>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| spawn_stage(&mut c, &a, &s, cam, Screen::Menu))
+            .add_systems(OnEnter(Screen::Entry), |c: Commands, a: Res<Stage>, s: Res<DaySky>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
+                spawn_showcase(c, a, s, art, m, h, cam, Screen::Entry)
+            })
+            .add_systems(OnEnter(Screen::Match), |c: Commands, a: Res<Stage>, s: Res<DaySky>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
                 spawn_showcase(c, a, s, art, m, h, cam, Screen::Match)
             })
-            .add_systems(Update, showcase_turn.run_if(in_state(Screen::Match)))
+            .add_systems(Update, showcase_camera.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Match | Screen::Entry)))
             .add_systems(Update, (global_actions, refresh_showcase, render_settings, display_banner, apply_settings, fps_text));
     }
 }
@@ -58,45 +60,64 @@ impl Overlays {
 
 // ---------------------------------------------------------------- showcase
 
+/// The vehicle on show, with its bounding radius.
 #[derive(Component)]
 struct ShowcaseShip(f32);
 
-/// A ship to show instead of the hangar's current one (another player's pick).
+/// Which way parked vehicles face: three quarters towards the camera.
+pub const PARKED: f32 = -0.65;
+
+/// A design to show instead of the garage's current one (another player's pick).
 #[derive(Resource, Default)]
 pub struct Showcase(pub Option<Design>);
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_showcase(
     mut commands: Commands,
-    env_assets: Res<EnvAssets>,
-    sky: Res<SkyImage>,
+    stage: Res<Stage>,
+    sky: Res<DaySky>,
     mut art: ResMut<BlockArt>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     hangar: Res<Hangar>,
     cam: Single<(Entity, &mut Projection), With<MainCamera>>,
     screen: Screen,
 ) {
-    spawn_stage(&mut commands, &env_assets, &sky, cam, screen.clone());
+    spawn_stage(&mut commands, &stage, &sky, cam, screen.clone());
     spawn_showcase_ship(&mut commands, &mut art, &mut mats, &hangar.design, screen);
 }
 
-/// The backdrop ships are shown against: sky, asteroids, the camera's lens.
-fn spawn_stage(commands: &mut Commands, env_assets: &EnvAssets, sky: &SkyImage, cam: Single<(Entity, &mut Projection), With<MainCamera>>, screen: Screen) {
+/// The world vehicles are shown in: daylight on the stage's level patch, the camera's lens.
+fn spawn_stage(commands: &mut Commands, stage: &Stage, sky: &DaySky, cam: Single<(Entity, &mut Projection), With<MainCamera>>, screen: Screen) {
     let (ce, mut proj) = cam.into_inner();
-    commands.entity(ce).insert(Skybox { image: Some(sky.0.clone()), brightness: 1200.0, ..default() });
     if let Projection::Perspective(p) = &mut *proj {
         p.fov = 38f32.to_radians();
     }
-    env::spawn_env(commands, env_assets, screen, Vec3::ZERO);
+    ground::spawn_stage(commands, stage, sky, ce, screen, 0.0);
 }
 
+/// A design parked at the origin, on its wheels.
 fn spawn_showcase_ship(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<StandardMaterial>, design: &Design, screen: Screen) {
     let a = analyze(design);
     let com = a.stats.com;
-    let root = commands.spawn((Transform::default(), Visibility::default(), ShowcaseShip(a.stats.radius), DespawnOnExit(screen))).id();
+    let at = Transform::from_xyz(0.0, ground::park_height(design, com), 0.0).with_rotation(Quat::from_rotation_y(PARKED));
+    let root = commands.spawn((at, Visibility::default(), ShowcaseShip(a.stats.radius), DespawnOnExit(screen))).id();
     for b in &design.blocks {
         art.spawn_block(commands, mats, root, b, b.pos().as_vec3() - com, 3);
     }
+}
+
+/// Where the camera stands to look at a parked vehicle of bounding radius `r`, `t` seconds in: a
+/// little above it, three quarters on, drifting slowly to and fro. `shift` moves the vehicle in
+/// the picture, as a share of the distance: x positive to the right of centre, y positive up.
+pub fn parked_view(r: f32, t: f32, shift: Vec2) -> Transform {
+    let dist = r * 3.2 + 9.0;
+    let aim = Vec3::new(0.0, r * 0.2, 0.0);
+    let az = 0.35 * (t * 0.07).sin();
+    // low, so the ridges behind show over the vehicle
+    let eye = aim + Quat::from_rotation_y(az) * Vec3::new(0.0, dist * 0.2, dist);
+    let view = Transform::from_translation(eye).looking_at(aim, Vec3::Y);
+    // slide the camera across its own view: the vehicle moves the other way on screen
+    view.with_translation(eye - view.right() * dist * shift.x - view.up() * dist * shift.y)
 }
 
 /// Flipping through ships (or looking at another player's pick) swaps the one on display.
@@ -119,15 +140,11 @@ fn refresh_showcase(
     spawn_showcase_ship(&mut commands, &mut art, &mut mats, over.0.as_ref().unwrap_or(&hangar.design), state.get().clone());
 }
 
-fn showcase_turn(time: Res<Time>, mut ship: Query<(&mut Transform, &ShowcaseShip), Without<MainCamera>>, mut cam: Single<&mut Transform, With<MainCamera>>) {
-    let t = time.elapsed_secs();
-    let Ok((mut st, s)) = ship.single_mut() else { return };
-    st.rotation = Quat::from_rotation_y(t * 0.22 + 2.4) * Quat::from_rotation_x(0.08 * (t * 0.5).sin());
-    st.translation = Vec3::Y * (t * 0.8).sin() * 0.25;
-    let dist = s.0 * 3.6 + 18.0;
-    let target = Vec3::new(s.0 * 0.15, 0.6, 0.0);
-    let sway = Vec3::new((t * 0.1).sin() * 2.0, 0.0, 0.0);
-    **cam = Transform::from_translation(target + Vec3::new(0.0, dist * 0.22, dist) + sway).looking_at(target, Vec3::Y);
+/// The camera on the parked vehicle: on the entry page it sits right of the page's column.
+fn showcase_camera(time: Res<Time>, state: Res<State<Screen>>, ship: Query<&ShowcaseShip>, mut cam: Single<&mut Transform, With<MainCamera>>) {
+    let Ok(s) = ship.single() else { return };
+    let shift = if *state.get() == Screen::Entry { Vec2::new(0.3, 0.0) } else { Vec2::ZERO };
+    **cam = parked_view(s.0, time.elapsed_secs(), shift);
 }
 
 // ---------------------------------------------------------------- shared actions
@@ -191,7 +208,7 @@ fn global_actions(
             }
             UiAction::DeleteShip => {
                 let n = hangar.design.name.clone();
-                modal.show(format!("删除「{n}」？"), "这架机体会从机库里移除，无法撤销。", vec![("取消", UiAction::CloseModal, Kind::Normal), ("删除", UiAction::DeleteShipConfirmed, Kind::Danger)], None);
+                modal.show(format!("删除「{n}」？"), "这辆战车会从车库里移除，无法撤销。", vec![("取消", UiAction::CloseModal, Kind::Normal), ("删除", UiAction::DeleteShipConfirmed, Kind::Danger)], None);
             }
             UiAction::DeleteShipConfirmed => {
                 modal.0 = None;
@@ -290,8 +307,8 @@ fn render_settings(
     spawn_slider(&mut commands, f, audio, "背景音乐", settings.music, 0.0, 1.0, SetKey::Music, pct);
     let controls = spawn_section(&mut commands, f, body, "操控|CONTROLS");
     spawn_slider(&mut commands, f, controls, "鼠标灵敏度", settings.sensitivity, 0.5, 2.0, SetKey::Sensitivity, mult);
-    spawn_toggle(&mut commands, f, controls, "鼠标 Y 轴反转（推鼠标往上 = 机头向下）", settings.invert_y, SetKey::InvertY);
-    spawn_toggle(&mut commands, f, controls, "出击时显示操作说明", settings.show_help, SetKey::ShowHelp);
+    spawn_toggle(&mut commands, f, controls, "鼠标 Y 轴反转（推鼠标往上 = 镜头向下）", settings.invert_y, SetKey::InvertY);
+    spawn_toggle(&mut commands, f, controls, "开战时显示操作说明", settings.show_help, SetKey::ShowHelp);
 
     let display = spawn_section(&mut commands, f, body, "画面|DISPLAY");
     let monitor = monitors.current();
@@ -333,7 +350,7 @@ fn render_settings(
     let bar = commands
         .spawn((
             Node { display: Display::None, padding: UiRect::axes(px(14), px(10)), column_gap: px(GAP_S), align_items: AlignItems::Center, ..default() },
-            Plate { fill: tone(WARN, 0.14), edge: WARN.with_alpha(0.5), chamfer: 8.0, corners: BR, ..default() },
+            Plate { fill: tone(WARN, 0.14), edge: WARN.with_alpha(0.5), ..default() },
             DisplayBanner,
             ChildOf(p),
         ))

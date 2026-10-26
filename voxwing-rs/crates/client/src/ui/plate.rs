@@ -10,18 +10,14 @@ use bevy::shader::ShaderRef;
 use bevy::ui::{ComputedNode, UiSystems};
 use bevy::ui_render::prelude::{MaterialNode, UiMaterial, UiMaterialPlugin};
 
-/// Corner bits for [`Plate::corners`].
-pub const TL: u8 = 1;
-pub const TR: u8 = 2;
-pub const BR: u8 = 4;
-pub const BL: u8 = 8;
-
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
 pub struct Plate {
     pub fill: Color,
     pub edge: Color,
     /// Accent strip and lit gauge cells.
     pub mark: Color,
+    /// Cut corners, `chamfer` px: bits 1 top left, 2 top right, 4 bottom right, 8 bottom left.
+    /// (The field-kit look keeps plates square; the shader still cuts them when asked.)
     pub chamfer: f32,
     pub edge_w: f32,
     /// Length of the accent strip on the top edge (0 = none).
@@ -33,11 +29,14 @@ pub struct Plate {
     pub frac: f32,
     /// Film-grain strength on the fill (0 = none).
     pub grain: f32,
+    /// Width of a hazard-striped band at the left edge (0 = none), striped in `stripe` over the fill.
+    pub stripes: f32,
+    pub stripe: Color,
 }
 
 impl Default for Plate {
     fn default() -> Self {
-        Plate { fill: Color::NONE, edge: Color::NONE, mark: Color::NONE, chamfer: 0.0, edge_w: 1.0, accent: 0.0, corners: 0, segments: 0.0, frac: 0.0, grain: 0.0 }
+        Plate { fill: Color::NONE, edge: Color::NONE, mark: Color::NONE, chamfer: 0.0, edge_w: 1.0, accent: 0.0, corners: 0, segments: 0.0, frac: 0.0, grain: 0.0, stripes: 0.0, stripe: Color::NONE }
     }
 }
 
@@ -57,6 +56,8 @@ impl Plate {
             mark: v(self.mark),
             shape: Vec4::new(self.chamfer, self.edge_w, self.accent, self.grain),
             extra: Vec4::new(self.corners as f32, self.segments, self.frac, scale),
+            stripe: v(self.stripe),
+            more: Vec4::new(self.stripes, 0.0, 0.0, 0.0),
         }
     }
 }
@@ -68,6 +69,8 @@ struct PlateUniform {
     mark: Vec4,
     shape: Vec4,
     extra: Vec4,
+    stripe: Vec4,
+    more: Vec4,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]

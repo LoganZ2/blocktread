@@ -1,12 +1,15 @@
 use crate::TICK_RATE;
 use crate::rng::Rng;
+use crate::terrain::{self, Terrain};
 use glam::{EulerRot, Quat, Vec3};
 
-pub const PLAYER_SPAWN: Vec3 = Vec3::new(0.0, 0.0, 600.0);
+/// Where co-op players enter (the ground under it decides the height).
+pub const PLAYER_SPAWN: Vec3 = Vec3::new(0.0, 0.0, 300.0);
 
-/// Asteroid. Both sides generate the same field from the seed the server announces. Its shape is
-/// the rendered mesh itself (`rock_radius` stretched by `scale`, times `size`) and it turns with
-/// server time (`rotation`), so collisions happen exactly where the rock is drawn.
+/// A rock. Both sides generate the same field from the seed the server announces. Its shape is
+/// the rendered mesh itself (`rock_radius` stretched by `scale`, times `size`), so collisions
+/// happen exactly where the rock is drawn. (Rocks still carry a spin from the space version;
+/// boulders on the ground keep it at zero.)
 #[derive(Clone, Debug)]
 pub struct Asteroid {
     pub pos: Vec3,
@@ -20,28 +23,22 @@ pub struct Asteroid {
     pub tint: u8,
 }
 
-pub fn generate_asteroids(seed: u64) -> Vec<Asteroid> {
+/// Boulders sunk into the ground: a few big ones to hide behind, the rest scattered cover.
+pub fn generate_boulders(seed: u64, ground: &Terrain) -> Vec<Asteroid> {
     let mut rng = Rng::new(seed);
     let mut out = Vec::new();
-    for i in 0..46 {
+    for i in 0..44 {
+        let size = if i < 6 { rng.range(7.0, 12.0) } else { rng.range(1.6, 4.5) };
         let pos = loop {
-            let mut p = rng.unit() * rng.f32().cbrt() * 1250.0;
-            p.y *= 0.55;
-            if p.distance(PLAYER_SPAWN) >= 170.0 && p.length() > 60.0 {
-                break p;
+            let lim = terrain::HALF * 0.82;
+            let (x, z) = (rng.range(-lim, lim), rng.range(-lim, lim));
+            let p = Vec3::new(x, 0.0, z);
+            if p.distance(PLAYER_SPAWN) >= 40.0 && out.iter().all(|a: &Asteroid| a.pos.with_y(0.0).distance(p) > a.r + size * 1.5) {
+                break p.with_y(ground.height(x, z) - size * 0.25);
             }
         };
-        let size = if i < 5 { rng.range(60.0, 95.0) } else { rng.range(8.0, 40.0) };
-        let scale = Vec3::new(rng.range(0.75, 1.25), rng.range(0.65, 1.05), rng.range(0.75, 1.25));
-        out.push(Asteroid {
-            pos,
-            r: size * scale.max_element() * ROCK_RADIUS_MAX,
-            size,
-            scale,
-            shape_seed: i as f32 * 7.31,
-            spin: rng.unit() * rng.range(0.02, 0.12),
-            tint: (i % 3) as u8,
-        });
+        let scale = Vec3::new(rng.range(0.85, 1.35), rng.range(0.55, 0.9), rng.range(0.85, 1.35));
+        out.push(Asteroid { pos, r: size * scale.max_element() * ROCK_RADIUS_MAX, size, scale, shape_seed: i as f32 * 7.31, spin: Vec3::ZERO, tint: (i % 3) as u8 });
     }
     out
 }

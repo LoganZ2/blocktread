@@ -138,10 +138,23 @@ pub fn update_vignettes(hud: Res<Hud>, mut q: Query<(&El, &mut BackgroundGradien
     }
 }
 
+/// The HUD's top node.
+#[derive(Component)]
+pub struct HudRoot;
+
+/// Dev: `--force nohud` hides the whole HUD, for clean screenshots of the scene.
+pub fn dev_hide_hud(dev: Res<crate::DevOpts>, time: Res<Time>, mut q: Query<&mut Visibility, With<HudRoot>>) {
+    if dev.forced("nohud", time.elapsed_secs()) {
+        for mut v in &mut q {
+            *v = Visibility::Hidden;
+        }
+    }
+}
+
 pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>, settings: Res<Settings>) {
     *hud = Hud { silo_dirty: true, help_t: 12.0, show_help: settings.show_help, ..default() };
     let f = &*font;
-    let root = commands.spawn((Node { width: percent(100), height: percent(100), position_type: PositionType::Absolute, ..default() }, Pickable::IGNORE, IgnoreHover, DespawnOnExit(Screen::Flight))).id();
+    let root = commands.spawn((Node { width: percent(100), height: percent(100), position_type: PositionType::Absolute, ..default() }, Pickable::IGNORE, IgnoreHover, HudRoot, DespawnOnExit(Screen::Flight))).id();
     for (el, c) in [(El::VigRed, DANGER), (El::VigBlue, ACCENT)] {
         commands.spawn((Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() }, vignette(c, 0.0), Pickable::IGNORE, el, ChildOf(root)));
     }
@@ -180,7 +193,7 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
     commands.entity(bl).insert((Pickable::IGNORE, El::Gauges));
     commands.spawn((Node { width: px(140), height: px(140), ..default() }, BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.25)), El::Silo, Pickable::IGNORE, ChildOf(bl)));
     let bars = commands.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(9), width: px(210), ..default() }, Pickable::IGNORE, ChildOf(bl))).id();
-    for (i, (label, c)) in [("船体", OK), ("护盾", SHIELD), ("能量", WARN)].into_iter().enumerate() {
+    for (i, (label, c)) in [("车体", OK), ("护盾", SHIELD), ("能量", WARN)].into_iter().enumerate() {
         let r = commands.spawn((col(3.0), Pickable::IGNORE, ChildOf(bars))).id();
         let head = commands.spawn((Node { justify_content: JustifyContent::SpaceBetween, ..default() }, Pickable::IGNORE, ChildOf(r))).id();
         commands.spawn((text(f, label, 12.0, MUTED), Pickable::IGNORE, ChildOf(head)));
@@ -192,7 +205,7 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
     let br = spawn_panel(&mut commands, Some(root), Node { position_type: PositionType::Absolute, right: px(EDGE), bottom: px(EDGE), padding: px(16).all(), column_gap: px(16), align_items: AlignItems::FlexEnd, ..default() });
     commands.entity(br).insert((Pickable::IGNORE, El::Gauges));
     let c = commands.spawn((Node { flex_direction: FlexDirection::Column, align_items: AlignItems::FlexEnd, row_gap: px(6), min_width: px(150), ..default() }, Pickable::IGNORE, ChildOf(br))).id();
-    commands.spawn((tech(f, "SPD  m/s", 11.0, MUTED), LetterSpacing::Px(3.0), Pickable::IGNORE, ChildOf(c)));
+    commands.spawn((tech(f, "SPD  km/h", 12.0, MUTED), LetterSpacing::Px(3.0), Pickable::IGNORE, ChildOf(c)));
     commands.spawn((tech(f, "0", 48.0, ACCENT), El::Speed, Pickable::IGNORE, ChildOf(c)));
     commands.spawn((text(f, "", 12.0, MUTED), El::Weapons, TextLayout::justify(Justify::Right), Pickable::IGNORE, ChildOf(c)));
     let thr = commands.spawn((Node { width: px(10), height: px(118), border: px(1).all(), flex_direction: FlexDirection::Column, justify_content: JustifyContent::FlexEnd, ..default() }, BorderColor::all(LINE_HI), Pickable::IGNORE, ChildOf(br))).id();
@@ -287,19 +300,20 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
     commands.spawn((chip(f, "观战", ACCENT), Pickable::IGNORE, ChildOf(line)));
     commands.spawn((heading(f, "", 20.0, INK), El::WatchName, Pickable::IGNORE, ChildOf(line)));
     commands.spawn((tech(f, "", 14.0, SIGNAL), El::WatchStat, Pickable::IGNORE, ChildOf(watch)));
-    commands.spawn((text(f, "← → 换一架 · C 座舱视角 · Tab 记分板 · Esc 菜单", 12.0, MUTED), Pickable::IGNORE, ChildOf(watch)));
+    commands.spawn((text(f, "← → 换一辆 · C 驾驶室视角 · Tab 记分板 · Esc 菜单", 12.0, MUTED), Pickable::IGNORE, ChildOf(watch)));
 
     // controls help
     let help = spawn_panel(&mut commands, Some(root), Node { position_type: PositionType::Absolute, left: percent(50), top: px(EDGE), margin: UiRect::left(px(-250)), width: px(500), padding: px(16).all(), flex_direction: FlexDirection::Column, row_gap: px(4), ..default() });
     commands.entity(help).insert((El::Help, Pickable::IGNORE, solid_plate()));
     spawn_header(&mut commands, f, help, "操作|CONTROLS · H 隐藏");
     for (k, v) in [
-        ("鼠标", "转向：光标离屏幕中心越远，转得越快"),
-        ("W / S", "加大 / 减小油门"),
-        ("A / D", "左右翻滚"),
+        ("W / S", "前进 / 倒车（反着按就是刹车）"),
+        ("A / D", "左右转向"),
+        ("鼠标", "转动镜头"),
         ("Shift", "加速（消耗能量）"),
-        ("左键 / 空格", "开火"),
-        ("右键 / F", "发射导弹（准星对准目标一会儿即可锁定）"),
+        ("左键 / 空格", "开火（炮口朝车头方向）"),
+        ("右键 / F", "发射导弹（车头对准目标一会儿即可锁定）"),
+        ("R（按住）", "翻车后把车翻回来"),
         ("T · C · Tab", "切换目标 · 切换视角 · 记分板"),
         ("Esc", "暂停菜单"),
     ] {
@@ -436,8 +450,8 @@ pub fn update_hud(
             El::WatchName => {
                 let name = match (view, session.wreck) {
                     (Some(v), _) => v.name.clone(),
-                    (None, Some(_)) => "被击落".into(),
-                    (None, None) => "等待飞机出场".into(),
+                    (None, Some(_)) => "被击毁".into(),
+                    (None, None) => "等待战车出场".into(),
                 };
                 set_text(kids, ent, name, None);
             }
@@ -447,17 +461,17 @@ pub fn update_hud(
                         let hull = v.body.hp_total() / v.body.max_hp * 100.0;
                         let who = if v.owner.is_some() { "玩家" } else { "AI" };
                         match core.scores.iter().find(|r| r.name == v.name) {
-                            Some(r) => format!("{who} · 击毁 {} · 阵亡 {} · 船体 {hull:.0}%", r.kills, r.deaths),
-                            None => format!("{who} · 船体 {hull:.0}%"),
+                            Some(r) => format!("{who} · 击毁 {} · 阵亡 {} · 车体 {hull:.0}%", r.kills, r.deaths),
+                            None => format!("{who} · 车体 {hull:.0}%"),
                         }
                     }
-                    (None, Some(_)) => "镜头马上切到击落它的飞机".into(),
-                    (None, None) => "房间里还没有飞机。AI 数量为 0 的服务器只能看玩家".into(),
+                    (None, Some(_)) => "镜头马上切到击毁它的战车".into(),
+                    (None, None) => "场上还没有战车。AI 数量为 0 的服务器只能看玩家".into(),
                 };
                 set_text(kids, ent, line, None);
             }
             El::Info => {
-                let left = if core.mode == Some(Mode::Coop) { format!("剩余敌机 {} · ", core.enemies) } else { format!("在线 {} 人 · ", core.scores.iter().filter(|r| !r.is_bot()).count()) };
+                let left = if core.mode == Some(Mode::Coop) { format!("剩余敌车 {} · ", core.enemies) } else { format!("在线 {} 人 · ", core.scores.iter().filter(|r| !r.is_bot()).count()) };
                 set_text(kids, ent, format!("{left}延迟 {:.0} ms", core.rtt() * 1000.0), None);
             }
             El::Feed(i) => {
@@ -508,7 +522,7 @@ pub fn update_hud(
                     set_text(kids, ent, label, None);
                 }
             }
-            El::Speed => set_text(kids, ent, format!("{:.0}", view.map_or(0.0, |m| m.vel.length())), None),
+            El::Speed => set_text(kids, ent, format!("{:.0}", view.map_or(0.0, |m| m.vel.length() * 3.6)), None),
             El::Throttle => {
                 let throttle = if me.is_some() { session.throttle } else { view.map_or(0.0, |v| v.throttle) };
                 node.height = percent(throttle * 100.0);
@@ -538,25 +552,16 @@ pub fn update_hud(
                     if core.missiles.values().any(|ms| core.missile_pos(ms).distance(m.pos) < 300.0 && ms.vel.dot(m.pos - core.missile_pos(ms)) > 0.0) {
                         warns.push(("导弹接近".into(), true));
                     }
-                    if m.pos.length() > voxwing_shared::ARENA_R * 0.92 {
-                        warns.push(("即将离开战区，请掉头".into(), true));
+                    if m.pos.x.abs().max(m.pos.z.abs()) > voxwing_shared::ARENA_R * 0.9 {
+                        warns.push(("到战区边缘了，请掉头".into(), true));
                     }
-                    if st.thrust == 0.0 {
-                        warns.push(("引擎全部损毁".into(), true));
+                    if m.rot.mul_vec3(Vec3::Y).y < 0.3 {
+                        warns.push(("翻车了 · 按住 R 翻回来".into(), true));
+                    }
+                    if m.body.power == 0.0 {
+                        warns.push(("发动机全部损毁".into(), true));
                     } else if st.engines.len() < m.body.engines0 {
-                        warns.push((format!("引擎受损 {}/{}", st.engines.len(), m.body.engines0), false));
-                    }
-                    if st.lift_ratio < 1.0 {
-                        warns.push(("机翼受损 · 转向变慢".into(), false));
-                    }
-                    let drift = st.thrust_drift(1.0);
-                    if drift.length() > 2f32.to_radians() {
-                        let side = if drift.y.abs() >= drift.x.abs() { if drift.y > 0.0 { "右" } else { "左" } } else if drift.x > 0.0 { "上" } else { "下" };
-                        warns.push((format!("推力偏心 · 全速时机头向{side}偏"), false));
-                    }
-                    if st.roll_drift.abs() > 0.15 {
-                        let (side, key) = if st.roll_drift > 0.0 { ("右", "A") } else { ("左", "D") };
-                        warns.push((format!("升力失衡 · 飞机向{side}侧滚，按 {key} 修正"), false));
+                        warns.push((format!("发动机受损 {}/{}", st.engines.len(), m.body.engines0), false));
                     }
                 }
                 let item = warns.get(i);
@@ -640,10 +645,11 @@ pub fn update_hud(
                 }
             }
             El::Stick => match window.cursor_position() {
+                // the mouse turns the camera now; the stick marker stays hidden
                 Some(c) => {
                     node.left = px(c.x - 6.0);
                     node.top = px(c.y - 6.0);
-                    show(&mut vis, me.is_some() && !session.paused);
+                    show(&mut vis, false);
                 }
                 None => show(&mut vis, false),
             },
@@ -835,7 +841,7 @@ pub fn flight_overlays(mut commands: Commands, session: Res<Session>, keys: Res<
         Shown::Paused => {
             let (o, p) = spawn_overlay(&mut commands, f, "已暂停", 400.0);
             commands.entity(o).insert((OverlayRoot, DespawnOnExit(Screen::Flight)));
-            let note = if core.watching { "你在观战，比赛照常进行。" } else { "联机游戏不会真的停下，你的战机仍在空中。" };
+            let note = if core.watching { "你在观战，比赛照常进行。" } else { "联机游戏不会真的停下，你的战车还在场上。" };
             commands.spawn((text(f, note, 13.0, MUTED), ChildOf(p)));
             let c = commands.spawn((col(GAP_S), ChildOf(p))).id();
             let resume = spawn_btn(&mut commands, f, c, Kind::Primary, "继续", UiAction::Resume, Some("Esc"));
@@ -848,9 +854,9 @@ pub fn flight_overlays(mut commands: Commands, session: Res<Session>, keys: Res<
             let o = commands.spawn((Node { position_type: PositionType::Absolute, width: percent(100), bottom: px(200), justify_content: JustifyContent::Center, ..default() }, Pickable::IGNORE, OverlayRoot, DespawnOnExit(Screen::Flight))).id();
             let p = spawn_panel(&mut commands, Some(o), Node { width: px(440), padding: px(PAD).all(), flex_direction: FlexDirection::Column, row_gap: px(GAP_S), ..default() });
             commands.entity(p).insert((Plate { edge: DANGER.with_alpha(0.6), mark: DANGER, ..solid_plate() }, SlideIn::new(0.0, 0.0, 20.0)));
-            commands.spawn((heading(f, "战机被击毁", 22.0, DANGER), ChildOf(p)));
+            commands.spawn((heading(f, "战车被击毁", 22.0, DANGER), ChildOf(p)));
             if let Some(k) = &session.killer {
-                commands.spawn((text(f, format!("击落你的是 {k}"), 15.0, INK), ChildOf(p)));
+                commands.spawn((text(f, format!("击毁你的是 {k}"), 15.0, INK), ChildOf(p)));
             }
             let rule = match core.mode {
                 Some(Mode::Ffa) => "4 秒后在随机位置重生。",
@@ -887,7 +893,7 @@ pub fn spawn_score_table(commands: &mut Commands, f: &UiFont, parent: Entity, ro
         .id();
     // numeric columns are right-aligned
     let num = || Node { justify_self: JustifySelf::End, ..default() };
-    for (i, h) in ["#", "飞行员", "击毁", "阵亡", "得分"].into_iter().enumerate() {
+    for (i, h) in ["#", "车长", "击毁", "阵亡", "得分"].into_iter().enumerate() {
         let c = commands.spawn((strong(f, h, 12.0, MUTED), ChildOf(grid))).id();
         if i >= 2 {
             commands.entity(c).insert(num());

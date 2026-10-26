@@ -19,7 +19,8 @@ use voxwing_shared::flight::{BTN_FIRE, InputCmd};
 use voxwing_shared::protocol::*;
 use voxwing_shared::ship::ShipBody;
 use voxwing_shared::weapons::{Shot, WeaponState, step_weapons};
-use voxwing_shared::world::{Asteroid, generate_asteroids, tick_time};
+use voxwing_shared::terrain::Terrain;
+use voxwing_shared::world::{Asteroid, generate_boulders, tick_time};
 use voxwing_shared::{DT, PROTOCOL_VERSION, TICK_RATE};
 
 pub struct CoreShip {
@@ -127,6 +128,7 @@ pub struct ClientCore {
     pub my_ship: Option<u16>,
     pub ships: BTreeMap<u16, CoreShip>,
     pub missiles: BTreeMap<u16, MissileView>,
+    pub terrain: Arc<Terrain>,
     pub rocks: Vec<Asteroid>,
     pub clock: ServerClock,
     pub pred: Option<Predictor>,
@@ -165,6 +167,7 @@ impl ClientCore {
             my_ship: None,
             ships: BTreeMap::new(),
             missiles: BTreeMap::new(),
+            terrain: Arc::new(Terrain::flat()),
             rocks: Vec::new(),
             clock: ServerClock::default(),
             pred: None,
@@ -303,7 +306,7 @@ impl ClientCore {
                 cmd.view_lag = (tick as f64 - render_tick).clamp(0.0, 30.0) as u8;
                 self.shots.clear();
                 let p = self.pred.as_mut().unwrap();
-                p.step(cmd, &self.ships[&sid].body, &self.rocks, &mut self.shots);
+                p.step(cmd, &self.ships[&sid].body, &self.terrain, &self.rocks, &mut self.shots);
                 for s in self.shots.drain(..) {
                     self.events.push(CoreEvent::Shot { ship: sid, weapon: s.weapon, pos: s.pos, vel: s.vel, own: true });
                 }
@@ -373,7 +376,8 @@ impl ClientCore {
                 self.reset_world();
                 self.pid = Some(pid);
                 self.mode = Some(mode);
-                self.rocks = generate_asteroids(asteroid_seed);
+                self.terrain = Arc::new(Terrain::generate(asteroid_seed));
+                self.rocks = generate_boulders(asteroid_seed, &self.terrain);
                 self.clock.sync(tick);
                 self.state = ConnState::InGame;
                 self.phase = Phase::Playing;
@@ -518,7 +522,7 @@ impl ClientCore {
             Some(p) => {
                 let off = p.on_lead(s.lead);
                 if !off {
-                    p.reconcile(s.tick, &own.kin, &ship.body, &self.rocks);
+                    p.reconcile(s.tick, &own.kin, &ship.body, &self.terrain, &self.rocks);
                 }
                 off
             }

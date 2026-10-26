@@ -1,8 +1,9 @@
-//! Flight: drives the client core each frame and presents its state.
+//! The battle: drives the client core each frame and presents its state.
 
 pub mod env;
 pub mod exhaust;
 pub mod fx;
+pub mod ground;
 pub mod hud;
 pub mod ships;
 
@@ -11,16 +12,17 @@ use crate::settings::Settings;
 use crate::screens::Overlays;
 use crate::ui::UiAction;
 use crate::ui::kit::ModalReq;
+use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::input_focus::InputFocus;
 use crate::{DevOpts, LastError, MainCamera, Screen};
 use bevy::audio::Volume;
 use bevy::light::Skybox;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use voxwing_client_core::{ClientCore, ConnState, Phase};
 use voxwing_shared::protocol::Mode;
 use voxwing_shared::ai::{AiPilot, Contact, Skill};
-use voxwing_shared::flight::{BTN_BOOST, BTN_FIRE, BTN_MISSILE, InputCmd, NO_LOCK, q_axis};
+use voxwing_shared::flight::{BTN_BOOST, BTN_FIRE, BTN_FLIP, BTN_MISSILE, InputCmd, NO_LOCK, q_axis};
 use voxwing_shared::weapons::intercept;
 
 /// A connection to a server, from the mode select until the player goes back to it: it lives
@@ -37,15 +39,15 @@ pub struct Session {
     pub locked: bool,
     pub throttle: f32,
     pub cockpit_cam: bool,
-    cam_rot: Quat,
+    /// Where the camera looks, in world angles: yaw round the vertical, pitch (rad).
+    look: Vec2,
     pub cam_init: bool,
     pub paused: bool,
     pub death: Option<(Vec3, f32)>,
     pub shake: f32,
     ai: Option<AiPilot>,
-    pitch: f32,
-    yaw: f32,
-    roll: f32,
+    drive: f32,
+    steer: f32,
     buttons: u8,
     /// The ship the camera rides with while spectating (or waiting to respawn).
     pub spectate: Option<u16>,
@@ -66,15 +68,14 @@ impl Session {
             locked: false,
             throttle: 0.7,
             cockpit_cam: false,
-            cam_rot: Quat::IDENTITY,
+            look: Vec2::ZERO,
             cam_init: false,
             paused: false,
             death: None,
             shake: 0.0,
             ai: None,
-            pitch: 0.0,
-            yaw: 0.0,
-            roll: 0.0,
+            drive: 0.0,
+            steer: 0.0,
             buttons: 0,
             spectate: None,
             wreck: None,
@@ -143,7 +144,7 @@ impl Plugin for FlightPlugin {
             .add_systems(Update, step_core.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Match)).run_if(resource_exists::<Session>))
             .add_systems(
                 Update,
-                (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, exhaust::update_exhaust, fx::update_fx, env::orient_rocks, hud::update_hud, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum)
+                (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, exhaust::update_exhaust, fx::update_fx, env::orient_rocks, hud::update_hud, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum, grab_cursor, hud::dev_hide_hud)
                     .chain()
                     .run_if(in_state(Screen::Flight))
                     .run_if(resource_exists::<Session>),
@@ -154,17 +155,14 @@ impl Plugin for FlightPlugin {
 fn setup_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(fx::Fx::new(&mut meshes, &mut mats));
     commands.insert_resource(ships::flame_mats(&mut mats));
-    commands.insert_resource(env::SkyImage(env::build_sky(&mut images)));
-    commands.insert_resource(env::build_env_assets(&mut meshes, &mut mats, &mut images));
+    commands.insert_resource(ground::DaySky(ground::build_day_sky(&mut images)));
+    commands.insert_resource(ground::build_stage(&mut meshes, &mut mats));
 }
 
 #[allow(clippy::too_many_arguments)]
 fn enter_flight(
     mut commands: Commands,
-    mut mats: ResMut<Assets<StandardMaterial>>,
-    env_assets: Res<env::EnvAssets>,
-    sky: Res<env::SkyImage>,
-    mut fx: ResMut<fx::Fx>,
+    sky: Res<ground::DaySky>,
     cam: Single<(Entity, &mut Projection), With<MainCamera>>,
     dev: Res<DevOpts>,
     mut session: Option<ResMut<Session>>,
@@ -173,12 +171,11 @@ fn enter_flight(
 ) {
     focus.clear();
     let (ce, mut proj) = cam.into_inner();
-    commands.entity(ce).insert(Skybox { image: Some(sky.0.clone()), brightness: 1200.0, ..default() });
+    commands.entity(ce).insert((Skybox { image: Some(sky.0.clone()), brightness: ground::SKY_BRIGHTNESS, ..default() }, ground::fog()));
     if let Projection::Perspective(p) = &mut *proj {
         p.fov = 68f32.to_radians();
     }
-    env::spawn_env(&mut commands, &env_assets, Screen::Flight, Vec3::ZERO);
-    fx::spawn_dust(&mut commands, &mut fx, &mut mats);
+    ground::spawn_daylight(&mut commands, Screen::Flight);
     if let Some(s) = session.as_mut() {
         s.reset_flight();
         if dev.autopilot {
@@ -191,8 +188,22 @@ fn enter_flight(
     }
 }
 
-fn exit_flight(mut vis: ResMut<ships::ShipVisuals>) {
+fn exit_flight(mut commands: Commands, mut vis: ResMut<ships::ShipVisuals>, cam: Single<Entity, With<MainCamera>>, mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>) {
     vis.0.clear();
+    commands.entity(*cam).remove::<DistanceFog>();
+    cursor.grab_mode = CursorGrabMode::None;
+    cursor.visible = true;
+}
+
+/// While driving, the mouse turns the camera: the cursor is hidden and held. Paused, spectating
+/// with a menu open, or anywhere else, it is free.
+fn grab_cursor(session: Res<Session>, overlays: Res<Overlays>, modal: Res<ModalReq>, mut cursor: Single<&mut CursorOptions, With<PrimaryWindow>>) {
+    let held = !session.paused && session.core.state == ConnState::InGame && !overlays.any(&modal);
+    let (grab, visible) = if held { (CursorGrabMode::Locked, false) } else { (CursorGrabMode::None, true) };
+    if cursor.grab_mode != grab || cursor.visible != visible {
+        cursor.grab_mode = grab;
+        cursor.visible = visible;
+    }
 }
 
 fn end_session(mut commands: Commands, session: Option<Res<Session>>, screen: Res<State<Screen>>, mut toasts: ResMut<crate::ui::kit::Toasts>) {
@@ -208,44 +219,18 @@ fn end_session(mut commands: Commands, session: Option<Res<Session>>, screen: Re
     commands.remove_resource::<Session>();
 }
 
-fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>>, window: Single<&Window, With<PrimaryWindow>>, mut session: ResMut<Session>, time: Res<Time>, settings: Res<Settings>) {
+fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>>, mut session: ResMut<Session>) {
     let s = &mut *session;
     if s.paused || s.core.watching {
         s.buttons = 0;
+        s.drive = 0.0;
+        s.steer = 0.0;
         return;
     }
-    let dt = time.delta_secs();
-    let (w, h) = (window.width(), window.height());
-    let r = w.min(h) * 0.32 / settings.sensitivity.clamp(0.3, 3.0);
-    let mut stick = window.cursor_position().map_or(Vec2::ZERO, |c| (c - Vec2::new(w, h) / 2.0) / r);
-    let m = stick.length();
-    if m > 1.0 {
-        stick /= m;
-    }
-    let dz = 0.06;
-    let m = stick.length();
-    stick *= if m < dz { 0.0 } else { (m - dz) / (1.0 - dz) / m };
-    s.yaw = stick.x;
-    s.pitch = -stick.y * if settings.invert_y { -1.0 } else { 1.0 };
-    if keys.pressed(KeyCode::ArrowLeft) {
-        s.yaw = -1.0;
-    }
-    if keys.pressed(KeyCode::ArrowRight) {
-        s.yaw = 1.0;
-    }
-    if keys.pressed(KeyCode::ArrowUp) {
-        s.pitch = 1.0;
-    }
-    if keys.pressed(KeyCode::ArrowDown) {
-        s.pitch = -1.0;
-    }
-    s.roll = (keys.any_pressed([KeyCode::KeyD, KeyCode::KeyE]) as i32 - keys.any_pressed([KeyCode::KeyA, KeyCode::KeyQ]) as i32) as f32;
-    if keys.pressed(KeyCode::KeyW) {
-        s.throttle = (s.throttle + dt * 0.8).min(1.0);
-    }
-    if keys.pressed(KeyCode::KeyS) {
-        s.throttle = (s.throttle - dt * 0.8).max(0.0);
-    }
+    let axis = |pos: [KeyCode; 2], neg: [KeyCode; 2]| (keys.any_pressed(pos) as i32 - keys.any_pressed(neg) as i32) as f32;
+    s.drive = axis([KeyCode::KeyW, KeyCode::ArrowUp], [KeyCode::KeyS, KeyCode::ArrowDown]);
+    s.steer = axis([KeyCode::KeyD, KeyCode::ArrowRight], [KeyCode::KeyA, KeyCode::ArrowLeft]);
+    s.throttle = s.drive.abs();
     let mut b = 0;
     if mouse.pressed(MouseButton::Left) || keys.pressed(KeyCode::Space) {
         b |= BTN_FIRE;
@@ -256,6 +241,9 @@ fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButto
     if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
         b |= BTN_BOOST;
     }
+    if keys.pressed(KeyCode::KeyR) {
+        b |= BTN_FLIP;
+    }
     s.buttons = b;
 }
 
@@ -264,7 +252,7 @@ fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButto
 fn step_core(mut commands: Commands, mut session: ResMut<Session>, time: Res<Time>, screen: Res<State<Screen>>, mut next: ResMut<NextState<Screen>>, mut last_err: ResMut<LastError>) {
     let dt = time.delta_secs().min(0.1);
     let s = &mut *session;
-    let (pitch, yaw, roll, throttle, buttons, target, locked) = (s.pitch, s.yaw, s.roll, s.throttle, s.buttons, s.target, s.locked);
+    let (drive, steer, buttons, target, locked) = (s.drive, s.steer, s.buttons, s.target, s.locked);
     let mut ai = s.ai.take();
     s.core.update(dt, &mut |c: &ClientCore, _tick| {
         if let Some(ai) = ai.as_mut()
@@ -273,7 +261,7 @@ fn step_core(mut commands: Commands, mut session: ResMut<Session>, time: Res<Tim
             let others: Vec<Contact> = c.ships.values().filter(|o| Some(o.id) != c.my_ship).map(|o| Contact { id: o.id, team: o.team, pos: o.pos, vel: o.vel, radius: o.body.radius }).collect();
             return ai.think(&p.kin, &me.body, 0.0, me.team, &others, &c.rocks, voxwing_shared::DT);
         }
-        let mut cmd = InputCmd { pitch: q_axis(pitch), yaw: q_axis(yaw), roll: q_axis(roll), throttle: (throttle * 255.0) as u8, buttons, ..Default::default() };
+        let mut cmd = InputCmd { drive: q_axis(drive), steer: q_axis(steer), buttons, ..Default::default() };
         if let (Some(t), Some(p), Some(me)) = (target.and_then(|id| c.ships.get(&id)), c.pred.as_ref(), c.my()) {
             let lead = intercept(p.kin.pos, p.kin.vel, t.pos, t.vel, me.body.bolt_speed);
             if p.kin.fwd().angle_between(lead - p.kin.pos) < 0.12 {
@@ -403,64 +391,96 @@ impl Rider {
     }
 }
 
-/// The chase (or cockpit) camera on ship `o`; returns how much to widen the field of view.
+/// The camera on vehicle `o`: orbiting it where the mouse turns it, or in its cockpit. Watching
+/// someone else drive (spectating, the autopilot) it swings round behind the vehicle by itself.
+/// Returns how much to widen the field of view.
 fn ride(s: &mut Session, o: Rider, t: &mut Transform, dt: f32, side: bool) -> f32 {
+    let f = o.rot * Vec3::NEG_Z;
+    let behind = (-f.x).atan2(-f.z);
     if !s.cam_init {
-        s.cam_rot = o.rot;
+        // start behind the vehicle, looking a little down on it
+        s.look = Vec2::new(behind, -0.18);
         s.cam_init = true;
     }
-    s.cam_rot = s.cam_rot.slerp(o.rot, 1.0 - (-dt * 7.0).exp());
+    if s.core.watching || s.ai.is_some() {
+        let turn = (behind - s.look.x + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        s.look.x += turn * (1.0 - (-dt * 2.5).exp());
+    }
+    let look = Quat::from_rotation_y(s.look.x) * Quat::from_rotation_x(s.look.y);
     if side {
-        // dev view: beside the ship, looking back along its exhaust
+        // dev view: beside the vehicle, from the right
         let r = o.radius;
-        t.translation = o.pos + o.rot * Vec3::new(r * 2.0 + 16.0, 3.0, 6.0);
-        t.look_at(o.pos + o.rot * Vec3::Z * 14.0, o.rot * Vec3::Y);
+        t.translation = o.pos + o.rot * Vec3::new(r * 2.0 + 8.0, 2.0, 0.0);
+        t.look_at(o.pos, Vec3::Y);
     } else if s.cockpit_cam && let Some(eye) = o.cockpit {
         t.translation = eye + o.rot * Vec3::Y * 0.75;
-        t.rotation = o.rot;
+        t.rotation = look;
     } else {
+        // the pivot sits above the vehicle, so it rides in the lower part of the view
         let r = o.radius;
-        t.translation = o.pos + s.cam_rot * Vec3::new(0.0, r * 0.5 + 2.4, r * 1.9 + 7.5);
-        t.rotation = s.cam_rot * Quat::from_rotation_x(-0.06);
+        let pivot = o.pos + Vec3::Y * (1.5 + r * 0.25);
+        t.translation = pivot - look * Vec3::NEG_Z * (r * 1.7 + 6.0);
+        t.rotation = look;
     }
-    (o.speed / 120.0).clamp(0.0, 1.0) * 8.0 + if o.boosting { 8.0 } else { 0.0 }
+    (o.speed / 30.0).clamp(0.0, 1.0) * 6.0 + if o.boosting { 6.0 } else { 0.0 }
 }
 
-fn camera_follow(mut session: ResMut<Session>, cam: Single<(&mut Transform, &mut Projection), With<MainCamera>>, time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, dev: Res<DevOpts>) {
+#[allow(clippy::too_many_arguments)]
+fn camera_follow(
+    mut session: ResMut<Session>,
+    cam: Single<(&mut Transform, &mut Projection), With<MainCamera>>,
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    motion: Res<AccumulatedMouseMotion>,
+    settings: Res<Settings>,
+    cursor: Single<&CursorOptions, With<PrimaryWindow>>,
+    dev: Res<DevOpts>,
+) {
     let dt = time.delta_secs();
     let s = &mut *session;
     let (mut t, mut proj) = cam.into_inner();
     if keys.just_pressed(KeyCode::KeyC) {
         s.cockpit_cam = !s.cockpit_cam;
     }
+    if cursor.grab_mode == CursorGrabMode::Locked {
+        let k = 0.0025 * settings.sensitivity.clamp(0.3, 3.0);
+        let invert = if settings.invert_y { -1.0 } else { 1.0 };
+        s.look.x -= motion.delta.x * k;
+        s.look.y = (s.look.y - motion.delta.y * k * invert).clamp(-0.8, 0.35);
+    }
     let mut fov = 66.0;
     let side = dev.forced("side", time.elapsed_secs());
     if let Some(v) = s.view().map(Rider::of) {
-        // your own ship, or the one you are spectating: the same camera either way
+        // your own vehicle, or the one you are spectating: the same camera either way
         fov += ride(s, v, &mut t, dt, side);
     } else if let Some((p, left, _)) = s.wreck {
-        // the watched ship went down: circle the wreck until the cut to its killer
+        // the watched vehicle went down: circle the wreck until the cut to its killer
         let a = (WRECK_LINGER - left) * 0.5;
-        let r = 34.0;
-        t.translation = p + Vec3::new(a.sin() * r, r * 0.4, a.cos() * r);
+        let r = 24.0;
+        t.translation = p + Vec3::new(a.sin() * r, r * 0.5, a.cos() * r);
         t.look_at(p, Vec3::Y);
     } else if let Some((p, a)) = s.death.as_mut() {
         *a += dt * 0.25;
-        let r = 40.0;
-        t.translation = *p + Vec3::new(a.sin() * r, r * 0.35, a.cos() * r);
+        let r = 28.0;
+        t.translation = *p + Vec3::new(a.sin() * r, r * 0.45, a.cos() * r);
         t.look_at(*p, Vec3::Y);
     } else {
         // waiting to spawn: watch a teammate or the action
         let pick = s.spectate.filter(|id| s.core.ships.contains_key(id)).or_else(|| s.core.ships.keys().next().copied());
         s.spectate = pick;
         if let Some(o) = pick.and_then(|id| s.core.ships.get(&id)) {
-            let want = o.pos + o.rot * Vec3::new(0.0, o.body.radius + 6.0, o.body.radius * 2.5 + 14.0);
+            let want = o.pos + o.rot * Vec3::new(0.0, o.body.radius + 5.0, o.body.radius * 2.5 + 10.0);
             t.translation = t.translation.lerp(want, (dt * 3.0).min(1.0));
             t.look_at(o.pos, Vec3::Y);
         } else {
-            t.translation = Vec3::new(0.0, 60.0, 700.0);
+            t.translation = Vec3::new(0.0, 120.0, 420.0);
             t.look_at(Vec3::ZERO, Vec3::Y);
         }
+    }
+    // never under the ground
+    let g = s.core.terrain.height(t.translation.x, t.translation.z) + 1.2;
+    if t.translation.y < g {
+        t.translation.y = g;
     }
     if s.shake > 0.01 {
         let k = s.shake * 0.4;

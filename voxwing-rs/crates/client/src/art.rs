@@ -205,10 +205,13 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let nozzle_s = m(ConicalFrustum { radius_top: 0.28, radius_bottom: 0.22, height: 0.24 }.into());
     let disc_s = m(Circle::new(0.21).into());
     let flak_barrel = m(Cylinder::new(0.19, 0.62).into());
+    let tire = m(Cylinder::new(voxwing_shared::drive::WHEEL_R, 0.62).into());
+    let hub = m(Cylinder::new(0.36, 0.66).into());
 
     let mut fixed = |c: StandardMaterial| PartMat::Fixed(mats.add(c));
     let dark = fixed(StandardMaterial { base_color: srgb(0x262b33), metallic: 0.8, perceptual_roughness: 0.35, ..default() });
     let glass = fixed(StandardMaterial { base_color: srgb(0x0b2238), emissive: glow(0x2a7bff, 2.0), metallic: 0.9, perceptual_roughness: 0.1, ..default() });
+    let rubber = fixed(StandardMaterial { base_color: srgb(0x1d1f23), perceptual_roughness: 0.92, ..default() });
     let red = fixed(StandardMaterial { base_color: srgb(0xd83a3a), metallic: 0.3, perceptual_roughness: 0.4, ..default() });
     // nozzle throat: white-hot but not blown out; the plume carries the colour
     let g_engine = fixed(StandardMaterial { base_color: Color::BLACK, emissive: glow(0xd8ecff, 2.5), ..default() });
@@ -337,5 +340,12 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         cap.push(p(&cube, &dark, [x, 0.5, 0.0], z, [0.14, 0.1, 0.14]));
     }
     parts[Capacitor.index()] = cap;
+    // a tyre round a painted hub, on an axle along x; a cross on each face shows it turning
+    parts[Wheel.index()] = vec![
+        p(&tire, &rubber, z, [0.0, 0.0, HP], one),
+        p(&hub, &paint, z, [0.0, 0.0, HP], one),
+        p(&cube, &dark, z, z, [0.68, 0.56, 0.12]),
+        p(&cube, &dark, z, z, [0.68, 0.12, 0.56]),
+    ];
     BlockArt { parts, cube, sphere, paint_tex, armor_tex, cache: HashMap::new() }
 }

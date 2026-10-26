@@ -11,7 +11,7 @@ const USAGE: &str = "用法: voxwing-server [--port 4433] [--bind 0.0.0.0] [--qu
   --kill-limit N    先达到这么多击毁的一方提前获胜（默认 10）
   --status FILE     每 5 秒把在线人数等写进这个 JSON 文件（部署时据此判断能不能重启）
 
-玩家在客户端里选模式（自由混战 / 2v2）开始匹配，服务器凑局、补 AI、选完机体后开打。";
+玩家在客户端里选模式（自由混战 / 2v2）开始匹配，服务器凑局、补 AI、选完战车后开打。";
 
 fn main() -> Result<()> {
     let mut port = DEFAULT_PORT;
@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     let bind: SocketAddr = format!("{host}:{port}").parse().with_context(|| format!("--bind 地址无效：{host}"))?;
     let handle = start(ServerConfig { bind, hub: hub.clone(), verbose: true, status })?;
     println!(
-        "体素星翼服务器 {BUILD} 已启动：{} · 匹配最多等 {} 秒，人不够就用 AI 补位 · 每局 {} 秒或 {} 击毁 · UDP 端口 {}",
+        "方块战车服务器 {BUILD} 已启动：{} · 匹配最多等 {} 秒，人不够就用 AI 补位 · 每局 {} 秒或 {} 击毁 · UDP 端口 {}",
         handle.addr,
         hub.queue_wait,
         hub.match_secs,

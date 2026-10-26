@@ -26,6 +26,7 @@ pub enum BlockType {
     Railgun,
     Flak,
     Capacitor,
+    Wheel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -43,7 +44,7 @@ impl Category {
         match self {
             Category::Core => "核心部件 · 必需",
             Category::Structure => "结构",
-            Category::Mobility => "机动",
+            Category::Mobility => "动力",
             Category::Weapon => "武器",
             Category::System => "系统",
         }
@@ -141,7 +142,7 @@ fn one() -> u8 {
 }
 
 impl BlockType {
-    pub const ALL: [BlockType; 20] = [
+    pub const ALL: [BlockType; 21] = [
         BlockType::Cockpit,
         BlockType::Wing,
         BlockType::Engine,
@@ -162,6 +163,7 @@ impl BlockType {
         BlockType::Railgun,
         BlockType::Flak,
         BlockType::Capacitor,
+        BlockType::Wheel,
     ];
 
     pub fn index(self) -> usize {
@@ -222,7 +224,7 @@ pub const NAME_MAX_CHARS: usize = 14;
 impl Design {
     pub fn sanitized_name(&self) -> String {
         let n: String = self.name.trim().chars().filter(|c| !c.is_control()).take(NAME_MAX_CHARS).collect();
-        if n.is_empty() { "无名战机".to_string() } else { n }
+        if n.is_empty() { "无名战车".to_string() } else { n }
     }
 }
 

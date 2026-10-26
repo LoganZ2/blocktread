@@ -1,13 +1,13 @@
-//! The entry page, first after starting the game: pick the server to play on from a dropdown
-//! (each server with its live ping), then 开始游戏 into the lobby. The lobby plays on that server;
-//! its 更换 comes back here.
+//! The entry page, first after starting the game: the title in a column down the left over your
+//! vehicle parked on the field, the server to play on in a dropdown (each with its live ping), and
+//! 开始游戏 into the lobby. The lobby plays on that server; its 更换 comes back here.
 
 use super::Overlays;
 use crate::settings::{self, Regions, Settings};
 use crate::ui::icons::Icons;
 use crate::ui::kit::*;
 use crate::ui::*;
-use crate::{MainCamera, Screen};
+use crate::Screen;
 use bevy::prelude::*;
 use bevy::text::LetterSpacing;
 use std::time::Duration;
@@ -23,7 +23,7 @@ impl Plugin for EntryPlugin {
             .add_systems(OnEnter(Screen::Entry), (start_pings, spawn_entry))
             .add_systems(OnEnter(Screen::Menu), start_pings)
             .add_systems(OnExit(Screen::Menu), |mut c: Commands| c.remove_resource::<Pings>())
-            .add_systems(Update, (entry_actions, entry_keys, refresh_select, drift).chain().run_if(in_state(Screen::Entry)))
+            .add_systems(Update, (entry_actions, entry_keys, refresh_select).chain().run_if(in_state(Screen::Entry)))
             .add_systems(Update, ping_labels.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Entry | Screen::Menu)));
     }
 }
@@ -61,7 +61,7 @@ fn fastest(regions: &Regions, pings: Option<&Pings>) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// A ping as shown, and its colour: green is fine for a dogfight, red is laggy.
+/// A ping as shown, and its colour: green is fine for a fight, red is laggy.
 pub fn ping_text(p: Ping) -> (String, Color) {
     match p {
         Ping::Pending => ("…".into(), MUTED),
@@ -112,34 +112,47 @@ struct SelectItem(usize);
 #[derive(Component)]
 struct ItemMark(usize);
 
-/// Width of the server picker and the start button.
-const COLUMN: f32 = 480.0;
+/// Width of the column down the left, and its inset.
+const COLUMN: f32 = 560.0;
+const INSET: f32 = 56.0;
 
 fn spawn_entry(mut commands: Commands, font: Res<UiFont>, icons: Res<Icons>, regions: Res<Regions>, mut chosen: ResMut<Chosen>, mut open: ResMut<ListOpen>) {
     chosen.0 = None;
     open.0 = false;
     let f = &*font;
     let scope = DespawnOnExit(Screen::Entry);
+    // the column: title on top, the server and the start button at the foot, an amber edge
     let root = commands
         .spawn((
-            Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, justify_content: JustifyContent::Center, row_gap: px(48), ..default() },
-            Pickable::IGNORE,
-            IgnoreHover,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                top: px(0),
+                bottom: px(0),
+                width: px(COLUMN),
+                padding: UiRect { left: px(INSET), right: px(INSET), top: px(64), bottom: px(48) },
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            Plate { fill: PANEL, grain: 1.0, edge_w: 0.0, ..default() },
+            SlideIn::new(0.0, -40.0, 0.0),
             scope.clone(),
         ))
         .id();
+    commands.spawn((Node { position_type: PositionType::Absolute, right: px(0), top: px(0), bottom: px(0), width: px(2), ..default() }, BackgroundColor(ACCENT), Pickable::IGNORE, ChildOf(root)));
 
-    // title
-    let head = commands.spawn((Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(6), ..default() }, SlideIn::new(0.0, 0.0, -20.0), ChildOf(root))).id();
-    let kick = commands.spawn((row(12.0), ChildOf(head))).id();
-    commands.spawn((Node { width: px(24), height: px(2), ..default() }, BackgroundColor(ACCENT), ChildOf(kick)));
-    commands.spawn((tech(f, "VOXWING", 14.0, ACCENT), LetterSpacing::Px(12.0), ChildOf(kick)));
-    commands.spawn((Node { width: px(24), height: px(2), ..default() }, BackgroundColor(ACCENT), ChildOf(kick)));
-    commands.spawn((display(f, "体素星翼", 112.0, INK), LetterSpacing::Px(4.0), ChildOf(head)));
-    commands.spawn((text(f, "用方块拼出你的战机，在小行星带里和朋友空战", 16.0, MUTED), ChildOf(head)));
+    let kick = commands.spawn((row(12.0), ChildOf(root))).id();
+    commands.spawn((Node { width: px(8), height: px(8), ..default() }, BackgroundColor(ACCENT), ChildOf(kick)));
+    commands.spawn((tech(f, "VOXEL VEHICLE COMBAT", 13.0, MUTED), LetterSpacing::Px(4.0), ChildOf(kick)));
+    commands.spawn((display(f, "方块战车", 104.0, INK), LetterSpacing::Px(6.0), Node { margin: UiRect::top(px(72)), ..default() }, ChildOf(root)));
+    let mark = commands.spawn((Node { margin: UiRect::top(px(8)), column_gap: px(16), align_items: AlignItems::Center, ..default() }, ChildOf(root))).id();
+    commands.spawn((Node { width: px(48), height: px(8), ..default() }, Plate { fill: ACCENT, stripes: 48.0, stripe: ON_ACCENT, edge_w: 0.0, ..default() }, ChildOf(mark)));
+    commands.spawn((stencil(f, "BLOCKTREAD", 30.0, ACCENT), LetterSpacing::Px(10.0), ChildOf(mark)));
+    commands.spawn((text(f, "用方块拼出你的战车，开上战场和朋友对轰。", 16.0, INK.with_alpha(0.8)), Node { margin: UiRect::top(px(24)), ..default() }, ChildOf(root)));
+    commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(root)));
 
     // the server dropdown, then start
-    let body = commands.spawn((Node { width: px(COLUMN), flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() }, SlideIn::new(0.1, 0.0, 24.0), ChildOf(root))).id();
+    let body = commands.spawn((Node { flex_direction: FlexDirection::Column, row_gap: px(GAP), ..default() }, SlideIn::new(0.1, 0.0, 24.0), ChildOf(root))).id();
     spawn_header(&mut commands, f, body, "服务器|SERVER");
     // the field and its list share a holder, so the list can hang under the field over the rest
     let holder = commands.spawn((Node { flex_direction: FlexDirection::Column, ..default() }, ChildOf(body))).id();
@@ -193,7 +206,7 @@ fn spawn_entry(mut commands: Commands, font: Res<UiFont>, icons: Res<Icons>, reg
         ))
         .id();
     spawn_btn(&mut commands, f, corner, Kind::Normal, "设置", UiAction::OpenSettings, Some("S"));
-    spawn_btn(&mut commands, f, corner, Kind::Ghost, "退出", UiAction::Quit, Some("Esc"));
+    spawn_btn(&mut commands, f, corner, Kind::Normal, "退出", UiAction::Quit, Some("Esc"));
 }
 
 /// The server shown as picked: the choice on this page, else the saved one, else the fastest.
@@ -335,11 +348,4 @@ fn entry_keys(
             w.write(UiAction::Quit);
         }
     }
-}
-
-/// A slow drift through the asteroid field behind the page.
-fn drift(time: Res<Time>, mut cam: Single<&mut Transform, With<MainCamera>>) {
-    let t = time.elapsed_secs() * 0.02;
-    let eye = Vec3::new(t.sin() * 90.0, 18.0, t.cos() * 90.0);
-    **cam = Transform::from_translation(eye).looking_at(Vec3::new(0.0, 6.0, 0.0), Vec3::Y);
 }

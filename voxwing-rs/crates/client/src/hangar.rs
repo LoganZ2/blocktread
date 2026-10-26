@@ -1,6 +1,7 @@
 //! The hangar: build a ship on a 3D grid with live flight-readiness checks.
 
 use crate::art::{BlockArt, srgb};
+use crate::flight::ground;
 use crate::audio::{Sfx, Sounds};
 use crate::screens::Overlays;
 use crate::settings;
@@ -44,8 +45,29 @@ pub enum Tool {
     Paint,
 }
 
-const SWATCHES: [u32; 12] = [0xe8ecf0, 0xc9d2dc, 0x8d9aa8, 0x4d5662, 0x2a2f38, 0xffae42, 0xff6a3d, 0xe8444f, 0x5fd4ff, 0x3b7bff, 0x57e39a, 0xb07cff];
+/// Paints: field olive and sand, greys, then markings (signal amber, rust, red, navy) and
+/// a light and a dark.
+const SWATCHES: [u32; 12] = [0x77805a, 0x3b4030, 0xa39a6b, 0xc9c1a0, 0x8d96a3, 0x4d5662, 0xd9822b, 0x9a5432, 0xb5432f, 0x4b6b8a, 0xe8e4d6, 0x22241e];
 const KEYS: [&str; 12] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="];
+
+/// The parts on the keys, in key order; the garage lists the rest after them in their sections.
+const KEYED: [BlockType; 12] = [
+    BlockType::Cockpit,
+    BlockType::Engine,
+    BlockType::Wheel,
+    BlockType::Hull,
+    BlockType::Armor,
+    BlockType::Frame,
+    BlockType::Cannon,
+    BlockType::Laser,
+    BlockType::Flak,
+    BlockType::Railgun,
+    BlockType::Missile,
+    BlockType::Plasma,
+];
+
+/// Flight parts the garage doesn't offer: nothing on a vehicle uses lift or attitude control.
+const FLIGHT_ONLY: [BlockType; 4] = [BlockType::Wing, BlockType::Fin, BlockType::Gyro, BlockType::Rcs];
 
 #[derive(Resource)]
 pub struct Hangar {
@@ -130,7 +152,7 @@ impl Hangar {
     /// Add a ship after the last and switch to it. A blank or taken name gets a numbered one.
     pub fn add_ship(&mut self, mut d: Design) {
         if d.name.trim().is_empty() || self.fleet.ships.iter().any(|s| s.name == d.name) {
-            let base = if d.name.trim().is_empty() { "新机体".to_string() } else { d.name.clone() };
+            let base = if d.name.trim().is_empty() { "新战车".to_string() } else { d.name.clone() };
             d.name = (1..).map(|k| format!("{base} {k}")).find(|n| !self.fleet.ships.iter().any(|s| &s.name == n)).unwrap();
         }
         self.fleet.ships.push(d);
@@ -140,7 +162,7 @@ impl Hangar {
     pub fn delete_current(&mut self) {
         self.fleet.ships.remove(self.fleet.current);
         if self.fleet.ships.is_empty() {
-            self.fleet.ships.push(Design { name: "新机体".into(), blocks: preset("blank").blocks });
+            self.fleet.ships.push(Design { name: "新战车".into(), blocks: preset("blank").blocks });
         }
         self.select(self.fleet.current.min(self.fleet.ships.len() - 1) as isize);
     }
@@ -168,7 +190,7 @@ impl Hangar {
             return Err(why);
         }
         if self.ty == BlockType::Cockpit && self.design.blocks.iter().any(|b| b.ty == BlockType::Cockpit) {
-            return Err("只能有一个驾驶舱。先擦掉旧的再放".into());
+            return Err("只能有一个驾驶室。先擦掉旧的再放".into());
         }
         let mut cells = vec![c];
         if self.ty != BlockType::Cockpit
@@ -286,33 +308,35 @@ fn floor_texture(images: &mut Assets<Image>) -> Handle<Image> {
     let w = |v: f32| ((v + world / 2.0) * k) as i32;
     let mut px = vec![0u8; n * n * 4];
     let (fx0, fx1, fz0, fz1) = (w(GMIN.x as f32 - 0.5), w(GMAX.x as f32 + 0.5), w(GMIN.z as f32 - 0.5), w(GMAX.z as f32 + 0.5));
+    let (amber, black) = ([240u8, 168, 48], [28u8, 28, 22]);
     for y in 0..n as i32 {
         for x in 0..n as i32 {
-            let mut c = [9u8, 14, 22];
+            // concrete slabs, a little uneven, with the build grid scored into them
+            let slab = voxwing_shared::rng::hash01((x / 160) as u32, (y / 160) as u32) * 10.0;
+            let speck = voxwing_shared::rng::hash01(x as u32, y as u32) * 6.0;
+            let g = (112.0 + slab + speck) as u8;
+            let mut c = [g, g - 2, g - 8];
             let gx = ((x as f32 / k - world / 2.0 + 0.5).rem_euclid(1.0) * k) as i32;
             let gy = ((y as f32 / k - world / 2.0 + 0.5).rem_euclid(1.0) * k) as i32;
             if gx == 0 || gy == 0 {
-                c = [16, 30, 40];
+                c = [g - 22, g - 24, g - 28];
             }
+            // the build pad's edge: a band of hazard stripes
             let inner = x >= fx0 && x <= fx1 && y >= fz0 && y <= fz1;
-            let on_edge = inner && (x - fx0 < 3 || fx1 - x < 3 || y - fz0 < 3 || fz1 - y < 3);
-            if on_edge {
-                c = [40, 150, 140];
+            let band = inner && (x - fx0 < 8 || fx1 - x < 8 || y - fz0 < 8 || fz1 - y < 8);
+            if band {
+                c = if ((x + y) / 8) % 2 == 0 { amber } else { black };
             }
-            // corner brackets of the build pad
-            let near = |a: i32, b: i32| (a - b).abs() < 26;
-            if !inner && (near(x, fx0) || near(x, fx1)) && (near(y, fz0) || near(y, fz1)) && (x - fx0).abs().min((x - fx1).abs()) < 4 + 22 && ((x - fx0).abs() < 4 || (x - fx1).abs() < 4 || (y - fz0).abs() < 4 || (y - fz1).abs() < 4) {
-                c = [62, 230, 208];
+            // a dashed centre line down the pad
+            if (x - w(0.0)).abs() <= 1 && inner && !band && (y / 10) % 2 == 0 {
+                c = black;
             }
-            if (x - w(0.0)).abs() <= 1 && inner && (y / 10) % 2 == 0 {
-                c = [30, 90, 90];
-            }
-            // nose-direction chevron in front of the pad
+            // nose-direction chevrons in front of the pad
             let ax = (x - w(0.0)) as f32 / k;
             let az = (y - w(GMIN.z as f32 - 3.5)) as f32 / k;
             let chev = |o: f32| az > -1.2 + o && az < -0.5 + o && (ax.abs() - (az - o + 1.2) * 0.9).abs() < 0.35;
             if chev(0.0) || chev(1.0) {
-                c = [62, 230, 208];
+                c = amber;
             }
             let i = (y as usize * n + x as usize) * 4;
             px[i..i + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
@@ -332,21 +356,22 @@ fn enter_hangar(
     cam: Single<(Entity, &mut Projection), With<MainCamera>>,
     thumbs: Res<PartThumbs>,
     icons: Res<Icons>,
+    stage: Res<ground::Stage>,
+    sky: Res<ground::DaySky>,
 ) {
     let (ce, mut proj) = cam.into_inner();
-    commands.entity(ce).remove::<bevy::light::Skybox>();
     if let Projection::Perspective(p) = &mut *proj {
         p.fov = 42f32.to_radians();
     }
-    commands.insert_resource(GlobalAmbientLight { color: Color::srgb(0.75, 0.84, 0.92), brightness: 380.0, ..default() });
+    // a concrete test pad out on the stage, in daylight
+    let floor = GMIN.y as f32 - 0.52;
+    ground::spawn_stage(&mut commands, &stage, &sky, ce, Screen::Hangar, floor);
     let scope = DespawnOnExit(Screen::Hangar);
-    commands.spawn((DirectionalLight { illuminance: 9000.0, ..default() }, Transform::from_xyz(10.0, 20.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y), scope.clone()));
-    commands.spawn((DirectionalLight { illuminance: 2600.0, color: srgb(0x3ee6d0), ..default() }, Transform::from_xyz(-14.0, 6.0, -16.0).looking_at(Vec3::ZERO, Vec3::Y), scope.clone()));
     let tex = floor_texture(&mut images);
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(52.0, 52.0))),
-        MeshMaterial3d(mats.add(StandardMaterial { base_color_texture: Some(tex), metallic: 0.4, perceptual_roughness: 0.75, ..default() })),
-        Transform::from_xyz(0.0, GMIN.y as f32 - 0.52, 0.0),
+        MeshMaterial3d(mats.add(StandardMaterial { base_color_texture: Some(tex), perceptual_roughness: 0.9, ..default() })),
+        Transform::from_xyz(0.0, floor + 0.02, 0.0),
         scope.clone(),
     ));
     commands.spawn((
@@ -406,7 +431,7 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
         .spawn((
             Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(0), height: px(bar_h), padding: UiRect::horizontal(px(EDGE)), column_gap: px(GAP_S), align_items: AlignItems::Center, border: UiRect::bottom(px(1)), ..default() },
             BackgroundColor(PANEL_SOLID.with_alpha(0.94)),
-            BorderColor::all(LINE),
+            BorderColor::all(ACCENT),
             ChildOf(root),
         ))
         .id();
@@ -421,23 +446,23 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
         b
     };
     spawn_btn(commands, f, top, Kind::Ghost, "← 大厅", UiAction::Goto(Screen::Menu), Some("Esc"));
-    spawn_title(commands, f, top, "机库", "HANGAR");
+    spawn_title(commands, f, top, "车库", "GARAGE");
     divider(commands);
-    // the ship carousel: ‹ name › 2 / 5, then a new ship and delete
+    // the vehicle carousel: ‹ name › 2 / 5, then a new vehicle and delete
     let prev = spawn_icon_btn(commands, f, top, icons.left.clone(), UiAction::ShipPrev);
-    commands.entity(prev).insert(Tip("上一架  ,".into()));
+    commands.entity(prev).insert(Tip("上一辆  ,".into()));
     let nf = spawn_field(commands, f, top, &hangar.design.name, 9.0);
     commands.entity(nf).insert((NameField, Node { padding: UiRect::axes(px(12), px(9)), width: px(150), min_width: px(96), flex_shrink: 1.0, ..default() }));
     let next = spawn_icon_btn(commands, f, top, icons.right.clone(), UiAction::ShipNext);
-    commands.entity(next).insert(Tip("下一架  .".into()));
+    commands.entity(next).insert(Tip("下一辆  .".into()));
     commands.spawn((tech(f, "", 12.0, MUTED), ShipCounter, Node { width: px(40), justify_content: JustifyContent::Center, ..default() }, TextLayout::justify(Justify::Center), ChildOf(top)));
     let new = bar_btn(commands, Kind::Normal, "+ 新建", UiAction::NewShip, None);
-    commands.entity(new).insert(Tip("新建一架空白机体（只有驾驶舱）".into()));
+    commands.entity(new).insert(Tip("新建一辆空白战车（只有驾驶室）".into()));
     let del = spawn_btn(commands, f, top, Kind::Icon, "×", UiAction::DeleteShip, None);
-    commands.entity(del).insert(Tip("删除这架机体".into()));
+    commands.entity(del).insert(Tip("删除这辆战车".into()));
     divider(commands);
     let share = bar_btn(commands, Kind::Normal, "复制分享码", UiAction::CopyShare, None);
-    commands.entity(share).insert(Tip("复制一段 VW1. 开头的文字，朋友粘贴就能得到同一架飞机（网页版也能用）".into()));
+    commands.entity(share).insert(Tip("复制一段 BT1. 开头的文字，朋友粘贴就能得到同一辆战车".into()));
     bar_btn(commands, Kind::Normal, "粘贴分享码", UiAction::PasteShare, None);
     commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(top)));
     let u = bar_btn(commands, Kind::Normal, "撤销", UiAction::Undo, None);
@@ -462,15 +487,19 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
         commands.entity(b).insert(Node { height: px(H_MD), flex_grow: 1.0, flex_basis: px(0), padding: UiRect::horizontal(px(10)), column_gap: px(6), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() });
     }
     let four_cols = || Node { display: Display::Grid, grid_template_columns: RepeatedGridTrack::flex(4, 1.0), column_gap: px(GAP_S), row_gap: px(GAP_S), ..default() };
+    // the keyed parts first, in key order, then the rest; flight parts left out
+    let order: Vec<BlockType> = KEYED.iter().copied().chain(BlockType::ALL.into_iter().filter(|t| !KEYED.contains(t) && !FLIGHT_ONLY.contains(t))).collect();
     for cat in Category::ALL {
+        let parts: Vec<BlockType> = order.iter().copied().filter(|t| t.info().cat == cat).collect();
+        if parts.is_empty() {
+            continue;
+        }
         let sec = spawn_section(commands, f, left, cat.label());
         let grid = commands.spawn((four_cols(), ChildOf(sec))).id();
-        for (i, t) in BlockType::ALL.iter().enumerate() {
-            if t.info().cat != cat {
-                continue;
-            }
-            let tile = spawn_part_tile(commands, f, grid, thumbs.0[t.index()].clone(), KEYS.get(i).copied().unwrap_or(""), UiAction::SelectType(*t));
-            commands.entity(tile).insert((Tip(t.info().name.to_string()), TipDetail(part_detail(*t))));
+        for t in parts {
+            let key = KEYED.iter().position(|&k| k == t).map_or("", |i| KEYS[i]);
+            let tile = spawn_part_tile(commands, f, grid, thumbs.0[t.index()].clone(), key, UiAction::SelectType(t));
+            commands.entity(tile).insert((Tip(t.info().name.to_string()), TipDetail(part_detail(t))));
         }
     }
     commands.spawn((text(f, "悬停看名称 · 按住 Shift 看详情", 12.0, MUTED), ChildOf(left)));
@@ -498,32 +527,32 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
     let up = spawn_btn(commands, f, lrow, Kind::Icon, "+", UiAction::Layer(1), None);
     commands.entity(up).insert(Tip("上移一层  ]".into()));
     commands.spawn((text(f, "空处放在这一层", 12.0, MUTED), Node { margin: UiRect::left(px(4)), ..default() }, ChildOf(lrow)));
-    let mv = spawn_section(commands, f, left, "整机平移|MOVE SHIP");
+    let mv = spawn_section(commands, f, left, "整车平移|MOVE VEHICLE");
     let mrow = commands.spawn((row(GAP_S), ChildOf(mv))).id();
     for (label, d, tip) in [
-        ("←", (-1, 0, 0), "整机左移  Shift+←"),
-        ("→", (1, 0, 0), "整机右移  Shift+→"),
-        ("↑", (0, 1, 0), "整机上移  Shift+↑"),
-        ("↓", (0, -1, 0), "整机下移  Shift+↓"),
-        ("前", (0, 0, -1), "整机前移  Shift+["),
-        ("后", (0, 0, 1), "整机后移  Shift+]"),
+        ("←", (-1, 0, 0), "整车左移  Shift+←"),
+        ("→", (1, 0, 0), "整车右移  Shift+→"),
+        ("↑", (0, 1, 0), "整车上移  Shift+↑"),
+        ("↓", (0, -1, 0), "整车下移  Shift+↓"),
+        ("前", (0, 0, -1), "整车前移  Shift+["),
+        ("后", (0, 0, 1), "整车后移  Shift+]"),
     ] {
         let b = spawn_btn(commands, f, mrow, Kind::Icon, label, UiAction::Nudge(d.0, d.1, d.2), None);
         commands.entity(b).insert(Tip(tip.into()));
     }
 
-    // right panel: preflight checks and performance
+    // right panel: the pre-drive checks and performance
     let right = spawn_panel(commands, Some(root), Node { position_type: PositionType::Absolute, right: px(EDGE), top: px(panel_top), bottom: px(EDGE), width: px(right_w), padding: px(PAD).all(), flex_direction: FlexDirection::Column, row_gap: px(GAP), overflow: Overflow::scroll_y(), ..default() });
     commands.entity(right).insert(SlideIn::new(0.1, 36.0, 0.0));
     let checks = commands.spawn((col(GAP_S), ChildOf(right))).id();
     let hdr = commands.spawn((Node { height: px(22), column_gap: px(12), align_items: AlignItems::Center, ..default() }, ChildOf(checks))).id();
-    let h = spawn_header(commands, f, hdr, "起飞检查|PREFLIGHT");
+    let h = spawn_header(commands, f, hdr, "出车检查|PRE-DRIVE");
     commands.entity(h).insert(Node { flex_grow: 1.0, height: px(16), column_gap: px(8), align_items: AlignItems::Center, ..default() });
     commands.spawn((Node::default(), CheckSummary, ChildOf(hdr)));
     commands.spawn((col(GAP_S), CheckList, ChildOf(checks)));
     let perf = spawn_section(commands, f, right, "性能预估|PERFORMANCE");
     let mut bars = Vec::new();
-    for (l, c) in [("造价", INK.with_alpha(0.7)), ("速度", ACCENT), ("俯仰", ACCENT), ("偏航", ACCENT), ("翻滚", ACCENT), ("火力", SIGNAL), ("持续", SIGNAL), ("耐久", OK), ("护盾", Color::srgb(0.4, 0.62, 1.0)), ("能量", WARN)] {
+    for (l, c) in [("造价", INK.with_alpha(0.7)), ("极速", ACCENT), ("加速", ACCENT), ("侧翻角", ACCENT), ("火力", SIGNAL), ("持续", SIGNAL), ("耐久", OK), ("护盾", Color::srgb(0.4, 0.62, 1.0)), ("能量", WARN)] {
         bars.push(spawn_stat(commands, f, perf, l, c));
     }
     commands.insert_resource(StatBars(bars));
@@ -537,8 +566,14 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
             ChildOf(root),
         ))
         .id();
-    for (k, v) in [("左键", "放置"), ("右键", "删除"), ("左键拖动", "旋转"), ("右键拖动", "平移"), ("滚轮", "缩放"), ("Alt+点击", "吸取"), ("Shift+方向键", "平移整机")] {
-        commands.spawn((row(6.0), ChildOf(hints), children![(Node { padding: UiRect::axes(px(6), px(1)), border: px(1).all(), ..default() }, BorderColor::all(LINE_HI), children![text(f, k, 11.0, MUTED)]), text(f, v, 12.0, INK.with_alpha(0.7))]));
+    for (k, v) in [("左键", "放置"), ("右键", "删除"), ("左键拖动", "旋转"), ("右键拖动", "平移"), ("滚轮", "缩放"), ("Alt+点击", "吸取"), ("Shift+方向键", "平移整车")] {
+        // each on a dark chip: the pad under them is bright concrete
+        commands.spawn((
+            Node { column_gap: px(6), align_items: AlignItems::Center, padding: UiRect::axes(px(8), px(4)), ..default() },
+            BackgroundColor(PANEL_SOLID.with_alpha(0.9)),
+            ChildOf(hints),
+            children![(tech(f, k, 13.0, ACCENT), TextLayout::no_wrap()), (text(f, v, 12.0, INK), TextLayout::no_wrap())],
+        ));
     }
 }
 
@@ -701,7 +736,7 @@ fn edit_keys(keys: Res<ButtonInput<KeyCode>>, focus: Res<InputFocus>, editing: Q
     let digits = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9, KeyCode::Digit0, KeyCode::Minus, KeyCode::Equal];
     for (i, k) in digits.iter().enumerate() {
         if keys.just_pressed(*k) {
-            w.write(UiAction::SelectType(BlockType::ALL[i]));
+            w.write(UiAction::SelectType(KEYED[i]));
         }
     }
     for (k, a) in [
@@ -762,7 +797,7 @@ fn hangar_actions(mut msgs: MessageReader<UiAction>, mut hangar: ResMut<Hangar>,
                 hangar.mirror = !hangar.mirror;
                 toasts.push(if hangar.mirror { "镜像开启：左右同时放置" } else { "镜像关闭" }, ToastKind::Info);
             }
-            UiAction::Clear => modal.show("清空机体？", "会删掉所有方块，只留下驾驶舱。之后可以用「撤销」找回。", vec![("取消", UiAction::CloseModal, Kind::Normal), ("清空", UiAction::ClearConfirmed, Kind::Danger)], None),
+            UiAction::Clear => modal.show("清空战车？", "会删掉所有方块，只留下驾驶室。之后可以用「撤销」找回。", vec![("取消", UiAction::CloseModal, Kind::Normal), ("清空", UiAction::ClearConfirmed, Kind::Danger)], None),
             UiAction::ClearConfirmed => {
                 modal.0 = None;
                 let name = hangar.design.name.clone();
@@ -858,8 +893,6 @@ fn refresh_ui(
                 Plate {
                     fill: if c.level == Level::Ok { tone(Color::WHITE, 0.045) } else { tone(col, 0.14) },
                     edge: if c.level == Level::Ok { LINE } else { col.with_alpha(0.4) },
-                    chamfer: 8.0,
-                    corners: BR,
                     ..default()
                 },
                 Hovered::default(),
@@ -882,10 +915,9 @@ fn refresh_ui(
 
     let vals = [
         (s.cost / 350.0, crate::screens::menu::cost_label(s.cost)),
-        (s.max_speed / 125.0, format!("{:.0} m/s", s.max_speed)),
-        (s.pitch_rate / 2.0, format!("{:.0} 度/秒", s.pitch_rate.to_degrees())),
-        (s.yaw_rate / 1.7, format!("{:.0} 度/秒", s.yaw_rate.to_degrees())),
-        (s.roll_rate / 3.5, format!("{:.0} 度/秒", s.roll_rate.to_degrees())),
+        (s.max_speed / 36.0, format!("{:.0} km/h", s.max_speed * 3.6)),
+        (s.accel / 12.0, format!("{:.1} m/s²", s.accel)),
+        (s.tip / 75.0, if s.tip > 0.0 { format!("{:.0}°", s.tip) } else { "—".into() }),
         (s.dps / 200.0, format!("{:.0} DPS", s.dps)),
         (s.dps_sustained / 200.0, format!("{:.0} DPS", s.dps_sustained)),
         (s.hp / 3500.0, format!("{:.0}", s.hp)),
@@ -905,7 +937,7 @@ fn refresh_ui(
         None if s.energy_draw > 0.0 => "能量够武器一直满火力".to_string(),
         None => "武器不耗能量".to_string(),
     };
-    texts.p1().0 = format!("质量 {:.1}  ·  方块 {}/{}\n推重比 {:.2}  ·  升力比 {:.2}\n{fire}", s.mass, s.n, MAX_BLOCKS, s.twr, s.lift_ratio);
+    texts.p1().0 = format!("车重 {:.0}  ·  方块 {}/{}\n功重比 {:.2}  ·  着地车轮 {}\n{fire}", s.mass, s.n, MAX_BLOCKS, s.power / s.mass.max(1.0), s.grounded.len());
     texts.p0().0 = format!("Y {}", hangar.layer);
     for (act, mut sel) in &mut buttons {
         let on = match &act.0 {
@@ -937,7 +969,7 @@ fn part_detail(t: BlockType) -> String {
             }
         })
         .unwrap_or_default();
-    let weapon = if t.thrust() > 0.0 { format!("{weapon} · 推力 {:.0}", t.thrust()) } else { weapon };
+    let weapon = if t.thrust() > 0.0 { format!("{weapon} · 功率 {:.0}", t.thrust()) } else { weapon };
     format!("造价 {} · 质量 {} · 耐久 {}{}\n{}", i.cost, i.mass, i.hp, weapon, i.info)
 }
 

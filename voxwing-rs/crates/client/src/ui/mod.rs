@@ -1,16 +1,17 @@
 //! The game's UI layer: theme, font selection, the action message every control emits, and
 //! the component kit (`kit`) that screens build from.
 //!
-//! Visual language: a ship's bridge display. Shader-drawn plates with chamfered corners, hairline
-//! edges and faint scanlines (`plate`), teal accent, signal orange reserved for alerts. Three
-//! bundled typefaces: a condensed display face for titles, a squared technical face for numbers
-//! and Latin captions, and a clean CJK sans for body text.
+//! Visual language: field equipment. Square, flat shader-drawn plates on olive-black with warm
+//! off-white ink and hairline edges (`plate`), signal amber as the one accent, hazard stripes only
+//! on the main action, hover shown as an amber line rather than a change of fill. Bundled
+//! typefaces: a blocky CJK display face for titles, a stencil face for the wordmark, a condensed
+//! industrial face for numbers and Latin captions, and a clean CJK sans for body text.
 
 pub mod icons;
 pub mod kit;
 pub mod plate;
 
-pub use plate::{BL, BR, Plate, TL, TR};
+pub use plate::Plate;
 
 use crate::Screen;
 use bevy::picking::hover::HoverMap;
@@ -19,18 +20,22 @@ use bevy::text::{FontWeight, LineHeight};
 use voxwing_shared::blocks::BlockType;
 
 // palette
-pub const PANEL: Color = Color::srgba(0.026, 0.034, 0.045, 0.86);
-pub const PANEL_SOLID: Color = Color::srgb(0.032, 0.041, 0.053);
-pub const LINE: Color = Color::srgba(1.0, 1.0, 1.0, 0.09);
-pub const LINE_HI: Color = Color::srgba(1.0, 1.0, 1.0, 0.22);
-pub const INK: Color = Color::srgb(0.91, 0.945, 0.97);
-pub const MUTED: Color = Color::srgb(0.54, 0.58, 0.62);
-pub const ACCENT: Color = Color::srgb(0.31, 0.84, 0.76);
-pub const ON_ACCENT: Color = Color::srgb(0.02, 0.07, 0.08);
-pub const SIGNAL: Color = Color::srgb(1.0, 0.56, 0.25);
-pub const OK: Color = Color::srgb(0.36, 0.89, 0.56);
-pub const WARN: Color = Color::srgb(1.0, 0.8, 0.3);
-pub const DANGER: Color = Color::srgb(1.0, 0.33, 0.42);
+pub const PANEL: Color = Color::srgba(0.09, 0.094, 0.071, 0.92);
+pub const PANEL_SOLID: Color = Color::srgb(0.11, 0.118, 0.09);
+pub const LINE: Color = Color::srgba(0.93, 0.9, 0.82, 0.14);
+pub const LINE_HI: Color = Color::srgba(0.93, 0.9, 0.82, 0.32);
+pub const INK: Color = Color::srgb(0.925, 0.902, 0.827);
+pub const MUTED: Color = Color::srgb(0.659, 0.639, 0.557);
+/// Signal amber.
+pub const ACCENT: Color = Color::srgb(0.941, 0.659, 0.188);
+pub const ON_ACCENT: Color = Color::srgb(0.09, 0.09, 0.059);
+/// Targets and highlights that must stand apart from the amber.
+pub const SIGNAL: Color = Color::srgb(1.0, 0.48, 0.24);
+pub const OK: Color = Color::srgb(0.56, 0.78, 0.38);
+pub const WARN: Color = Color::srgb(0.95, 0.79, 0.3);
+pub const DANGER: Color = Color::srgb(0.9, 0.29, 0.25);
+/// Olive: friendly tags and secondary marks.
+pub const OLIVE: Color = Color::srgb(0.49, 0.54, 0.27);
 
 // layout scale: every size and gap is a multiple of 4
 /// Inset of screen-level panels and bars from the window edge.
@@ -45,15 +50,16 @@ pub const GAP_S: f32 = 8.0;
 pub const H_MD: f32 = 36.0;
 pub const H_LG: f32 = 52.0;
 
-/// The UI typefaces, all bundled (SIL Open Font License, see `assets/fonts`):
-/// Noto Sans SC for body text, Chakra Petch for numbers and Latin captions, and Smiley Sans
-/// (得意黑) for display titles. Each list ends in system CJK families so names players type with
-/// characters outside the bundled subset still render.
+/// The UI typefaces, all bundled (SIL Open Font License, see `assets/fonts`): Noto Sans SC for
+/// body text, Barlow Condensed for numbers and Latin captions, ZCOOL QingKe HuangYou (站酷庆科黄油体)
+/// for display titles and Saira Stencil One for the wordmark. Each list ends in system CJK
+/// families so names players type with characters outside the bundled subsets still render.
 #[derive(Resource, Clone)]
 pub struct UiFont {
     pub body: FontSource,
     pub tech: FontSource,
     pub display: FontSource,
+    pub stencil: FontSource,
 }
 
 const SYSTEM_CJK: &str = "PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, sans-serif";
@@ -64,18 +70,22 @@ const SYSTEM_CJK: &str = "PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto S
 pub struct BundledFonts(#[allow(dead_code)] Vec<Handle<Font>>);
 
 pub fn load_fonts(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
-    let files: [&[u8]; 6] = [
+    let files: [&[u8]; 5] = [
         include_bytes!("../../assets/fonts/NotoSansSC-VF-subset.ttf"),
-        include_bytes!("../../assets/fonts/SmileySans-Oblique.ttf"),
-        include_bytes!("../../assets/fonts/ChakraPetch-Regular.ttf"),
-        include_bytes!("../../assets/fonts/ChakraPetch-Medium.ttf"),
-        include_bytes!("../../assets/fonts/ChakraPetch-SemiBold.ttf"),
-        include_bytes!("../../assets/fonts/ChakraPetch-Bold.ttf"),
+        include_bytes!("../../assets/fonts/ZCOOLQingKeHuangYou-subset.ttf"),
+        include_bytes!("../../assets/fonts/SairaStencilOne-Regular.ttf"),
+        include_bytes!("../../assets/fonts/BarlowCondensed-SemiBold.ttf"),
+        include_bytes!("../../assets/fonts/BarlowCondensed-Bold.ttf"),
     ];
     let handles = files.into_iter().map(|bytes| fonts.add(Font::from_bytes(bytes.to_vec()))).collect();
     commands.insert_resource(BundledFonts(handles));
     let list = |head: &str| FontSource::Families(format!("{head}, {SYSTEM_CJK}").into());
-    commands.insert_resource(UiFont { body: list("Noto Sans SC"), tech: list("Chakra Petch, Noto Sans SC"), display: list("Smiley Sans, Smiley Sans Oblique, Noto Sans SC") });
+    commands.insert_resource(UiFont {
+        body: list("Noto Sans SC"),
+        tech: list("Barlow Condensed, Noto Sans SC"),
+        display: list("ZCOOL QingKe HuangYou, Noto Sans SC"),
+        stencil: list("Saira Stencil One, Noto Sans SC"),
+    });
 }
 
 fn face(src: &FontSource, size: f32, weight: u16) -> TextFont {
@@ -112,9 +122,14 @@ pub fn tech(font: &UiFont, s: impl Into<String>, size: f32, color: Color) -> imp
     (Text::new(s.into()), face(&font.tech, size, 600), TextColor(color))
 }
 
-/// The display face, for the few hero moments only (game title, combat announcements).
+/// The display face: the game title, screen titles, vehicle names, combat announcements.
 pub fn display(font: &UiFont, s: impl Into<String>, size: f32, color: Color) -> impl Bundle {
     (Text::new(s.into()), face(&font.display, size, 400), TextColor(color))
+}
+
+/// The stencil face, for the BLOCKTREAD wordmark.
+pub fn stencil(font: &UiFont, s: impl Into<String>, size: f32, color: Color) -> impl Bundle {
+    (Text::new(s.into()), face(&font.stencil, size, 400), TextColor(color))
 }
 
 /// Settings a slider or toggle can change.

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use voxwing_shared::analysis::{analyze, place_reason};
 use voxwing_shared::blocks::BlockType;
-use voxwing_shared::flight::{InputCmd, Kin, step_flight};
+use voxwing_shared::flight::{InputCmd, Kin};
 use voxwing_shared::glam::{IVec3, Quat, Vec3};
 use voxwing_shared::presets::{PRESETS, preset};
 use voxwing_shared::protocol::*;
@@ -18,29 +18,29 @@ fn presets_pass_all_checks() {
 }
 
 #[test]
-fn falcon_stats_match_web_version() {
-    let s = analyze(&preset("falcon")).stats;
-    assert_eq!(s.n, 55);
-    assert!((s.mass - 52.0).abs() < 0.01, "mass {}", s.mass);
-    assert_eq!(s.engines.len(), 3);
-    assert_eq!((s.left, s.right), (10, 10));
-    assert!((s.max_speed - 92.0).abs() < 1.0, "speed {}", s.max_speed);
-    assert!((s.pitch_rate.to_degrees() - 76.0).abs() < 1.5, "turn {}", s.pitch_rate.to_degrees());
+fn the_buggys_numbers() {
+    let s = analyze(&preset("rover")).stats;
+    assert_eq!(s.n, 49);
+    assert!((s.mass - 51.6).abs() < 0.01, "mass {}", s.mass);
+    assert_eq!((s.wheels.len(), s.grounded.len()), (4, 4));
+    assert!((s.cost - 74.8).abs() < 0.05, "cost {}", s.cost);
+    assert!((s.power - 26.0).abs() < 1e-4);
+    assert!((60.0..75.0).contains(&s.tip), "tip {}", s.tip);
 }
 
 #[test]
-fn barrels_and_nozzles_block_placement() {
-    let d = preset("falcon");
-    // lasers sit at (+-2, 0, -1); their barrel occupies (2, 0, -2)
-    assert!(place_reason(&d.blocks, IVec3::new(2, 0, -2), BlockType::Hull).unwrap().contains("枪管"));
-    // engines at z = 4; nozzle cell is z = 5
-    assert!(place_reason(&d.blocks, IVec3::new(0, 0, 5), BlockType::Armor).unwrap().contains("尾喷口"));
+fn barrels_block_placement_but_engines_dont() {
+    let d = preset("rover");
+    // cannons sit at (+-1, 1, -2); the barrel occupies (1, 1, -3)
+    assert!(place_reason(&d.blocks, IVec3::new(1, 1, -3), BlockType::Hull).unwrap().contains("枪管"));
+    // an engine needs no clear exhaust on a vehicle: the cell behind it takes a block
+    assert!(place_reason(&d.blocks, IVec3::new(0, 1, 4), BlockType::Armor).is_none());
     assert!(place_reason(&d.blocks, IVec3::new(0, -1, 0), BlockType::Hull).is_none());
 }
 
 #[test]
 fn ray_hits_the_nose_first() {
-    let body = ShipBody::new(Arc::new(preset("falcon")));
+    let body = ShipBody::new(Arc::new(preset("rover")));
     let hit = body.ray(Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.0, 0.0, -60.0) - body.com0 * Vec3::new(1.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 60.0));
     let (i, p) = hit.expect("should hit");
     let b = body.design.blocks[i];
@@ -49,35 +49,32 @@ fn ray_hits_the_nose_first() {
 }
 
 #[test]
-fn cutting_the_wing_root_drops_the_outer_wing() {
-    let mut body = ShipBody::new(Arc::new(preset("falcon")));
+fn shooting_off_an_axle_drops_its_wheel() {
+    let mut body = ShipBody::new(Arc::new(preset("rover")));
     let n0 = body.stats.n;
-    let wings0 = body.stats.wings.len();
-    // the left wing hangs off column x = -2; remove its four root blocks
-    let roots: Vec<usize> = (0..body.design.blocks.len()).filter(|&i| body.design.blocks[i].x == -2 && body.design.blocks[i].ty == BlockType::Wing).collect();
-    assert_eq!(roots.len(), 4);
-    for i in roots {
-        body.destroy(i);
-    }
+    // the front left wheel hangs off the axle stub at (-2, 0, -3)
+    let axle = (0..body.design.blocks.len()).find(|&i| body.design.blocks[i].pos() == IVec3::new(-2, 0, -3)).unwrap();
+    body.destroy(axle);
     let pieces = body.settle();
-    assert_eq!(pieces.len(), 1, "outer left wing should fall off as one piece");
-    assert_eq!(pieces[0].len(), 6);
-    assert_eq!(body.stats.n, n0 - 10);
-    assert_eq!(body.stats.wings.len(), wings0 - 10);
-    assert!(body.stats.roll_drift < 0.0, "fewer left wings should roll the ship left");
+    assert_eq!(pieces.len(), 1, "the wheel should fall off");
+    assert_eq!(body.design.blocks[pieces[0][0]].ty, BlockType::Wheel);
+    assert_eq!(body.stats.n, n0 - 2);
+    assert_eq!(body.wheels.len(), 3);
     assert!(body.cockpit_alive());
 }
 
 #[test]
-fn flight_and_weapons_are_deterministic() {
-    let body = ShipBody::new(Arc::new(preset("falcon")));
+fn driving_and_weapons_are_deterministic() {
+    let body = ShipBody::new(Arc::new(voxwing_shared::presets::rover()));
+    let ground = voxwing_shared::terrain::Terrain::generate(5);
     let run = || {
-        let mut k = Kin::new(Vec3::new(0.0, 0.0, 600.0), Quat::IDENTITY, &body.stats);
+        let y = voxwing_shared::drive::spawn_height(&body, &ground, 0.0, 0.0, Quat::IDENTITY);
+        let mut k = Kin::new(Vec3::new(0.0, y, 0.0), Quat::IDENTITY, &body.stats);
         let mut ws = WeaponState::new(&body);
         let mut shots = Vec::new();
         for t in 0..300u32 {
-            let inp = InputCmd { tick: t, pitch: 40, yaw: -20, roll: 10, throttle: 200, buttons: 1, ..Default::default() };
-            step_flight(&mut k, &body.stats, &inp, voxwing_shared::DT, 1.0);
+            let inp = InputCmd { tick: t, drive: 110, steer: -40, buttons: 1, ..Default::default() };
+            voxwing_shared::drive::step_drive(&mut k, &body, &inp, &ground, voxwing_shared::DT);
             step_weapons(&mut k, &body, &mut ws, &inp, voxwing_shared::DT, t, false, &mut shots);
         }
         (k, shots.len())
@@ -125,7 +122,7 @@ fn spectators_join_with_their_own_message() {
     enum OldHello {
         Hello { version: u32, name: String, design: voxwing_shared::blocks::Design, balance: u64 },
     }
-    let old = encode(&OldHello::Hello { version: 3, name: "x".into(), design: preset("falcon"), balance: 1 });
+    let old = encode(&OldHello::Hello { version: 3, name: "x".into(), design: preset("rover"), balance: 1 });
     assert!(decode::<ClientMsg>(&old).is_none_or(|m| !matches!(m, ClientMsg::Hello { version: 4.., .. })));
     assert_eq!(hello_version(&old), Some(3));
     let w = ClientMsg::Watch { version: 9, name: "x".into(), balance: 1 };

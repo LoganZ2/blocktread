@@ -1,11 +1,9 @@
-//! Player settings and saved designs, stored as JSON under ~/.voxwing.
-//! Designs use the same `VW1.` share code format as the web version.
+//! Player settings and saved vehicle designs, stored as JSON under ~/.voxwing.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use voxwing_shared::blocks::{Block, BlockType, Design};
 use voxwing_shared::presets::{PRESETS, preset};
@@ -48,7 +46,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { name: "飞行员".into(), host_mode: "ffa".into(), host_budget: String::new(), region: String::new(), invert_y: false, sound: true, volume: 0.8, music: 0.6, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true }
+        Settings { name: "车长".into(), host_mode: "ffa".into(), host_budget: String::new(), region: String::new(), invert_y: false, sound: true, volume: 0.8, music: 0.6, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true }
     }
 }
 
@@ -179,7 +177,8 @@ fn unpack(p: Packed) -> Design {
     Design { name: p.n, blocks }
 }
 
-/// Your ships in the order the hangar shows them, and which one is selected (`ships.json`).
+/// Your vehicles in the order the garage shows them, and which one is selected (`vehicles.json`).
+/// The flight version's planes stay in `ships.json`, untouched.
 #[derive(Clone, Debug)]
 pub struct Fleet {
     pub ships: Vec<Design>,
@@ -192,10 +191,12 @@ struct FleetFile {
     ships: Vec<Packed>,
 }
 
+const FLEET_FILE: &str = "vehicles.json";
+
 pub fn load_fleet() -> Fleet {
-    let mut fleet = match read::<FleetFile>("ships.json") {
+    let mut fleet = match read::<FleetFile>(FLEET_FILE) {
         Some(f) => Fleet { ships: f.ships.into_iter().map(unpack).collect(), current: f.current },
-        None => old_fleet(),
+        None => Fleet { ships: Vec::new(), current: 0 },
     };
     if fleet.ships.is_empty() {
         fleet.ships = PRESETS.iter().map(|p| preset(p.key)).collect();
@@ -205,32 +206,23 @@ pub fn load_fleet() -> Fleet {
 }
 
 pub fn save_fleet(f: &Fleet) {
-    write("ships.json", &FleetFile { current: f.current, ships: f.ships.iter().map(pack).collect() });
+    write(FLEET_FILE, &FleetFile { current: f.current, ships: f.ships.iter().map(pack).collect() });
 }
 
-/// Before ships.json: named saves (designs.json) plus the ship last on the bench (current.json).
-fn old_fleet() -> Fleet {
-    let mut ships: Vec<Design> = read::<BTreeMap<String, Packed>>("designs.json").unwrap_or_default().into_values().map(unpack).collect();
-    let mut current = 0;
-    if let Some(c) = read::<Packed>("current.json").map(unpack).filter(|d| !d.blocks.is_empty()) {
-        match ships.iter().position(|s| s.name == c.name) {
-            Some(i) => {
-                ships[i] = c;
-                current = i;
-            }
-            None => ships.insert(0, c),
-        }
-    }
-    Fleet { ships, current }
-}
+/// Share codes: `BT1.` and the design as base64 JSON. (The flight version's `VW1.` codes hold
+/// planes, which can't drive.)
+const SHARE: &str = "BT1.";
 
 pub fn encode_share(d: &Design) -> String {
-    format!("VW1.{}", B64.encode(serde_json::to_vec(&pack(d)).unwrap_or_default()))
+    format!("{SHARE}{}", B64.encode(serde_json::to_vec(&pack(d)).unwrap_or_default()))
 }
 
 pub fn decode_share(code: &str) -> Result<Design, String> {
     let s: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    let body = s.strip_prefix("VW1.").ok_or("分享码应该以 VW1. 开头")?;
+    if s.starts_with("VW1.") {
+        return Err("这是飞机版的分享码，飞机开不了".into());
+    }
+    let body = s.strip_prefix(SHARE).ok_or(format!("分享码应该以 {SHARE} 开头"))?;
     let bytes = B64.decode(body).map_err(|_| "分享码不完整")?;
     let p: Packed = serde_json::from_slice(&bytes).map_err(|_| "分享码内容无法识别")?;
     let d = unpack(p);

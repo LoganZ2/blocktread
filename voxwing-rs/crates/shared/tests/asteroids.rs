@@ -1,11 +1,13 @@
-//! Asteroid collisions must happen where the rock is drawn.
+//! Rock collisions must happen where the rock is drawn.
 
 use std::sync::Arc;
-use voxwing_shared::flight::{InputCmd, Kin, collide_asteroids, step_flight};
-use voxwing_shared::glam::{Quat, Vec3};
-use voxwing_shared::presets::preset;
+use voxwing_shared::drive::{spawn_height, step_drive};
+use voxwing_shared::flight::{InputCmd, Kin, collide_asteroids, look_rotation};
+use voxwing_shared::glam::Vec3;
+use voxwing_shared::presets::rover;
 use voxwing_shared::ship::ShipBody;
-use voxwing_shared::world::{generate_asteroids, rock_radius, tick_time};
+use voxwing_shared::terrain::Terrain;
+use voxwing_shared::world::{generate_boulders, rock_radius, tick_time};
 use voxwing_shared::DT;
 
 /// Directions spread evenly over the sphere (golden spiral).
@@ -20,7 +22,7 @@ fn directions(n: usize) -> impl Iterator<Item = Vec3> {
 
 #[test]
 fn surface_matches_rendered_mesh() {
-    for a in generate_asteroids(42).iter().take(16) {
+    for a in generate_boulders(42, &Terrain::generate(42)).iter().take(16) {
         let rot = a.rotation(tick_time(123_456));
         for d in directions(300) {
             // the vertex exactly where the renderer puts it: unit direction pushed out by
@@ -36,20 +38,23 @@ fn surface_matches_rendered_mesh() {
 }
 
 #[test]
-fn ships_stop_at_the_drawn_surface() {
-    let body = ShipBody::new(Arc::new(preset("falcon")));
-    let rocks = generate_asteroids(7);
+fn vehicles_stop_at_the_drawn_surface() {
+    let body = ShipBody::new(Arc::new(rover()));
+    let ground = Terrain::generate(7);
+    let rocks = generate_boulders(7, &ground);
     let mut deepest = 0.0f32;
     for (ai, a) in rocks.iter().enumerate().take(10) {
-        for (di, dir) in directions(12).enumerate() {
-            // fly flat out straight at the rock from outside its bounding sphere
-            let rot = Quat::from_rotation_arc(Vec3::NEG_Z, -dir);
-            let mut k = Kin::new(a.pos + dir * (a.r + 25.0), rot, &body.stats);
-            k.vel = -dir * 160.0;
+        for di in 0..8 {
+            // drive flat out at the rock from outside its bounding sphere
+            let ang = di as f32 * std::f32::consts::TAU / 8.0;
+            let dir = Vec3::new(ang.cos(), 0.0, ang.sin());
+            let at = a.pos + dir * (a.r + 25.0);
+            let rot = look_rotation(Vec3::ZERO, -dir, Vec3::Y);
+            let mut k = Kin::new(at.with_y(spawn_height(&body, &ground, at.x, at.z, rot)), rot, &body.stats);
             let start = (ai * 1000 + di * 50) as u32;
-            for tick in start..start + 180 {
-                let cmd = InputCmd { tick, throttle: 255, ..Default::default() };
-                step_flight(&mut k, &body.stats, &cmd, DT, 1.0);
+            for tick in start..start + 360 {
+                let cmd = InputCmd { tick, drive: 127, ..Default::default() };
+                step_drive(&mut k, &body, &cmd, &ground, DT);
                 let t = tick_time(tick);
                 collide_asteroids(&mut k, &body, std::slice::from_ref(a), t);
                 let r = a.rotation(t);
@@ -57,7 +62,7 @@ fn ships_stop_at_the_drawn_surface() {
                     deepest = deepest.min(a.surface(body.world(k.pos, k.rot, i), r).0);
                 }
             }
-            assert!(k.pos.distance(a.pos) > a.r * 0.4, "ship ended up inside rock {ai} from direction {di}");
+            assert!(k.pos.distance(a.pos) > a.r * 0.4, "vehicle ended up inside rock {ai} from direction {di}");
         }
     }
     // block centres may graze the surface (they are half a metre across) but never sink in

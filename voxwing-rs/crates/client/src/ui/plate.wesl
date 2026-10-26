@@ -1,6 +1,6 @@
-// The surface of every panel, button, chip and gauge: flat fill with chamfered corners, a hairline
-// edge, an optional accent strip, faint grain, and segmented gauges. Deliberately no gradients or
-// glow: hover and selection change flat colours only.
+// The surface of every panel, button, chip and gauge: flat fill with optional chamfered corners, a
+// hairline edge, an accent strip, faint grain, segmented gauges and a hazard-striped band.
+// Deliberately no gradients or glow: hover and selection change flat colours only.
 
 import bevy_ui_render::ui_vertex_output::UiVertexOutput;
 
@@ -14,6 +14,10 @@ struct Plate {
     // x: chamfered corners (1 TL, 2 TR, 4 BR, 8 BL), y: gauge cells (0 = plain plate), z: gauge fill 0..1,
     // w: physical pixels per logical pixel (sizes above are logical; `in.size` is physical)
     extra: vec4<f32>,
+    // colour of the hazard stripes
+    stripe: vec4<f32>,
+    // x: width of the striped band at the left edge (logical px, 0 = none)
+    more: vec4<f32>,
 }
 
 @group(1) @binding(0) var<uniform> plate: Plate;
@@ -77,6 +81,15 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
             let n = hash(floor(p)) - 0.5;
             let g = sqrt(col.rgb / col.a) + vec3<f32>(n * 0.016 * grain);
             col = vec4<f32>(max(g, vec3<f32>(0.0)) * max(g, vec3<f32>(0.0)) * col.a, col.a);
+        }
+    }
+
+    // hazard stripes: diagonal bands across the left end
+    let band = plate.more.x * scale;
+    if band > 0.0 && p.x < band {
+        let period = 10.0 * scale;
+        if ((p.x + p.y) % period) < period * 0.5 {
+            col = over(col, pm(plate.stripe, 1.0));
         }
     }
 

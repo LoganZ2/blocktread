@@ -1,6 +1,6 @@
 //! Client-side prediction for the local ship.
 //!
-//! Every tick the client simulates its own ship immediately with the shared flight code and keeps
+//! Every tick the client simulates its own ship immediately with the shared vehicle code and keeps
 //! (input, resulting state) per tick. When the server's state for tick S arrives, the client
 //! compares it with what it predicted for S. If they differ it adopts the server's state at S and
 //! replays every newer input on top. The visible jump is hidden by an offset that fades out.
@@ -8,15 +8,16 @@
 use glam::{Quat, Vec3};
 use std::collections::VecDeque;
 use voxwing_shared::DT;
-use voxwing_shared::flight::{InputCmd, Kin, collide_asteroids, step_flight};
+use voxwing_shared::drive::step_drive;
+use voxwing_shared::flight::{InputCmd, Kin, collide_asteroids};
 use voxwing_shared::world::tick_time;
 use voxwing_shared::ship::ShipBody;
+use voxwing_shared::terrain::Terrain;
 use voxwing_shared::weapons::{Shot, WeaponState, step_weapons};
 use voxwing_shared::world::Asteroid;
 
 /// Inputs should reach the server this many ticks before it needs them (jitter buffer).
 pub const TARGET_LEAD: f32 = 3.0;
-pub const PLAYER_TURN_BONUS: f32 = 1.12;
 const HISTORY: usize = 240;
 
 #[derive(Clone)]
@@ -85,9 +86,9 @@ impl Predictor {
         n
     }
 
-    pub fn step(&mut self, cmd: InputCmd, body: &ShipBody, rocks: &[Asteroid], shots: &mut Vec<Shot>) {
+    pub fn step(&mut self, cmd: InputCmd, body: &ShipBody, ground: &Terrain, rocks: &[Asteroid], shots: &mut Vec<Shot>) {
         self.prev = self.kin;
-        step_flight(&mut self.kin, &body.stats, &cmd, DT, PLAYER_TURN_BONUS);
+        step_drive(&mut self.kin, body, &cmd, ground, DT);
         collide_asteroids(&mut self.kin, body, rocks, tick_time(cmd.tick));
         step_weapons(&mut self.kin, body, &mut self.ws, &cmd, DT, cmd.tick, false, shots);
         self.frames.push_back(Frame { tick: cmd.tick, cmd, kin: self.kin, ws: self.ws.clone() });
@@ -118,7 +119,7 @@ impl Predictor {
         self.lead_ema
     }
 
-    pub fn reconcile(&mut self, server_tick: u32, server: &Kin, body: &ShipBody, rocks: &[Asteroid]) {
+    pub fn reconcile(&mut self, server_tick: u32, server: &Kin, body: &ShipBody, ground: &Terrain, rocks: &[Asteroid]) {
         let Some(idx) = self.frames.iter().position(|f| f.tick == server_tick) else { return };
         let f = &self.frames[idx];
         let err = f.kin.pos.distance(server.pos);
@@ -136,7 +137,7 @@ impl Predictor {
             let mut scratch = Vec::new();
             for j in idx + 1..self.frames.len() {
                 let cmd = self.frames[j].cmd;
-                step_flight(&mut kin, &body.stats, &cmd, DT, PLAYER_TURN_BONUS);
+                step_drive(&mut kin, body, &cmd, ground, DT);
                 collide_asteroids(&mut kin, body, rocks, tick_time(cmd.tick));
                 step_weapons(&mut kin, body, &mut ws, &cmd, DT, cmd.tick, false, &mut scratch);
                 self.frames[j].kin = kin;

@@ -94,9 +94,6 @@ pub struct Wreck {
     blocks: Vec<(Vec3, u32)>,
 }
 
-#[derive(Component)]
-pub struct Dust;
-
 #[allow(clippy::too_many_arguments)]
 pub fn particle(commands: &mut Commands, fx: &mut Fx, pos: Vec3, vel: Vec3, life: f32, s0: f32, s1: f32, kind: Kind, drag: f32) {
     if fx.count >= MAX_PARTICLES {
@@ -183,14 +180,6 @@ pub fn bolt(commands: &mut Commands, fx: &Fx, weapon: BlockType, pos: Vec3, vel:
     ));
 }
 
-pub fn spawn_dust(commands: &mut Commands, fx: &mut Fx, mats: &mut Assets<StandardMaterial>) {
-    let m = mats.add(StandardMaterial { base_color: Color::LinearRgba(LinearRgba::rgb(0.5, 0.6, 0.75)), unlit: true, ..default() });
-    for _ in 0..260 {
-        let p = Vec3::new(fx.rng.range(-80.0, 80.0), fx.rng.range(-80.0, 80.0), fx.rng.range(-80.0, 80.0));
-        commands.spawn((Mesh3d(fx.cube.clone()), MeshMaterial3d(m.clone()), Transform::from_translation(p).with_scale(Vec3::splat(0.08)), Dust, DespawnOnExit(Screen::Flight)));
-    }
-}
-
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn update_fx(
     mut commands: Commands,
@@ -202,9 +191,7 @@ pub fn update_fx(
         Query<(Entity, &mut Transform, &mut Bolt)>,
         Query<(Entity, &mut Transform, &mut Debris)>,
         Query<(Entity, &mut Transform, &mut Wreck)>,
-        Query<&mut Transform, With<Dust>>,
     )>,
-    cam: Single<&GlobalTransform, With<crate::MainCamera>>,
 ) {
     let dt = time.delta_secs();
     if session.as_ref().is_some_and(|s| s.paused) {
@@ -247,6 +234,10 @@ pub fn update_fx(
                     }
                 }
             }
+            if !dead && nb.y < core.terrain.height(nb.x, nb.z) {
+                hits.push((nb, b.splash));
+                dead = true;
+            }
             if !dead {
                 for r in &core.rocks {
                     if r.hit_segment(a, nb, r.rotation(rock_t)).is_some() {
@@ -277,7 +268,17 @@ pub fn update_fx(
             commands.entity(e).despawn();
             continue;
         }
+        // pieces fall, and bounce off the ground losing most of their speed
+        d.vel.y -= voxwing_shared::drive::GRAVITY * dt;
         t.translation += d.vel * dt;
+        if let Some(s) = session.as_ref() {
+            let g = s.core.terrain.height(t.translation.x, t.translation.z) + d.size * 0.5;
+            if t.translation.y < g {
+                t.translation.y = g;
+                d.vel = Vec3::new(d.vel.x * 0.5, d.vel.y.abs() * 0.3, d.vel.z * 0.5);
+                d.spin *= 0.5;
+            }
+        }
         t.rotate(Quat::from_axis_angle(d.axis.as_vec3(), d.spin * dt));
         t.scale = Vec3::splat(d.size * (d.life / 0.6).min(1.0));
     }
@@ -286,7 +287,12 @@ pub fn update_fx(
     let mut puffs = Vec::new();
     for (e, mut t, mut w) in q.p3().iter_mut() {
         w.life -= dt;
+        // a falling piece blows up where it hits the ground
+        w.vel.y -= voxwing_shared::drive::GRAVITY * dt;
         t.translation += w.vel * dt;
+        if session.as_ref().is_some_and(|s| t.translation.y < s.core.terrain.height(t.translation.x, t.translation.z) + 0.5) {
+            w.life = 0.0;
+        }
         t.rotate(Quat::from_axis_angle(w.axis.as_vec3(), w.spin * dt));
         puffs.push((t.translation, w.vel));
         if w.life <= 0.0 {
@@ -309,19 +315,5 @@ pub fn update_fx(
     for (pos, vel, n, blocks) in blasts {
         explode(&mut commands, &mut fx, pos, (0.6 + n as f32 / 12.0).min(2.0), vel);
         let _ = blocks;
-    }
-
-    // dust motes wrap around the camera, giving a sense of speed
-    let c = cam.translation();
-    for mut t in q.p4().iter_mut() {
-        let mut d = t.translation - c;
-        for i in 0..3 {
-            if d[i] > 80.0 {
-                d[i] -= 160.0;
-            } else if d[i] < -80.0 {
-                d[i] += 160.0;
-            }
-        }
-        t.translation = c + d;
     }
 }

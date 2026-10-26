@@ -1,8 +1,9 @@
-//! The lobby's ship carousel: your ships stand in a loop in 3D — the last one is followed by a
-//! "new ship" slot, and that by the first ship again. The arrows beside the ship (or ← →) slide to
-//! the previous or next one; the one in view is the ship you fly.
+//! The lobby's vehicle carousel: your vehicles stand parked in a row that loops — the last one is
+//! followed by a "new vehicle" slot, and that by the first again. The arrows beside the vehicle
+//! (or ← →) slide to the previous or next one; the one in view is the vehicle you drive.
 
 use crate::art::BlockArt;
+use crate::flight::ground;
 use crate::hangar::Hangar;
 use crate::ui::icons::Icons;
 use crate::ui::kit::*;
@@ -52,8 +53,10 @@ struct Slide {
     pos: f32,
     /// Each ship's name and size, to notice when the fleet changes.
     built: Vec<(String, usize)>,
-    /// Bounding radius per slot: the ships, then the "new ship" slot.
+    /// Bounding radius per slot: the vehicles, then the "new vehicle" slot.
     radii: Vec<f32>,
+    /// How high each vehicle stands to sit on its wheels.
+    lift: Vec<f32>,
     /// Distance between neighbouring slots.
     gap: f32,
 }
@@ -68,11 +71,16 @@ const NEW_RADIUS: f32 = 4.0;
 
 #[derive(Component)]
 struct CarouselShip(i32);
+
+/// Where the vehicle in view sits on screen (share of the camera distance, up): above the name
+/// plate, level with the arrows at `ROW` per cent down the window.
+const RISE: f32 = 0.06;
+const ROW: f32 = 44.0;
 #[derive(Component)]
 struct NewCard;
-/// A bare glyph that works as a button: no surface. Under the pointer it brightens and moves a
-/// few pixels (an arrow toward where it goes, the plus's corner marks inward) — no colour fill, no
-/// bounce.
+/// A bare glyph that works as a button: no surface. Dark against the daytime scene; under the
+/// pointer it turns amber and moves a few pixels (an arrow toward where it goes, the plus's
+/// corner marks inward) — no fill behind it, no bounce.
 #[derive(Component, Default)]
 struct Glyph {
     /// 0 at rest, 1 hovered; eased.
@@ -95,9 +103,9 @@ struct PartOf(Entity);
 /// Glyph sizes (px): the arrows beside the ship, the frame around the plus.
 const ARROW: f32 = 112.0;
 const PLUS: f32 = 152.0;
-/// Rest and hover alpha of a mark.
-const DIM: f32 = 0.42;
-const LIT: f32 = 0.95;
+/// A mark at rest, and under the pointer.
+const REST: Color = Color::srgba(0.11, 0.118, 0.09, 0.82);
+const LIT: Color = ACCENT;
 
 fn glyph_button(commands: &mut Commands, parent: Entity, node: Node, action: UiAction) -> Entity {
     commands
@@ -119,7 +127,7 @@ fn glyph_button(commands: &mut Commands, parent: Entity, node: Node, action: UiA
 fn spawn_arrow(commands: &mut Commands, parent: Entity, image: Handle<Image>, step: i8) -> Entity {
     let b = glyph_button(commands, parent, Node { width: px(ARROW), height: px(ARROW), ..default() }, UiAction::CarouselStep(step));
     commands.spawn((
-        ImageNode { image, color: INK.with_alpha(DIM), ..default() },
+        ImageNode { image, color: REST, ..default() },
         Node { width: percent(100), height: percent(100), ..default() },
         UiTransform::default(),
         Part::Mark { nudge: Vec2::new(step as f32 * 5.0, 0.0) },
@@ -135,7 +143,7 @@ fn spawn_plus(commands: &mut Commands, f: &UiFont, parent: Entity, image: Handle
     let b = glyph_button(commands, parent, Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(10), ..default() }, UiAction::CarouselNew);
     let frame = commands.spawn((Node { width: px(PLUS), height: px(PLUS), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() }, Pickable::IGNORE, ChildOf(b))).id();
     commands.spawn((
-        ImageNode { image, color: INK.with_alpha(DIM), ..default() },
+        ImageNode { image, color: REST, ..default() },
         Node { width: px(PLUS * 0.62), height: px(PLUS * 0.62), ..default() },
         Part::Mark { nudge: Vec2::ZERO },
         PartOf(b),
@@ -177,13 +185,13 @@ fn spawn_plus(commands: &mut Commands, f: &UiFont, parent: Entity, image: Handle
                     height: px(bh),
                     ..default()
                 },
-                BackgroundColor(INK.with_alpha(0.2)),
+                BackgroundColor(REST),
                 Pickable::IGNORE,
                 ChildOf(corner),
             ));
         }
     }
-    commands.spawn((tech(f, "NEW SHIP", 11.0, MUTED), LetterSpacing::Px(4.0), Part::Caption, PartOf(b), Pickable::IGNORE, ChildOf(b)));
+    commands.spawn((tech(f, "NEW VEHICLE", 13.0, REST), LetterSpacing::Px(4.0), Part::Caption, PartOf(b), Pickable::IGNORE, ChildOf(b)));
     b
 }
 
@@ -212,7 +220,7 @@ fn style_glyphs(
         match part {
             Part::Mark { nudge } => {
                 if let Some(mut img) = img {
-                    img.color = INK.with_alpha(DIM + (LIT - DIM) * h);
+                    img.color = REST.mix(&LIT, h);
                 }
                 if let Some(mut tr) = tr {
                     tr.translation = Val2::px(nudge.x * h, nudge.y * h);
@@ -222,7 +230,7 @@ fn style_glyphs(
                 if let Some(mut tr) = tr {
                     tr.translation = Val2::px(-dir.x * 8.0 * h, -dir.y * 8.0 * h);
                 }
-                let c = INK.with_alpha(0.2).mix(&ACCENT.with_alpha(0.85), h);
+                let c = REST.mix(&LIT, h);
                 for &bar in kids.into_iter().flatten() {
                     if let Ok(mut bg) = bars.get_mut(bar) {
                         bg.0 = c;
@@ -231,7 +239,7 @@ fn style_glyphs(
             }
             Part::Caption => {
                 if let Some(mut t) = txt {
-                    t.0 = MUTED.mix(&INK, h);
+                    t.0 = REST.mix(&LIT, h);
                 }
             }
         }
@@ -245,7 +253,7 @@ fn enter_carousel(mut commands: Commands, hangar: Res<Hangar>, mut car: ResMut<C
     // the arrows, either side of the ship
     let row = commands
         .spawn((
-            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(36), margin: UiRect::top(px(-ARROW / 2.0)), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() },
+            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(ROW), margin: UiRect::top(px(-ARROW / 2.0)), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() },
             Pickable::IGNORE,
             IgnoreHover,
             // above the "new ship" plus sliding past
@@ -262,7 +270,7 @@ fn enter_carousel(mut commands: Commands, hangar: Res<Hangar>, mut car: ResMut<C
     // the plus in the "new ship" slot, sliding along with the ships
     let holder = commands
         .spawn((
-            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(36), margin: UiRect::top(px(-PLUS / 2.0)), justify_content: JustifyContent::Center, ..default() },
+            Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: percent(ROW), margin: UiRect::top(px(-PLUS / 2.0)), justify_content: JustifyContent::Center, ..default() },
             Pickable::IGNORE,
             IgnoreHover,
             DespawnOnExit(Screen::Menu),
@@ -283,10 +291,12 @@ fn spawn_ships(mut commands: Commands, hangar: Res<Hangar>, mut slide: ResMut<Sl
         commands.entity(e).despawn();
     }
     let mut radii = Vec::with_capacity(ships.len() + 1);
+    slide.lift.clear();
     for (i, d) in ships.iter().enumerate() {
         let a = analyze(d);
         radii.push(a.stats.radius);
-        let root = commands.spawn((Transform::from_xyz(0.0, 0.0, 0.0), Visibility::Hidden, CarouselShip(i as i32), DespawnOnExit(Screen::Menu))).id();
+        slide.lift.push(ground::park_height(d, a.stats.com));
+        let root = commands.spawn((Transform::from_rotation(Quat::from_rotation_y(super::PARKED)), Visibility::Hidden, CarouselShip(i as i32), DespawnOnExit(Screen::Menu))).id();
         for b in &d.blocks {
             art.spawn_block(&mut commands, &mut mats, root, b, b.pos().as_vec3() - a.stats.com, 3);
         }
@@ -347,18 +357,15 @@ fn slide(
         if *vis != want {
             *vis = want;
         }
-        tr.translation = Vec3::new(d * slide.gap, (t * 0.8).sin() * 0.25, 0.0);
-        tr.rotation = Quat::from_rotation_y(t * 0.22 + 2.4) * Quat::from_rotation_x(0.08 * (t * 0.5).sin());
+        // parked in a row along x, on their wheels
+        tr.translation = Vec3::new(d * slide.gap, slide.lift.get(s.0 as usize).copied().unwrap_or(0.0), 0.0);
     }
-    // the camera frames the ship in front: closer for small ones, a little high above the ship bar
+    // the camera frames the vehicle in front: closer for small ones
     let (mut ct, camera) = cam.into_inner();
     let k = pos.floor();
     let (a, b) = ((k as i32).rem_euclid(len as i32) as usize, (k as i32 + 1).rem_euclid(len as i32) as usize);
     let r = slide.radii[a] + (slide.radii[b] - slide.radii[a]) * (pos - k);
-    let dist = r * 3.0 + 11.0;
-    let aim = Vec3::new(0.0, -r * 0.3 - 1.0, 0.0);
-    let sway = Vec3::new((t * 0.1).sin() * 2.0, 0.0, 0.0);
-    *ct = Transform::from_translation(aim + Vec3::new(0.0, dist * 0.22, dist) + sway).looking_at(aim, Vec3::Y);
+    *ct = super::parked_view(r, t, Vec2::new(0.0, RISE));
     // the plus moves with the ships, a screen's worth per slot
     let w = camera.logical_viewport_size().map_or(1440.0, |s| s.x);
     let d = wrap((len - 1) as f32 - pos, len as f32);

@@ -26,16 +26,16 @@ fn the_table_parses_and_names_every_block() {
 #[test]
 fn presets_land_in_their_tiers() {
     let tier = |key: &str| balance().tier_for(analyze(&preset(key)).stats.cost).map(|t| t.key.clone());
-    assert_eq!(tier("hummingbird").as_deref(), Some("light"));
-    assert_eq!(tier("falcon").as_deref(), Some("medium"));
-    assert_eq!(tier("stinger").as_deref(), Some("medium"));
+    assert_eq!(tier("rover").as_deref(), Some("light"));
+    assert_eq!(tier("bison").as_deref(), Some("medium"));
+    assert_eq!(tier("scorpion").as_deref(), Some("medium"));
     assert_eq!(tier("rhino").as_deref(), Some("heavy"));
 }
 
 #[test]
 fn every_extra_gun_costs_more_than_the_last() {
-    // the same laser added to a gunless ship and then to one with several guns
-    let mut d = preset("falcon");
+    // the same laser added to a gunless vehicle and then to one with several guns
+    let mut d = preset("rover");
     d.blocks.retain(|b| b.ty.weapon().is_none());
     let bare = stats(&d).cost;
     let spots = [(3, 0, 0), (-3, 0, 0), (0, -1, 0), (0, -1, 1)];
@@ -50,16 +50,16 @@ fn every_extra_gun_costs_more_than_the_last() {
 }
 
 #[test]
-fn bigger_ships_have_tougher_cockpits() {
+fn bigger_vehicles_have_tougher_cabs() {
     let cockpit = |key: &str| {
         let body = ShipBody::new(Arc::new(preset(key)));
         let i = body.design.blocks.iter().position(|b| b.ty == BlockType::Cockpit).unwrap();
         body.block_max[i]
     };
-    assert!(cockpit("rhino") > cockpit("falcon") * 1.5);
-    assert!(cockpit("falcon") > BlockType::Cockpit.info().hp * 1.5, "no longer one hit from any big gun");
-    // the ship's total includes it, and repairs restore it
-    let mut body = ShipBody::new(Arc::new(preset("falcon")));
+    assert!(cockpit("rhino") > cockpit("rover") * 1.5);
+    assert!(cockpit("rover") > BlockType::Cockpit.info().hp * 1.5, "no longer one hit from any big gun");
+    // the vehicle's total includes it, and repairs restore it
+    let mut body = ShipBody::new(Arc::new(preset("rover")));
     assert!((body.max_hp - body.block_max.iter().sum::<f32>()).abs() < 1e-2);
     body.hp.iter_mut().for_each(|h| *h *= 0.5);
     body.repair();
