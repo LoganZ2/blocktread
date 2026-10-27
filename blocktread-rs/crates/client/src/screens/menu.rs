@@ -166,8 +166,8 @@ pub fn vehicle_stats(s: &blocktread_shared::analysis::Stats, budget: &str) -> [(
     let cap = blocktread_shared::balance::balance().tier(budget).map_or(350.0, |t| t.budget);
     [
         ("造价", s.cost / cap, cost_label(s.cost), INK.with_alpha(0.7)),
-        ("极速", s.max_speed / 36.0, format!("{:.0} km/h", s.max_speed * 3.6), ACCENT),
-        ("加速", s.accel / 12.0, format!("{:.1} m/s²", s.accel), ACCENT),
+        ("极速", s.max_speed / 47.0, format!("{:.0} km/h", s.max_speed * 3.6), ACCENT),
+        ("加速", s.accel / 16.0, format!("{:.1} m/s²", s.accel), ACCENT),
         ("火力", s.dps / 250.0, format!("{:.0} DPS", s.dps), SIGNAL),
         ("耐久", s.hp / 5000.0, format!("{:.0}", s.hp), OK),
         ("护盾", s.shield_cap / 200.0, if s.shield_cap > 0.0 { format!("{:.0}", s.shield_cap) } else { "无".into() }, Color::srgb(0.4, 0.62, 1.0)),

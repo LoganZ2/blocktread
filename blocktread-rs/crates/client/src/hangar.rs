@@ -913,8 +913,8 @@ fn refresh_ui(
 
     let vals = [
         (s.cost / 350.0, crate::screens::menu::cost_label(s.cost)),
-        (s.max_speed / 36.0, format!("{:.0} km/h", s.max_speed * 3.6)),
-        (s.accel / 12.0, format!("{:.1} m/s²", s.accel)),
+        (s.max_speed / 47.0, format!("{:.0} km/h", s.max_speed * 3.6)),
+        (s.accel / 16.0, format!("{:.1} m/s²", s.accel)),
         (s.tip / 75.0, if s.tip > 0.0 { format!("{:.0}°", s.tip) } else { "—".into() }),
         (s.dps / 200.0, format!("{:.0} DPS", s.dps)),
         (s.dps_sustained / 200.0, format!("{:.0} DPS", s.dps_sustained)),

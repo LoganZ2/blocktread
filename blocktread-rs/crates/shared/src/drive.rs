@@ -22,7 +22,7 @@ const BLOCK_R: f32 = 0.5;
 /// Inertia on top of the blocks' own: steadier over bumps.
 const INERTIA_SCALE: f32 = 1.6;
 /// Acceleration per unit of drive power over mass, and per unit of thrust over mass (boost).
-const DRIVE: f32 = 11.0;
+const DRIVE: f32 = 14.5;
 const THRUST: f32 = 11.5;
 /// Energy a boost burns per second: a base, and more for every unit of thrust.
 const BOOST_DRAIN: f32 = 25.0;
@@ -43,7 +43,7 @@ pub fn performance_of<'a>(movers: impl Iterator<Item = &'a DriveSpec>, mass: f32
         return (0.0, 0.0);
     }
     let pw = power / mass.max(1.0);
-    ((DRIVE * pw).clamp(1.5, 12.0), paced / power * (0.55 + 0.7 * pw).clamp(0.6, 1.0))
+    ((DRIVE * pw).clamp(2.0, 16.0), paced / power * (0.55 + 0.7 * pw).clamp(0.6, 1.0))
 }
 
 /// `performance_of` for a vehicle's surviving movers.
@@ -53,7 +53,7 @@ pub fn performance(body: &ShipBody) -> (f32, f32) {
 
 /// How far the front wheels turn (rad, positive right) for a steering input at a forward speed.
 pub fn steer_angle(steer: f32, speed: f32) -> f32 {
-    steer * STEER / (1.0 + speed.abs() / 14.0)
+    steer * STEER / (1.0 + speed.abs() / 18.0)
 }
 
 /// Where a wheel hanging from `mount` (along `-up`) meets the ground: the distance along the

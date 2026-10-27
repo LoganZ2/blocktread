@@ -107,9 +107,9 @@ pub fn wheel_hold(blocks: &[Block], occ: &Occupancy, at: IVec3) -> Hold {
 /// A wheel's tyre width.
 fn tyre_width(t: BlockType) -> f32 {
     match t {
-        BlockType::SmallWheel => 0.5,
+        BlockType::SmallWheel => 0.56,
         BlockType::BigWheel => 0.8,
-        _ => 0.62,
+        _ => 0.7,
     }
 }
 
@@ -344,9 +344,13 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     // wheels, by radius and width: the tyre, its rounded shoulders, the rim and its lip, the hub
     let wheel_r = |t: BlockType| t.drive().map_or(0.7, |d| d.radius);
     let (rs, rw, rb) = (wheel_r(BlockType::SmallWheel), wheel_r(BlockType::Wheel), wheel_r(BlockType::BigWheel));
-    let small = (m(Cylinder::new(rs - 0.02, 0.5).into()), m(Torus { minor_radius: 0.05, major_radius: rs - 0.07 }.into()), m(Cylinder::new(0.3, 0.52).into()), m(Torus { minor_radius: 0.03, major_radius: 0.3 }.into()), m(Cylinder::new(0.1, 0.58).into()));
-    let road = (m(Cylinder::new(rw - 0.04, 0.62).into()), m(Torus { minor_radius: 0.08, major_radius: rw - 0.1 }.into()), m(Cylinder::new(0.4, 0.64).into()), m(Torus { minor_radius: 0.035, major_radius: 0.4 }.into()), m(Cylinder::new(0.12, 0.72).into()));
-    let big = (m(Cylinder::new(rb - 0.11, 0.8).into()), m(Torus { minor_radius: 0.1, major_radius: rb - 0.17 }.into()), m(Cylinder::new(0.5, 0.82).into()), m(Torus { minor_radius: 0.045, major_radius: 0.5 }.into()), m(Cylinder::new(0.16, 0.92).into()));
+    let (ws, ww, wb) = (tyre_width(BlockType::SmallWheel), tyre_width(BlockType::Wheel), tyre_width(BlockType::BigWheel));
+    // rims and hubs in proportion to the wheel; the hub reaches out past the tyre into the strut
+    let (rim_s, rim_w, rim_b) = (rs * 0.6, rw * 0.57, rb * 0.53);
+    let (hub_s, hub_w, hub_b) = (rs * 0.2, rw * 0.17, rb * 0.17);
+    let small = (m(Cylinder::new(rs - 0.02, ws).into()), m(Torus { minor_radius: 0.05, major_radius: rs - 0.07 }.into()), m(Cylinder::new(rim_s, ws + 0.02).into()), m(Torus { minor_radius: 0.03, major_radius: rim_s }.into()), m(Cylinder::new(hub_s, ws + 0.08).into()));
+    let road = (m(Cylinder::new(rw - 0.04, ww).into()), m(Torus { minor_radius: 0.08, major_radius: rw - 0.1 }.into()), m(Cylinder::new(rim_w, ww + 0.02).into()), m(Torus { minor_radius: 0.035, major_radius: rim_w }.into()), m(Cylinder::new(hub_w, ww + 0.1).into()));
+    let big = (m(Cylinder::new(rb - 0.11, wb).into()), m(Torus { minor_radius: 0.1, major_radius: rb - 0.17 }.into()), m(Cylinder::new(rim_b, wb + 0.02).into()), m(Torus { minor_radius: 0.045, major_radius: rim_b }.into()), m(Cylinder::new(hub_b, wb + 0.12).into()));
     let pad_glow = m(Circle::new(0.42).into());
     let tube_s = m(Cylinder::new(0.1, 0.12).into());
     let cone_s = m(Cone { radius: 0.08, height: 0.2 }.into());
@@ -523,28 +527,28 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         v
     };
     // 小轮: a slick tyre, three spokes
-    let mut v = body(&small, tyre_width(SmallWheel), 0.04, &rim);
-    v.extend(spokes(3, 0.52, 0.2, 0.2));
+    let mut v = body(&small, ws, 0.04, &rim);
+    v.extend(spokes(3, ws + 0.02, rim_s - hub_s, (rim_s + hub_s) / 2.0));
     parts[SmallWheel.index()] = v;
     // 车轮: shallow ribs round the tread, five spokes
-    let mut v = body(&road, tyre_width(Wheel), 0.06, &rim);
-    for k in 0..18 {
-        let a = k as f32 * tau / 18.0;
-        v.push(p(&cube, &rubber, round(0.0, rw - 0.02, a), [a, 0.0, 0.0], [0.54, 0.05, 0.1]));
+    let mut v = body(&road, ww, 0.06, &rim);
+    for k in 0..22 {
+        let a = k as f32 * tau / 22.0;
+        v.push(p(&cube, &rubber, round(0.0, rw - 0.02, a), [a, 0.0, 0.0], [ww - 0.08, 0.05, 0.1]));
     }
-    v.extend(spokes(5, 0.64, 0.28, 0.26));
+    v.extend(spokes(5, ww + 0.02, rim_w - hub_w, (rim_w + hub_w) / 2.0));
     parts[Wheel.index()] = v;
     // 越野轮: big knobby lugs, staggered side to side, a deep dark rim with a bead ring and bolts
-    let mut v = body(&big, tyre_width(BigWheel), 0.07, &rim_dark);
-    for k in 0..14 {
-        let a = k as f32 * tau / 14.0;
+    let mut v = body(&big, wb, 0.07, &rim_dark);
+    for k in 0..18 {
+        let a = k as f32 * tau / 18.0;
         let x = if k % 2 == 0 { 0.17 } else { -0.17 };
         v.push(p(&cube, &rubber, round(x, rb - 0.06, a), [a, 0.0, 0.0], [0.46, 0.14, 0.24]));
     }
     for k in 0..8 {
         let a = k as f32 * tau / 8.0 + 0.2;
         for side in [-1.0, 1.0] {
-            v.push(p(&cube, &rim, round(side * 0.425, 0.42, a), [a, 0.0, 0.0], [0.05, 0.07, 0.07]));
+            v.push(p(&cube, &rim, round(side * (wb / 2.0 + 0.025), rim_b * 0.84, a), [a, 0.0, 0.0], [0.05, 0.07, 0.07]));
         }
     }
     parts[BigWheel.index()] = v;

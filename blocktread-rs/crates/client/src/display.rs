@@ -8,13 +8,36 @@ use crate::ui::kit::{ToastKind, Toasts};
 use crate::DevOpts;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::window::{Monitor, MonitorSelection, OnMonitor, PresentMode, PrimaryMonitor, PrimaryWindow, VideoMode, VideoModeSelection, WindowMode};
+use bevy::window::{Monitor, MonitorSelection, OnMonitor, PresentMode, PrimaryMonitor, PrimaryWindow, VideoMode, VideoModeSelection, WindowMode, WindowResized};
 
 pub struct DisplayPlugin;
 
 impl Plugin for DisplayPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<DisplayRevert>().add_systems(Update, (apply_display, share_pacing, revert_countdown));
+        app.init_resource::<DisplayRevert>().add_systems(First, follow_window_size).add_systems(Update, (apply_display, share_pacing, revert_countdown));
+    }
+}
+
+/// The OS can give the window another size than the one asked for without saying so: macOS makes
+/// a window that doesn't fit above the Dock shorter as it opens. The UI would go on being laid out
+/// for the size asked for, squeezed into the real window, and the cursor would land off what it
+/// points at. When the real size stays different for a moment (a size just asked for takes a
+/// frame or two to apply), take it as the window's size, and say so as a resize would.
+fn follow_window_size(window: Single<(Entity, &mut Window), With<PrimaryWindow>>, dev: Res<DevOpts>, mut resized: MessageWriter<WindowResized>, mut since: Local<u32>, _main: bevy::ecs::system::NonSendMarker) {
+    if dev.offscreen {
+        return;
+    }
+    let (e, mut w) = window.into_inner();
+    let Some(real) = bevy::winit::WINIT_WINDOWS.with_borrow(|ww| ww.get_window(e).map(|x| x.inner_size())) else { return };
+    if real.width == 0 || real.height == 0 || (real.width, real.height) == (w.physical_width(), w.physical_height()) {
+        *since = 0;
+        return;
+    }
+    *since += 1;
+    if *since >= 10 {
+        w.resolution.set_physical_resolution(real.width, real.height);
+        resized.write(WindowResized { window: e, width: w.width(), height: w.height() });
+        *since = 0;
     }
 }
 

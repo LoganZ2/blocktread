@@ -850,10 +850,10 @@ impl Game {
                     let des = (tg.kin.pos - b.pos).normalize_or(cur);
                     let ang = cur.angle_between(des);
                     if ang > 1e-4 {
-                        dir = cur.lerp(des, (2.6 * DT / ang).min(1.0)).normalize_or(cur);
+                        dir = cur.lerp(des, (3.4 * DT / ang).min(1.0)).normalize_or(cur);
                     }
                 }
-                b.speed = (b.speed + 150.0 * DT).min(270.0);
+                b.speed = (b.speed + 200.0 * DT).min(380.0);
                 b.vel = dir * b.speed;
             }
             b.pos += b.vel * DT;
