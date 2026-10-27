@@ -69,17 +69,20 @@ pub struct BlockArt {
 /// A wheel's tyre, tyre shoulder, rim, rim lip and hub.
 type WheelMeshes = (Handle<Mesh>, Handle<Mesh>, Handle<Mesh>, Handle<Mesh>, Handle<Mesh>);
 
-/// What a wheel's suspension is made of: a coil-over strut standing beside the wheel, bolted to
-/// the block that holds it, and a hub carrier and a rod that ride up and down with the
-/// wheel, the rod sliding in the strut.
+/// What a wheel's suspension is made of: a strut standing beside the wheel, bolted to the block
+/// that holds it, and a hub carrier and a rod that ride up and down with the wheel, the rod
+/// sliding in the strut. A steering wheel's strut is a coil-over, and its carrier has a steering
+/// arm; a wheel that doesn't steer rides on an air spring.
 struct StrutArt {
     cube: Handle<Mesh>,
     body: Handle<Mesh>,
     cap: Handle<Mesh>,
     coil: Handle<Mesh>,
+    bellows: Handle<Mesh>,
     rod: Handle<Mesh>,
     dark: PartMat,
     steel: PartMat,
+    rubber: PartMat,
 }
 
 /// How far from a wheel's centre (along x, towards the block holding it) its strut stands: the
@@ -104,13 +107,20 @@ pub fn wheel_hold(blocks: &[Block], occ: &Occupancy, at: IVec3) -> Hold {
     Hold { face, side: if face.x != 0 { face.x as f32 } else { inward.x as f32 } }
 }
 
-/// A wheel's tyre width.
+/// A wheel's tyre width (both tyres, on twins).
 fn tyre_width(t: BlockType) -> f32 {
     match t {
         BlockType::SmallWheel => 0.56,
-        BlockType::BigWheel => 0.8,
+        BlockType::BigWheel | BlockType::DualWheel => 0.8,
+        BlockType::GiantWheel => 0.92,
         _ => 0.7,
     }
+}
+
+/// How far a wheel's centre is from its kingpin: a wide tyre stands a little out from its cell,
+/// clear of the strut.
+pub fn wheel_reach(t: BlockType) -> f32 {
+    KINGPIN.max(tyre_width(t) / 2.0 + 0.12)
 }
 
 /// Damage level 0..=3 from remaining hit points (3 = undamaged).
@@ -191,7 +201,8 @@ impl BlockArt {
         if hold.face == IVec3::ZERO {
             return Vec::new();
         }
-        let (on, rides) = self.strut_parts(hold, tyre_width(b.ty));
+        let steers = b.ty.drive().is_some_and(|d| d.steer > 0.0);
+        let (on, rides) = self.strut_parts(hold, tyre_width(b.ty), wheel_reach(b.ty), steers);
         let mut out = Vec::new();
         for (parts, (parent, at)) in [(on, fixed), (rides, riding)] {
             for part in &parts {
@@ -202,9 +213,9 @@ impl BlockArt {
         out
     }
 
-    /// The strut's parts for a wheel `w` wide: those on the vehicle (about the wheel's cell
-    /// centre) and those that ride with the wheel (about its kingpin).
-    fn strut_parts(&self, hold: Hold, w: f32) -> (Vec<Part>, Vec<Part>) {
+    /// The strut's parts for a wheel `w` wide, `reach` from its kingpin: those on the vehicle
+    /// (about the wheel's cell centre) and those that ride with the wheel (about its kingpin).
+    fn strut_parts(&self, hold: Hold, w: f32, reach: f32, steers: bool) -> (Vec<Part>, Vec<Part>) {
         let s = &self.strut;
         let k = KINGPIN;
         // built for a strut on +x, then mirrored onto the wheel's side
@@ -214,10 +225,17 @@ impl BlockArt {
             tf: Transform::from_xyz(pos[0] * hold.side, pos[1], pos[2]).with_scale(Vec3::from(scale)),
         };
         let one = [1.0; 3];
-        // the strut, its top and its coil; it reaches down to the knuckle with the wheel at rest
+        // the strut, its top and its coil (or air spring); it reaches down to the knuckle with
+        // the wheel at rest
         let mut on = vec![p(&s.body, &s.dark, [k, 0.22, 0.0], one), p(&s.cap, &s.dark, [k, 0.46, 0.0], one)];
-        for y in [0.07, 0.12, 0.17, 0.22, 0.27, 0.32, 0.37] {
-            on.push(p(&s.coil, &s.steel, [k, y, 0.0], one));
+        if steers {
+            for y in [0.07, 0.12, 0.17, 0.22, 0.27, 0.32, 0.37] {
+                on.push(p(&s.coil, &s.steel, [k, y, 0.0], one));
+            }
+        } else {
+            for y in [0.2, 0.27, 0.34] {
+                on.push(p(&s.bellows, &s.rubber, [k, y, 0.0], one));
+            }
         }
         // bolted to the block that holds it: a plate on the face beside it, a flange under the
         // block above, or an arm out to the block ahead or behind. Each stops just short of the
@@ -231,9 +249,14 @@ impl BlockArt {
                 on.push(p(&s.cube, &s.dark, [0.42, 0.3, dz * 0.485], [0.16, 0.3, 0.02]));
             }
         }
-        // the hub carrier, filling the gap from the tyre to the strut, and the rod up into it
+        // the hub carrier, filling the gap from the tyre to the strut, and the rod up into it; a
+        // steering wheel's carrier has an arm forward for the track rod
         let inner = w / 2.0 + 0.01;
-        let rides = vec![p(&s.cube, &s.dark, [(inner + k) / 2.0 + 0.005 - k, 0.0, 0.0], [k - inner + 0.01, 0.34, 0.3]), p(&s.rod, &s.steel, [0.0, 0.28, 0.0], one)];
+        let mut rides = vec![p(&s.cube, &s.dark, [(inner - reach) / 2.0 + 0.005, 0.0, 0.0], [reach - inner + 0.01, 0.34, 0.3]), p(&s.rod, &s.steel, [0.0, 0.28, 0.0], one)];
+        if steers {
+            rides.push(p(&s.cube, &s.steel, [0.0, -0.06, -0.27], [0.06, 0.06, 0.26]));
+            rides.push(p(&s.cube, &s.dark, [0.0, -0.06, -0.41], [0.1, 0.1, 0.06]));
+        }
         (on, rides)
     }
 
@@ -243,13 +266,16 @@ impl BlockArt {
         let occ = blocktread_shared::analysis::occupancy(blocks, &vec![true; blocks.len()]);
         for b in blocks {
             let at = b.pos().as_vec3() + offset;
+            if b.ty.drive().is_some_and(|d| !d.hover) {
+                let hold = wheel_hold(blocks, &occ, b.pos());
+                let kingpin = at + Vec3::X * hold.side * KINGPIN;
+                self.spawn_block(commands, mats, parent, b, kingpin - Vec3::X * hold.side * wheel_reach(b.ty), 3);
+                self.spawn_strut(commands, mats, b, hold, (parent, at), (parent, kingpin));
+                continue;
+            }
             self.spawn_block(commands, mats, parent, b, at, 3);
             if b.ty.weapon().is_some() {
                 self.spawn_mount(commands, mats, parent, b, at, 3, blocktread_shared::weapons::attach_face(&occ, b.pos()));
-            }
-            if b.ty.drive().is_some_and(|d| !d.hover) {
-                let hold = wheel_hold(blocks, &occ, b.pos());
-                self.spawn_strut(commands, mats, b, hold, (parent, at), (parent, at + Vec3::X * hold.side * KINGPIN));
             }
         }
     }
@@ -351,6 +377,12 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let small = (m(Cylinder::new(rs - 0.02, ws).into()), m(Torus { minor_radius: 0.05, major_radius: rs - 0.07 }.into()), m(Cylinder::new(rim_s, ws + 0.02).into()), m(Torus { minor_radius: 0.03, major_radius: rim_s }.into()), m(Cylinder::new(hub_s, ws + 0.08).into()));
     let road = (m(Cylinder::new(rw - 0.04, ww).into()), m(Torus { minor_radius: 0.08, major_radius: rw - 0.1 }.into()), m(Cylinder::new(rim_w, ww + 0.02).into()), m(Torus { minor_radius: 0.035, major_radius: rim_w }.into()), m(Cylinder::new(hub_w, ww + 0.1).into()));
     let big = (m(Cylinder::new(rb - 0.11, wb).into()), m(Torus { minor_radius: 0.1, major_radius: rb - 0.17 }.into()), m(Cylinder::new(rim_b, wb + 0.02).into()), m(Torus { minor_radius: 0.045, major_radius: rim_b }.into()), m(Cylinder::new(hub_b, wb + 0.12).into()));
+    // twin tyres, each `wt` wide, a gap between them; a giant balloon tyre
+    let (rd, wd, wt) = (wheel_r(BlockType::DualWheel), tyre_width(BlockType::DualWheel), 0.37);
+    let (rg, wg) = (wheel_r(BlockType::GiantWheel), tyre_width(BlockType::GiantWheel));
+    let (rim_d, rim_g, hub_d, hub_g) = (rd * 0.56, rg * 0.5, rd * 0.2, rg * 0.14);
+    let dual = (m(Cylinder::new(rd - 0.04, wt).into()), m(Torus { minor_radius: 0.07, major_radius: rd - 0.1 }.into()), m(Cylinder::new(rim_d, wt + 0.02).into()), m(Torus { minor_radius: 0.03, major_radius: rim_d }.into()), m(Cylinder::new(hub_d, wd + 0.1).into()));
+    let giant = (m(Cylinder::new(rg - 0.2, wg).into()), m(Torus { minor_radius: 0.17, major_radius: rg - 0.26 }.into()), m(Cylinder::new(rim_g, wg + 0.02).into()), m(Torus { minor_radius: 0.06, major_radius: rim_g }.into()), m(Cylinder::new(hub_g, wg + 0.14).into()));
     let pad_glow = m(Circle::new(0.42).into());
     let tube_s = m(Cylinder::new(0.1, 0.12).into());
     let cone_s = m(Cone { radius: 0.08, height: 0.2 }.into());
@@ -360,6 +392,7 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let strut_body = m(Cylinder::new(0.055, 0.52).into());
     let strut_cap = m(Cylinder::new(0.08, 0.06).into());
     let strut_coil = m(Torus { minor_radius: 0.017, major_radius: 0.07 }.into());
+    let strut_bellows = m(Torus { minor_radius: 0.045, major_radius: 0.07 }.into());
     let strut_rod = m(Cylinder::new(0.028, 0.36).into());
 
     let mut fixed = |c: StandardMaterial| PartMat::Fixed(mats.add(c));
@@ -368,6 +401,8 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let rubber = fixed(StandardMaterial { base_color: srgb(0x1d1f23), perceptual_roughness: 0.92, ..default() });
     let rim = fixed(StandardMaterial { base_color: srgb(0x7c838c), metallic: 0.6, perceptual_roughness: 0.4, ..default() });
     let rim_dark = fixed(StandardMaterial { base_color: srgb(0x4a4f45), metallic: 0.4, perceptual_roughness: 0.55, ..default() });
+    let rim_white = fixed(StandardMaterial { base_color: srgb(0xc6cacf), metallic: 0.5, perceptual_roughness: 0.38, ..default() });
+    let rim_amber = fixed(StandardMaterial { base_color: srgb(0xc98f24), metallic: 0.3, perceptual_roughness: 0.5, ..default() });
     let red = fixed(StandardMaterial { base_color: srgb(0xd83a3a), metallic: 0.3, perceptual_roughness: 0.4, ..default() });
     // nozzle throat: white-hot but not blown out; the plume carries the colour
     let g_engine = fixed(StandardMaterial { base_color: Color::BLACK, emissive: glow(0xd8ecff, 2.5), ..default() });
@@ -502,18 +537,23 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     // there stands radially (its y) once turned by `a` about x.
     let round = |x: f32, r: f32, a: f32| [x, r * a.cos(), r * a.sin()];
     let tau = std::f32::consts::TAU;
-    // the tyre, its shoulders, the rim and its lips, the hub: alike on every wheel
-    let body = |set: &WheelMeshes, w: f32, inset: f32, rim_mat: &PartMat| {
-        let (tyre, shoulder, wheel_rim, lip, hub) = set;
+    // a tyre `w` wide at `x` along the axle, its shoulders, the rim and its lips
+    let tyre_at = |set: &WheelMeshes, x: f32, w: f32, inset: f32, rim_mat: &PartMat, lip_mat: &PartMat| {
+        let (tyre, shoulder, wheel_rim, lip, _) = set;
         vec![
-            p(tyre, &rubber, z, [0.0, 0.0, HP], one),
-            p(shoulder, &rubber, [w / 2.0 - inset, 0.0, 0.0], [0.0, 0.0, HP], one),
-            p(shoulder, &rubber, [-w / 2.0 + inset, 0.0, 0.0], [0.0, 0.0, HP], one),
-            p(wheel_rim, rim_mat, z, [0.0, 0.0, HP], one),
-            p(lip, &rim, [w / 2.0 + 0.01, 0.0, 0.0], [0.0, 0.0, HP], one),
-            p(lip, &rim, [-w / 2.0 - 0.01, 0.0, 0.0], [0.0, 0.0, HP], one),
-            p(hub, &dark, z, [0.0, 0.0, HP], one),
+            p(tyre, &rubber, [x, 0.0, 0.0], [0.0, 0.0, HP], one),
+            p(shoulder, &rubber, [x + w / 2.0 - inset, 0.0, 0.0], [0.0, 0.0, HP], one),
+            p(shoulder, &rubber, [x - w / 2.0 + inset, 0.0, 0.0], [0.0, 0.0, HP], one),
+            p(wheel_rim, rim_mat, [x, 0.0, 0.0], [0.0, 0.0, HP], one),
+            p(lip, lip_mat, [x + w / 2.0 + 0.01, 0.0, 0.0], [0.0, 0.0, HP], one),
+            p(lip, lip_mat, [x - w / 2.0 - 0.01, 0.0, 0.0], [0.0, 0.0, HP], one),
         ]
+    };
+    // one tyre and the hub through it
+    let body = |set: &WheelMeshes, w: f32, inset: f32, rim_mat: &PartMat| {
+        let mut v = tyre_at(set, 0.0, w, inset, rim_mat, &rim);
+        v.push(p(&set.4, &dark, z, [0.0, 0.0, HP], one));
+        v
     };
     // spokes on both faces, from the hub out to the rim
     let spokes = |n: usize, w: f32, len: f32, mid: f32| {
@@ -552,6 +592,50 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         }
     }
     parts[BigWheel.index()] = v;
+    // 双胎轮: two tyres side by side with a gap between, truck tread across each, white steel
+    // dished rims with holes round them and a ring of wheel nuts
+    let half = (wd - wt) / 2.0;
+    let mut v = Vec::new();
+    for (j, x) in [-half, half].into_iter().enumerate() {
+        v.extend(tyre_at(&dual, x, wt, 0.06, &rim_white, &rim_white));
+        for k in 0..20 {
+            let a = (k as f32 + 0.5 * j as f32) * tau / 20.0;
+            v.push(p(&cube, &rubber, round(x, rd - 0.02, a), [a, 0.0, 0.0], [wt - 0.1, 0.05, 0.11]));
+        }
+    }
+    v.push(p(&dual.4, &dark, z, [0.0, 0.0, HP], one));
+    for side in [-1.0, 1.0] {
+        let face = side * (wd / 2.0 + 0.016);
+        for k in 0..8 {
+            let a = k as f32 * tau / 8.0;
+            v.push(p(&cube, &dark, round(face, (rim_d + hub_d) / 2.0 + 0.02, a), [a, 0.0, 0.0], [0.03, 0.1, 0.1]));
+            v.push(p(&cube, &rim, round(face + side * 0.04, hub_d + 0.06, a + 0.39), [a, 0.0, 0.0], [0.05, 0.05, 0.05]));
+        }
+    }
+    parts[DualWheel.index()] = v;
+    // 巨轮: a balloon tyre with big chevron lugs, an amber rim with a bolted bead ring, six heavy
+    // spokes and the dark between them
+    let mut v = body(&giant, wg, 0.17, &rim_amber);
+    for k in 0..16 {
+        let a = k as f32 * tau / 16.0;
+        for side in [-1.0, 1.0] {
+            v.push(p(&cube, &rubber, round(side * 0.2, rg - 0.1, a), [a, -side * 0.5, 0.0], [0.42, 0.18, 0.2]));
+        }
+    }
+    for k in 0..16 {
+        let a = k as f32 * tau / 16.0 + 0.1;
+        for side in [-1.0, 1.0] {
+            v.push(p(&cube, &dark, round(side * (wg / 2.0 + 0.03), rim_g * 0.88, a), [a, 0.0, 0.0], [0.06, 0.08, 0.08]));
+        }
+    }
+    for k in 0..6 {
+        let a = k as f32 * tau / 6.0;
+        for side in [-1.0, 1.0] {
+            v.push(p(&cube, &rim_amber, round(side * (wg / 2.0 + 0.03), (rim_g * 0.8 + hub_g) / 2.0, a), [a, 0.0, 0.0], [0.06, rim_g * 0.8 - hub_g, 0.14]));
+            v.push(p(&cube, &dark, round(side * (wg / 2.0 + 0.012), (rim_g * 0.8 + hub_g) / 2.0, a + tau / 12.0), [a + tau / 12.0, 0.0, 0.0], [0.02, (rim_g * 0.8 - hub_g) * 0.8, 0.26]));
+        }
+    }
+    parts[GiantWheel.index()] = v;
     // a hover pad: a squat housing over a skirt, its underside glowing
     parts[Hover.index()] = vec![
         p(&cube, &paint, [0.0, 0.12, 0.0], z, [0.92, 0.6, 0.92]),
@@ -565,6 +649,6 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         p(&collar, &dark, [0.0, -0.38, 0.0], z, one),
         p(&stem, &dark, [0.0, -0.26, 0.0], z, one),
     ];
-    let strut = StrutArt { cube: cube.clone(), body: strut_body, cap: strut_cap, coil: strut_coil, rod: strut_rod, dark: dark.clone(), steel: rim.clone() };
+    let strut = StrutArt { cube: cube.clone(), body: strut_body, cap: strut_cap, coil: strut_coil, bellows: strut_bellows, rod: strut_rod, dark: dark.clone(), steel: rim.clone(), rubber: rubber.clone() };
     BlockArt { parts, mount, strut, cube, sphere, paint_tex, armor_tex, cache: HashMap::new() }
 }

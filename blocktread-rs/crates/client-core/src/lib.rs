@@ -33,6 +33,8 @@ pub struct CoreShip {
     pub shield_frac: f32,
     pub firing: bool,
     pub boosting: bool,
+    /// Its thrusters push: on the throttle, or boosting.
+    pub thrusting: bool,
     pub throttle: f32,
     /// Its guns' cooldowns and where they point, as turned by its last known aim.
     pub ws: WeaponState,
@@ -328,6 +330,7 @@ impl ClientCore {
                 s.rot = rot;
                 s.vel = p.kin.vel;
                 s.boosting = p.kin.boosting;
+                s.thrusting = s.body.stats.thrust > 0.0 && p.last_cmd().is_some_and(|c| blocktread_shared::drive::thrust_push(&c, p.kin.boosting) > 0.0);
                 s.throttle = p.last_cmd().map_or(0.7, |c| c.throttle_f());
                 s.shield_frac = if s.body.stats.shield_cap > 0.0 { p.kin.shield / s.body.stats.shield_cap } else { 0.0 };
             }
@@ -346,6 +349,7 @@ impl ClientCore {
                 s.vel = vel;
                 s.firing = flags & FLAG_FIRING != 0;
                 s.boosting = flags & FLAG_BOOST != 0;
+                s.thrusting = flags & FLAG_THRUST != 0;
             }
             if s.cos_tick == 0 || target_tick.saturating_sub(s.cos_tick) > 6 {
                 s.cos_tick = target_tick;
@@ -426,7 +430,7 @@ impl ClientCore {
                 let ws = WeaponState::new(&body);
                 self.ships.insert(
                     id,
-                    CoreShip { id, team, name, owner, body, interp, shield_frac: 1.0, firing: false, boosting: false, throttle: 0.7, ws, cos_tick: 0, pos: kin.pos, rot: kin.rot, vel: kin.vel },
+                    CoreShip { id, team, name, owner, body, interp, shield_frac: 1.0, firing: false, boosting: false, thrusting: false, throttle: 0.7, ws, cos_tick: 0, pos: kin.pos, rot: kin.rot, vel: kin.vel },
                 );
                 self.events.push(CoreEvent::ShipSpawned(id));
             }

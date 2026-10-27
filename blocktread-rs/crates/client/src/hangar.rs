@@ -967,7 +967,12 @@ fn part_detail(t: BlockType) -> String {
             }
         })
         .unwrap_or_default();
-    let weapon = if t.thrust() > 0.0 { format!("{weapon} · 功率 {:.0}", t.thrust()) } else { weapon };
+    let weapon = if t.thrust() > 0.0 { format!("{weapon} · 推力 {:.0}", t.thrust()) } else { weapon };
+    let weapon = match t.drive() {
+        Some(d) if d.hover => format!("{weapon} · 自己不出力"),
+        Some(d) => format!("{weapon} · 直径 {:.1} · {}", d.radius * 2.0, if d.steer > 0.0 { "能转向" } else { "不能转向" }),
+        None => weapon,
+    };
     format!("造价 {} · 质量 {} · 耐久 {}{}\n{}", i.cost, i.mass, i.hp, weapon, i.info)
 }
 

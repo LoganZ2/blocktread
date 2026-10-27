@@ -754,7 +754,7 @@ impl Game {
         // vehicles that can neither drive nor shoot give up after a few seconds
         let mut give_up = Vec::new();
         for s in self.ships.values_mut() {
-            if (s.body.power == 0.0 || s.body.movers.len() < 2) && s.body.stats.weapons.is_empty() {
+            if (!s.body.can_drive() || s.body.movers.len() < 2) && s.body.stats.weapons.is_empty() {
                 let left = s.disabled_t.get_or_insert(3.0);
                 *left -= DT;
                 if *left <= 0.0 {
@@ -1230,7 +1230,9 @@ impl Game {
                 pos: s.kin.pos,
                 rot: quantize_quat(s.kin.rot),
                 vel: s.kin.vel,
-                flags: (if s.input.has(blocktread_shared::flight::BTN_FIRE) { FLAG_FIRING } else { 0 }) | (if s.kin.boosting { FLAG_BOOST } else { 0 }),
+                flags: (if s.input.has(blocktread_shared::flight::BTN_FIRE) { FLAG_FIRING } else { 0 })
+                    | (if s.kin.boosting { FLAG_BOOST } else { 0 })
+                    | (if s.body.stats.thrust > 0.0 && blocktread_shared::drive::thrust_push(&s.input, s.kin.boosting) > 0.0 { FLAG_THRUST } else { 0 }),
                 throttle: (s.input.throttle_f() * 255.0) as u8,
                 shield: if s.body.stats.shield_cap > 0.0 { (s.kin.shield / s.body.stats.shield_cap * 255.0) as u8 } else { 0 },
                 aim: s.input.aim,

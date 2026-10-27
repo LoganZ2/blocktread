@@ -29,7 +29,9 @@ pub const SNAPSHOT_INTERVAL: u32 = 2;
 /// 5: ground vehicles: drive and steer instead of the flight stick.
 /// 6: guns turn to an aim point; wheels and hover pads drive, thrusters boost.
 /// 7: free-for-all is one drop-in room with rounds (`Round` in the scores).
-pub const PROTOCOL_VERSION: u32 = 7;
+/// 8: hover pads only lift, thrusters push on the throttle; wheels that steer and wheels that
+///    don't (two new ones), and turning by the sides.
+pub const PROTOCOL_VERSION: u32 = 8;
 pub const DEFAULT_PORT: u16 = 4433;
 /// The arena's reach from its centre (the ground is a square of twice this).
 pub const ARENA_R: f32 = terrain::HALF;

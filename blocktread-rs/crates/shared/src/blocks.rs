@@ -30,6 +30,8 @@ pub enum BlockType {
     SmallWheel,
     BigWheel,
     Hover,
+    DualWheel,
+    GiantWheel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -106,13 +108,21 @@ pub struct TypeInfo {
 pub struct DriveSpec {
     /// Wheel radius; for a hover pad, the gap it holds above the ground.
     pub radius: f32,
-    /// Drive force it adds (the vehicle's acceleration is the sum over its mass).
+    /// Drive force it adds (the vehicle's acceleration is the sum over its mass). Hover pads have
+    /// none: they only hold the vehicle up, and thrusters push it.
+    #[serde(default)]
     pub power: f32,
     /// Top speed it drives at (m/s).
+    #[serde(default)]
     pub top: f32,
-    /// Grip: how hard it can push along the ground, per unit of load. Hover pads barely grip, so
-    /// they slide through turns.
+    /// Grip: how hard it can push along the ground, per unit of load. Hover pads have no tyres to
+    /// grip with: they slide.
+    #[serde(default)]
     pub grip: f32,
+    /// Steering lock at a standstill (rad), for a wheel ahead of the centre of mass; 0 for a wheel
+    /// that doesn't steer.
+    #[serde(default)]
+    pub steer: f32,
     /// Hover pads: energy drawn per second while lifting, and the turn rate they give (rad/s).
     #[serde(default)]
     pub hover: bool,
@@ -174,7 +184,7 @@ fn one() -> u8 {
 }
 
 impl BlockType {
-    pub const ALL: [BlockType; 24] = [
+    pub const ALL: [BlockType; 26] = [
         BlockType::Cockpit,
         BlockType::Wing,
         BlockType::Engine,
@@ -199,6 +209,8 @@ impl BlockType {
         BlockType::SmallWheel,
         BlockType::BigWheel,
         BlockType::Hover,
+        BlockType::DualWheel,
+        BlockType::GiantWheel,
     ];
 
     pub fn index(self) -> usize {

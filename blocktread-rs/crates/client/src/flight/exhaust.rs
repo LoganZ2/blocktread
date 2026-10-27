@@ -222,11 +222,11 @@ pub fn update_exhaust(session: Res<Session>, vis: Res<ShipVisuals>, time: Res<Ti
     for (id, v) in &vis.0 {
         let Some(s) = core.ships.get(id) else { continue };
         let palette = if Some(*id) == core.my_ship || my_team == Some(s.team) { FRIENDLY } else { HOSTILE };
-        // thrusters only burn while boosting, and then at full
-        if !s.boosting {
+        // thrusters burn at half on the throttle, at full while boosting
+        if !s.thrusting && !s.boosting {
             continue;
         }
-        let (boost, throttle) = (1.0, 1.0);
+        let (boost, throttle) = if s.boosting { (1.0, 1.0) } else { (0.0, 0.5) };
         let dir = s.rot * Vec3::Z;
         // k scales a nozzle's plume: 1 for a thruster, smaller for a small one
         for &(at, k) in &v.engines {

@@ -21,13 +21,41 @@ fn presets_pass_all_checks() {
 fn the_buggys_numbers() {
     let s = analyze(&preset("rover")).stats;
     assert_eq!(s.n, 49);
-    assert!((s.mass - 51.6).abs() < 0.01, "mass {}", s.mass);
+    assert!((s.mass - 53.2).abs() < 0.01, "mass {}", s.mass);
     assert_eq!((s.wheels.len(), s.grounded.len()), (4, 4));
-    assert!((s.cost - 76.8).abs() < 0.05, "cost {}", s.cost);
-    // four wheels drive it; the thruster only boosts
-    assert!((s.power - 32.0).abs() < 1e-4);
+    assert!((s.cost - 77.8).abs() < 0.05, "cost {}", s.cost);
+    // four wheels drive it, the twin tyres at the back hardest; the thruster pushes on top
+    assert!((s.power - 38.0).abs() < 1e-4);
     assert!((s.thrust - 26.0).abs() < 1e-4);
     assert!((60.0..75.0).contains(&s.tip), "tip {}", s.tip);
+}
+
+#[test]
+fn the_checks_know_what_steers_and_what_pushes() {
+    use blocktread_shared::analysis::Level;
+    use blocktread_shared::blocks::Design;
+    let steering = |d: &Design| analyze(d).checks.into_iter().find(|c| c.title == "转向").map(|c| (c.level, c.msg));
+    let swap = |d: &mut Design, from: BlockType, to: BlockType| d.blocks.iter_mut().filter(|b| b.ty == from).for_each(|b| b.ty = to);
+    // the buggy steers with its front wheels
+    assert_eq!(steering(&preset("rover")).unwrap().0, Level::Ok);
+    // twin tyres all round: nothing steers, it turns by its sides
+    let mut tank = preset("rover");
+    swap(&mut tank, BlockType::Wheel, BlockType::DualWheel);
+    let (level, msg) = steering(&tank).unwrap();
+    assert!(level == Level::Ok && msg.contains("坦克"), "{msg}");
+    assert!(analyze(&tank).ok());
+    // steering wheels only at the back: they can't steer there
+    let mut back = preset("rover");
+    swap(&mut back, BlockType::Wheel, BlockType::Capacitor);
+    swap(&mut back, BlockType::DualWheel, BlockType::Wheel);
+    swap(&mut back, BlockType::Capacitor, BlockType::DualWheel);
+    assert_eq!(steering(&back).unwrap().0, Level::Warn);
+    // hover pads steer themselves, and need thrusters to go anywhere
+    assert_eq!(steering(&preset("wasp")).unwrap().0, Level::Ok);
+    let mut bare = preset("wasp");
+    bare.blocks.retain(|b| b.ty.thrust() == 0.0);
+    let a = analyze(&bare);
+    assert!(a.checks.iter().any(|c| c.title == "推进" && c.level == Level::Err), "{:?}", a.first_error());
 }
 
 #[test]

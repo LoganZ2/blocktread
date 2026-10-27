@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use blocktread_shared::DT;
 use blocktread_shared::drive::{performance, spawn_height, step_drive};
+use blocktread_shared::presets::preset;
 use blocktread_shared::flight::{BTN_FLIP, InputCmd, Kin, q_axis};
 use blocktread_shared::glam::{Quat, Vec3};
 use blocktread_shared::presets::rover;
@@ -121,13 +122,13 @@ fn the_same_inputs_give_the_same_drive() {
 #[test]
 fn the_presets_drive_and_fit_their_tiers() {
     use blocktread_shared::analysis::analyze;
-    use blocktread_shared::presets::{PRESETS, preset};
+    use blocktread_shared::presets::PRESETS;
     let ground = Terrain::flat();
     for (p, budget) in PRESETS.iter().zip([80.0, 80.0, 160.0, 160.0, 350.0]) {
         let d = preset(p.key);
         let a = analyze(&d);
         let body = ShipBody::new(Arc::new(d.clone()));
-        let (accel, top) = performance(&body);
+        let (accel, top) = (a.stats.accel, a.stats.max_speed);
         let mut k = set_down(&body, &ground, 0.0, 0.0);
         run(&mut k, &body, &ground, 2.0, InputCmd::default());
         run(&mut k, &body, &ground, 10.0, InputCmd { drive: 127, ..Default::default() });
@@ -151,7 +152,6 @@ fn the_presets_drive_and_fit_their_tiers() {
 
 #[test]
 fn hover_pads_turn_fast_and_drop_when_the_energy_runs_out() {
-    use blocktread_shared::presets::preset;
     let ground = Terrain::flat();
     let turn_rate = |key: &str| {
         let body = ShipBody::new(Arc::new(preset(key)));
@@ -210,4 +210,64 @@ fn an_empty_battery_locks_the_boost_until_shift_is_pressed_again() {
     run(&mut k, &body, &ground, 1.0, InputCmd::default());
     step_drive(&mut k, &body, &boost, &ground, DT);
     assert!(k.boosting, "after the lock, a fresh press boosts");
+}
+
+#[test]
+fn hover_pads_only_lift_and_the_thrusters_push() {
+    use blocktread_shared::analysis::analyze;
+    let ground = Terrain::flat();
+    // five seconds on the throttle, one gliding hands off, then reverse until it stops
+    let go = |d: &blocktread_shared::blocks::Design| {
+        let body = ShipBody::new(Arc::new(d.clone()));
+        let mut k = set_down(&body, &ground, 0.0, 0.0);
+        run(&mut k, &body, &ground, 1.0, InputCmd::default());
+        run(&mut k, &body, &ground, 5.0, InputCmd { drive: 127, ..Default::default() });
+        let v = k.vel.dot(k.fwd());
+        run(&mut k, &body, &ground, 1.0, InputCmd::default());
+        let glide = k.vel.length();
+        let mut stop = 0.0;
+        while k.vel.length() > 0.5 && stop < 10.0 {
+            step_drive(&mut k, &body, &InputCmd { drive: -127, ..Default::default() }, &ground, DT);
+            stop += DT;
+        }
+        (v, glide, stop)
+    };
+    let (v, glide, stop) = go(&preset("wasp"));
+    println!("hover vehicle: {:.0} km/h after 5 s, {:.0} after a second's glide, stopped in {stop:.1} s", v * 3.6, glide * 3.6);
+    assert!(v > 25.0, "the thrusters push it");
+    assert!(glide > v * 0.75, "it glides on");
+    assert!(stop < 7.0, "the skirts brake it");
+    // without its thrusters, the throttle does nothing, and the checks say why
+    let mut bare = preset("wasp");
+    bare.blocks.retain(|b| b.ty.thrust() == 0.0);
+    let (v, ..) = go(&bare);
+    println!("without thrusters: {v:.2} m/s");
+    // (it may drift a little: without the engines at the back it sits nose down)
+    assert!(v.abs() < 1.0, "hover pads don't push");
+    assert!(analyze(&bare).checks.iter().any(|c| c.title == "推进" && c.level == blocktread_shared::analysis::Level::Err));
+}
+
+#[test]
+fn without_steering_wheels_it_turns_by_its_sides() {
+    // the six-wheeler's twin tyres don't steer: it turns on the spot, and at speed it turns
+    // without spinning out
+    let ground = Terrain::flat();
+    let body = ShipBody::new(Arc::new(preset("bison")));
+    let mut k = set_down(&body, &ground, 0.0, 0.0);
+    run(&mut k, &body, &ground, 1.0, InputCmd::default());
+    let (h0, p0) = (k.fwd(), k.pos);
+    run(&mut k, &body, &ground, 2.0, InputCmd { steer: 127, ..Default::default() });
+    let spot = h0.angle_between(k.fwd()).to_degrees();
+    let moved = (k.pos - p0).with_y(0.0).length();
+    println!("on the spot: {spot:.0}° in 2 s, moved {moved:.1} m");
+    assert!(spot > 60.0 && h0.cross(k.fwd()).y < 0.0, "turns right on the spot");
+    assert!(moved < 2.0);
+    run(&mut k, &body, &ground, 5.0, InputCmd { drive: 127, ..Default::default() });
+    let h1 = k.fwd();
+    run(&mut k, &body, &ground, 2.0, InputCmd { drive: 127, steer: -127, ..Default::default() });
+    let turned = h1.angle_between(k.fwd()).to_degrees();
+    let slip = k.vel.with_y(0.0).angle_between(k.fwd().with_y(0.0)).to_degrees();
+    println!("at speed: {turned:.0}° in 2 s, sliding {slip:.0}° off the nose, {:.0} km/h", k.vel.length() * 3.6);
+    assert!(turned > 30.0 && h1.cross(k.fwd()).y > 0.0, "turns left at speed");
+    assert!(slip < 15.0, "without spinning out");
 }

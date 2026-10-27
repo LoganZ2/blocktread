@@ -1,7 +1,9 @@
 //! Ground vehicles: a rigid body on raycast suspension, a spring under every wheel and hover pad,
-//! over the terrain both sides generate. Wheels drive themselves; hover pads float, slide and turn
-//! fast on energy; thrusters only push while boosting. Deterministic like the rest of shared, so
-//! the client predicts its own vehicle with the very code the server runs.
+//! over the terrain both sides generate. Wheels drive themselves; the steering ones turn, and a
+//! vehicle without them turns by driving its two sides against each other. Hover pads only hold
+//! the vehicle up on energy: they slide, turn it fast, and drag; thrusters push it, on the
+//! throttle and harder while boosting. Deterministic like the rest of shared, so the client
+//! predicts its own vehicle with the very code the server runs.
 
 use crate::blocks::DriveSpec;
 use crate::flight::{BTN_BOOST, BTN_FLIP, InputCmd, Kin};
@@ -15,8 +17,6 @@ pub const DROP: f32 = 0.45;
 /// Where it hangs under the vehicle's own weight on level ground.
 pub const REST_DROP: f32 = 0.2;
 const SUBSTEPS: u32 = 2;
-/// Steering lock at a standstill (rad); it narrows with speed (see `steer_angle`).
-const STEER: f32 = 0.6;
 /// Blocks touch the ground as spheres of this radius.
 const BLOCK_R: f32 = 0.5;
 /// Inertia on top of the blocks' own: steadier over bumps.
@@ -24,6 +24,21 @@ const INERTIA_SCALE: f32 = 1.6;
 /// Acceleration per unit of drive power over mass, and per unit of thrust over mass (boost).
 const DRIVE: f32 = 14.5;
 const THRUST: f32 = 11.5;
+/// Thrusters on the throttle alone push at this share of the boost.
+const CRUISE: f32 = 0.5;
+/// What holds a hover pad back: its skirt (per m/s) and the air (per (m/s)²), as deceleration.
+/// Its top speed is where the thrust meets them.
+const CUSHION_DRAG: f32 = 0.08;
+const AIR_DRAG: f32 = 0.0025;
+/// How fast a hover pad's cushion stops a sideways slide (per second): slowly, so it drifts.
+const HOVER_SLIDE: f32 = 3.0;
+/// Reverse on hover pads drops their skirts onto the ground, which brakes at this share of g.
+const SKIRT_BRAKE: f32 = 0.5;
+/// Turning by the sides: how much of the throttle swaps from the inner side to the outer one at
+/// full lock, and the turn rate (rad/s) the tyres then scrub round at from a standstill (less at
+/// speed).
+const SKID: f32 = 1.4;
+const SKID_RATE: f32 = 1.1;
 /// Energy a boost burns per second: a base, and more for every unit of thrust.
 const BOOST_DRAIN: f32 = 25.0;
 const BOOST_DRAIN_PER_THRUST: f32 = 0.2;
@@ -51,9 +66,37 @@ pub fn performance(body: &ShipBody) -> (f32, f32) {
     performance_of(body.movers.iter().map(|&i| body.design.blocks[i].ty.drive().unwrap()), body.stats.mass)
 }
 
-/// How far the front wheels turn (rad, positive right) for a steering input at a forward speed.
-pub fn steer_angle(steer: f32, speed: f32) -> f32 {
-    steer * STEER / (1.0 + speed.abs() / 18.0)
+/// Acceleration and top speed on the throttle alone, as the garage shows them: the wheels' with
+/// the thrusters' push on top, or, with no wheels to drive, the thrust against the hover pads'
+/// drag.
+pub fn rated<'a>(movers: impl Iterator<Item = &'a DriveSpec> + Clone, thrust: f32, mass: f32) -> (f32, f32) {
+    let (accel, top) = performance_of(movers.clone(), mass);
+    let push = thrust * THRUST * CRUISE / mass.max(1.0);
+    let mut movers = movers;
+    if top > 0.0 {
+        (accel + push, top)
+    } else if push > 0.0 && movers.any(|d| d.hover) {
+        (push, (-CUSHION_DRAG + (CUSHION_DRAG * CUSHION_DRAG + 4.0 * AIR_DRAG * push).sqrt()) / (2.0 * AIR_DRAG))
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+/// How hard the thrusters push, as a share of the boost: the throttle forward (never back: their
+/// nozzles face aft), or all of it while boosting.
+pub fn thrust_push(inp: &InputCmd, boosting: bool) -> f32 {
+    if boosting { 1.0 } else { CRUISE * inp.drive_f().max(0.0) }
+}
+
+/// How far a wheel with steering lock `lock` turns (rad, positive right) for a steering input at
+/// a forward speed.
+pub fn steer_angle(lock: f32, steer: f32, speed: f32) -> f32 {
+    steer * lock / (1.0 + speed.abs() / 18.0)
+}
+
+/// Whether a wheel `local` from the centre of mass steers: a steering one ahead of it.
+pub fn steers(spec: &DriveSpec, local: Vec3) -> bool {
+    spec.steer > 0.0 && !spec.hover && local.z < -0.5
 }
 
 /// Where a wheel hanging from `mount` (along `-up`) meets the ground: the distance along the
@@ -127,7 +170,13 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
     let spring = share * GRAVITY / (DROP - REST_DROP);
     let damp = 0.9 * (spring * share).sqrt();
     let drive = inp.drive_f();
-    let steer = steer_angle(inp.steer_f(), k.vel.dot(k.fwd()));
+    let speed = k.vel.dot(k.fwd());
+    // no steering wheel left ahead of the centre of mass: turn by the sides, the outer one
+    // driving and the inner one braking
+    let skid = !body.movers.iter().any(|&i| steers(blocks[i].ty.drive().unwrap(), body.local(i)));
+    let swap = if skid { SKID * inp.steer_f() } else { 0.0 };
+    let yaw = if skid { -inp.steer_f() * SKID_RATE / (1.0 + speed.abs() / 18.0) } else { 0.0 };
+    let push = thrust_push(inp, k.boosting);
     let h = dt / SUBSTEPS as f32;
     for _ in 0..SUBSTEPS {
         let (up, fwd) = (k.up(), k.fwd());
@@ -154,54 +203,78 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
                 load += spring * 6.0 * (c - DROP - 0.1);
             }
             let load = load.clamp(0.0, share * GRAVITY * 8.0);
-            // wheels ahead of the centre of mass steer; hover pads turn the whole vehicle instead
-            let wf = if !spec.hover && local.z < -0.5 { Quat::from_axis_angle(up, -steer) * fwd } else { fwd };
+            if spec.hover {
+                // a pad pushes nothing along the ground: it rides its cushion, which drags more
+                // the faster it goes, and slides sideways
+                let f = (fwd - n * fwd.dot(n)).normalize_or_zero();
+                let side = n.cross(f);
+                let (vf, vs) = (vp.dot(f), vp.dot(side));
+                let settle = drive.abs() < 0.01 && push <= 0.0 && vf.hypot(vs) < 1.0;
+                let long = if drive < -0.01 {
+                    // reverse: the skirt drops onto the ground and brakes, never past a stop
+                    -vf.signum() * (share * GRAVITY * SKIRT_BRAKE).min(vf.abs() * share / h * 0.5)
+                } else if settle {
+                    // hands off and nearly stopped: the skirt settles and holds it, even on a slope
+                    -vf * share / h * 0.25
+                } else {
+                    -vf * share * (CUSHION_DRAG + AIR_DRAG * vf.abs())
+                };
+                let lat = if settle { -vs * share / h * 0.25 } else { -vs * share * HOVER_SLIDE };
+                hovering += 1;
+                spin += spec.turn;
+                let fw = up * load + f * long + side * lat;
+                force += fw;
+                torque += r.cross(fw);
+                continue;
+            }
+            // steering wheels ahead of the centre of mass turn; the rest hold straight
+            let wf = if steers(spec, local) { Quat::from_axis_angle(up, -steer_angle(spec.steer, inp.steer_f(), speed)) * fwd } else { fwd };
             let f = (wf - n * wf.dot(n)).normalize_or_zero();
             let side = n.cross(f);
             let (vf, vs) = (vp.dot(f), vp.dot(side));
             let grip = spec.grip.min(1.0);
-            // tyres stop a sideways slide (half of it each substep, so it doesn't ring); hover pads
-            // barely do
+            // tyres stop a sideways slide (half of it each substep, so it doesn't ring); turning by
+            // the sides, they scrub round at the turn rate asked for instead
+            let vs = vs - (up * yaw).cross(r).dot(side);
             let lat = -vs * share / h * 0.5 * grip;
-            // this mover's part of the push: its share of the power
+            // this wheel's part of the push: its share of the power, and its side's throttle
             let pull = m * accel * spec.power / power;
+            let drive = if swap != 0.0 && local.x.abs() > 0.5 { (drive - swap * local.x.signum()).clamp(-1.0, 1.0) } else { drive };
             let long = if drive.abs() > 0.01 && drive * vf >= -0.5 {
                 // pulling the way it rolls, or from a standstill: drive, fading at top speed
                 drive * pull * (1.0 - (vf * drive.signum() / top.max(1.0)).clamp(0.0, 1.0))
             } else if drive.abs() > 0.01 {
                 // pushing against the roll: brakes, never past a stop
-                -vf.signum() * (pull * 1.6).min(vf.abs() * share / h)
-            } else if vf.abs() < 2.0 {
+                -vf.signum() * (pull * 1.6 * drive.abs()).min(vf.abs() * share / h)
+            } else if vf.abs() < 2.0 && push <= 0.0 {
                 // hands off and nearly stopped: the brakes hold it, even on a slope
                 -vf * share / h * 0.5 * grip
             } else {
-                // coasting (hover pads glide on)
+                // coasting
                 -vf * share * 0.7 * grip
             };
+            // the tyre holds what its grip allows
+            let cap = spec.grip * load;
             let mut t = f * long + side * lat;
-            if spec.hover {
-                hovering += 1;
-                spin += spec.turn;
-            } else {
-                let cap = spec.grip * load;
-                if t.length() > cap {
-                    t = t.normalize() * cap;
-                }
+            if t.length() > cap {
+                t = t.normalize() * cap;
             }
             let fw = up * load + t;
             force += fw;
             torque += r.cross(fw);
         }
-        if k.boosting {
-            // thrust along the hull, fading well past the wheels' top speed
-            let fade = 1.0 - (k.vel.dot(fwd) / (top.max(10.0) * 1.6)).clamp(0.0, 1.0);
-            force += fwd * st.thrust * THRUST * fade;
+        if push > 0.0 {
+            // thrust along the hull. With wheels to drive, it fades at their top speed on the
+            // throttle, and well past it while boosting; on hover pads only their drag holds it
+            let fade = if top > 0.0 { 1.0 - (k.vel.dot(fwd) / (top.max(10.0) * if k.boosting { 1.6 } else { 1.0 })).clamp(0.0, 1.0) } else { 1.0 };
+            force += fwd * st.thrust * THRUST * push * fade;
         }
         k.vel += force / m * h;
         k.ang += k.rot * ((k.rot.inverse() * torque) / inertia) * h;
         if hovering > 0 {
-            // hover pads swing the vehicle round to the commanded turn rate, fast
-            let want = -inp.steer_f() * spin / hovering as f32;
+            // hover pads swing the vehicle round to the commanded turn rate: fast, a little less
+            // so at speed
+            let want = -inp.steer_f() * spin / hovering as f32 / (1.0 + speed.abs() / 30.0);
             let now = k.ang.dot(up);
             let rate = (h * 14.0 * hovering as f32 / body.movers.len() as f32).min(1.0);
             k.ang += up * (want - now) * rate;

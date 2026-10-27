@@ -177,9 +177,6 @@ fn unpack(p: Packed) -> Design {
         .b
         .into_iter()
         .filter_map(|(x, y, z, t, c)| {
-            // 24 was a gimbal, before every weapon turned by itself: it held a gun up, so it
-            // becomes plain hull
-            let t = if t == 24 { BlockType::Hull.index() } else { t };
             let ty = BlockType::from_index(t)?;
             in_grid(blocktread_shared::glam::IVec3::new(x, y, z)).then(|| Block::new(x, y, z, ty, Some(c)))
         })

@@ -30,7 +30,7 @@ pub struct ShipBody {
     pub bolt_speed: f32,
     pub gun_range: f32,
     pub has_missile: bool,
-    /// The wheels and hover pads still on, and the drive power they add up to.
+    /// The wheels and hover pads still on, and the drive power the wheels add up to.
     pub movers: Vec<usize>,
     pub power: f32,
     /// Every weapon's mount: how it turns and where it can point.
@@ -91,6 +91,11 @@ impl ShipBody {
         self.alive.iter_mut().for_each(|a| *a = true);
         self.hp.clone_from(&self.block_max);
         self.rebuild();
+    }
+
+    /// Whether anything still drives it: a wheel, or hover pads with thrusters to push them.
+    pub fn can_drive(&self) -> bool {
+        self.power > 0.0 || (self.stats.thrust > 0.0 && self.movers.iter().any(|&i| self.design.blocks[i].ty.drive().is_some_and(|d| d.hover)))
     }
 
     pub fn cockpit_alive(&self) -> bool {

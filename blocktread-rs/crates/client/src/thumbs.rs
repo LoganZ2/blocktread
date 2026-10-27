@@ -64,6 +64,8 @@ fn render_thumbs(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut 
             BlockType::Engine => (0.12, 27.5),
             BlockType::Thruster => (0.05, 25.0),
             BlockType::Missile | BlockType::Plasma => (-0.1, 27.0),
+            // a wheel fits its whole tyre in, the biggest ones from further out
+            _ if ty.drive().is_some_and(|d| !d.hover) => (0.0, (2.0 * (ty.drive().unwrap().radius * 1.12 / 4.24).atan().to_degrees()).max(26.5)),
             // a lone cube: leave the top-right corner free for the shortcut key
             _ => (0.0, 26.5),
         };

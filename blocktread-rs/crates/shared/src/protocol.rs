@@ -155,6 +155,8 @@ pub struct InputPacket {
 
 pub const FLAG_FIRING: u8 = 1;
 pub const FLAG_BOOST: u8 = 2;
+/// Its thrusters push (on the throttle, or boosting).
+pub const FLAG_THRUST: u8 = 4;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ShipSnap {

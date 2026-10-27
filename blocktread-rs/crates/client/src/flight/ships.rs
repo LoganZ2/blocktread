@@ -4,13 +4,13 @@ use super::fx::{self, Fx, Kind};
 use super::hud::{HitKind, Hud};
 use super::{Session, env, ground};
 use crate::Screen;
-use crate::art::{BlockArt, Finish, Hold, KINGPIN, dmg_level, wheel_hold};
+use crate::art::{BlockArt, Finish, Hold, KINGPIN, dmg_level, wheel_hold, wheel_reach};
 use crate::audio::{Sfx, Sounds, falloff};
 use bevy::prelude::*;
 use std::collections::HashMap;
 use blocktread_client_core::{CoreEvent, CoreShip};
 use blocktread_shared::blocks::{BlockType, WeaponSfx};
-use blocktread_shared::drive::{steer_angle, wheel_drop, wheel_ray};
+use blocktread_shared::drive::{steer_angle, steers, wheel_drop, wheel_ray};
 
 pub struct ShipVis {
     pub root: Entity,
@@ -32,14 +32,15 @@ pub struct ShipVis {
     roll: f32,
 }
 
-/// A wheel: its pivot rides the suspension and steers about the kingpin, the spin under it rolls
-/// the wheel. Its strut's entities are also among the wheel block's own, so whatever takes the
-/// wheel takes its strut.
+/// A wheel: its pivot rides the suspension and steers about the kingpin, the spin under it (`reach`
+/// out from the kingpin) rolls the wheel. Its strut's entities are also among the wheel block's
+/// own, so whatever takes the wheel takes its strut.
 struct WheelVis {
     block: usize,
     pivot: Entity,
     spin: Entity,
     radius: f32,
+    reach: f32,
     hold: Hold,
     strut: Vec<Entity>,
 }
@@ -59,7 +60,7 @@ pub struct MissileVis(pub u16);
 fn spawn_vis(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<StandardMaterial>, s: &CoreShip) -> ShipVis {
     let root = commands.spawn((Transform::from_translation(s.pos).with_rotation(s.rot), Visibility::default(), DespawnOnExit(Screen::Flight))).id();
     let n = s.body.design.blocks.len();
-    // thrusters' plumes (they only burn while boosting)
+    // thrusters' plumes (they burn while the thrusters push)
     let engines = s.body.stats.engines.iter().map(|&i| nozzle(s, i)).collect();
     let mut vis = ShipVis { root, blocks: vec![Vec::new(); n], paint: vec![None; n], levels: vec![3; n], engines, bubble: None, flash: 0.0, wheels: Vec::new(), guns: Vec::new(), mounts: HashMap::new(), roll: 0.0 };
     for i in 0..n {
@@ -74,11 +75,12 @@ fn spawn_vis(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<Stan
             // the strut stays put on the vehicle; the wheel rides it
             let hold = wheel_hold(&s.body.design.blocks, &s.body.occ, b.pos());
             let pivot = commands.spawn((Transform::from_translation(local + Vec3::X * hold.side * KINGPIN), Visibility::default(), ChildOf(root))).id();
-            let spin = commands.spawn((Transform::from_translation(Vec3::X * -hold.side * KINGPIN), Visibility::default(), ChildOf(pivot))).id();
+            let reach = wheel_reach(b.ty);
+            let spin = commands.spawn((Transform::from_translation(Vec3::X * -hold.side * reach), Visibility::default(), ChildOf(pivot))).id();
             let (mut ents, paint) = art.spawn_block(commands, mats, spin, &b, Vec3::ZERO, level);
             let strut = art.spawn_strut(commands, mats, &b, hold, (root, local), (pivot, Vec3::ZERO));
             ents.extend(&strut);
-            vis.wheels.push(WheelVis { block: i, pivot, spin, radius, hold, strut });
+            vis.wheels.push(WheelVis { block: i, pivot, spin, radius, reach, hold, strut });
             (ents, paint)
         } else if b.ty.weapon().is_some() {
             let pivot = commands.spawn((Transform::from_translation(local), Visibility::default(), ChildOf(root))).id();
@@ -356,22 +358,23 @@ pub fn sync_ships(
             t.translation = s.pos;
             t.rotation = s.rot;
         }
-        // wheels: hang each where its spring puts it, turn the front ones (only your own vehicle's
-        // steering is known) and roll them all with the speed (`roll` is distance; each wheel
-        // turns by it over its own radius)
+        // wheels: hang each where its spring puts it, turn the steering ones ahead of the centre
+        // of mass (only your own vehicle's steering is known) and roll them all with the speed
+        // (`roll` is distance; each wheel turns by it over its own radius)
         let fwd_speed = s.vel.dot(s.rot * Vec3::NEG_Z);
         v.roll += fwd_speed * dt;
-        let steer = if Some(*id) == me { core.pred.as_ref().and_then(|p| p.last_cmd()).map_or(0.0, |c| steer_angle(c.steer_f(), fwd_speed)) } else { 0.0 };
+        let steer = if Some(*id) == me { core.pred.as_ref().and_then(|p| p.last_cmd()).map_or(0.0, |c| c.steer_f()) } else { 0.0 };
         let up = s.rot * Vec3::Y;
         for w in &v.wheels {
             let local = s.body.local(w.block);
             let dist = wheel_ray(&core.terrain, s.pos + s.rot * local, up).map(|(d, _)| d);
             if let Ok(mut t) = tf.get_mut(w.pivot) {
                 t.translation = local + Vec3::X * w.hold.side * KINGPIN - Vec3::Y * wheel_drop(dist, w.radius);
-                t.rotation = if local.z < -0.5 { Quat::from_rotation_y(-steer) } else { Quat::IDENTITY };
+                let spec = s.body.design.blocks[w.block].ty.drive().unwrap();
+                t.rotation = if steers(spec, local) { Quat::from_rotation_y(-steer_angle(spec.steer, steer, fwd_speed)) } else { Quat::IDENTITY };
             }
             if let Ok(mut t) = tf.get_mut(w.spin) {
-                t.translation = Vec3::X * -w.hold.side * KINGPIN;
+                t.translation = Vec3::X * -w.hold.side * w.reach;
                 t.rotation = Quat::from_rotation_x(-v.roll / w.radius);
             }
         }

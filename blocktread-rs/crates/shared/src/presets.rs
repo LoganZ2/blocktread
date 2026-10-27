@@ -43,7 +43,8 @@ pub fn preset(key: &str) -> Design {
     let name = PRESETS.iter().find(|p| p.key == key).map_or("新战车", |p| p.name);
     let lamp = Some(0xffe9b0);
     match key {
-        // a six-metre buggy: four wheels, an engine at the back, two cannons by the cab
+        // a six-metre buggy: steering wheels in front, twin tyres driving at the back, an engine,
+        // two cannons by the cab
         "rover" => {
             let (o, d, a) = (Some(0x77805a), Some(0x3b4030), Some(0xd9822b));
             for z in -4..=4 {
@@ -51,9 +52,9 @@ pub fn preset(key: &str) -> Design {
                     m.add(x, 0, z, Hull, if x == 0 { d } else { o });
                 }
             }
-            for z in [-3, 3] {
+            for (z, w) in [(-3, Wheel), (3, DualWheel)] {
                 m.sym(2, 0, z, Hull, d);
-                m.sym(3, 0, z, Wheel, None);
+                m.sym(3, 0, z, w, None);
             }
             m.sym(1, 0, -5, Lamp, lamp);
             m.add(0, 0, -5, Hull, a);
@@ -65,8 +66,8 @@ pub fn preset(key: &str) -> Design {
             m.add(0, 1, 3, Engine, None);
             m.sym(1, 1, 3, Hull, a);
         }
-        // four hover pads under a small hull: two lasers, a reactor to keep it all in the air, a
-        // small thruster
+        // four hover pads under a small hull, pushed by an engine between two small thrusters at
+        // the back: two lasers, a reactor to keep it all in the air
         "wasp" => {
             let (o, d, a) = (Some(0x5c6f78), Some(0x2e3438), Some(0xe8c547));
             for z in -2..=2 {
@@ -83,9 +84,11 @@ pub fn preset(key: &str) -> Design {
             m.add(0, 1, 0, Reactor, None);
             m.add(0, 1, 1, Hull, d);
             m.sym(1, 1, 1, Laser, None);
-            m.add(0, 1, 2, Thruster, None);
+            m.add(0, 0, 3, Engine, None);
+            m.sym(1, 0, 3, Thruster, None);
         }
-        // six big off-road wheels under an armoured cab: cannons forward, a railgun on the roof
+        // six twin-tyred wheels under an armoured cab, none of them steering: it turns by its sides
+        // like a tank. Cannons forward, a railgun on the roof
         "bison" => {
             let (o, d, a) = (Some(0x6f7a4a), Some(0x3b4030), Some(0xd9822b));
             for z in -4..=4 {
@@ -94,7 +97,7 @@ pub fn preset(key: &str) -> Design {
                 }
             }
             for z in [-3, 0, 3] {
-                m.sym(3, 0, z, BigWheel, None);
+                m.sym(3, 0, z, DualWheel, None);
             }
             m.add(0, 0, -5, Hull, a);
             m.sym(1, 0, -5, Lamp, lamp);
@@ -120,9 +123,9 @@ pub fn preset(key: &str) -> Design {
                     m.add(x, 0, z, Hull, if x == 0 { d } else { o });
                 }
             }
-            for z in [-3, 0, 4] {
+            for (z, w) in [(-3, Wheel), (0, Wheel), (4, DualWheel)] {
                 m.sym(2, 0, z, Hull, d);
-                m.sym(3, 0, z, Wheel, None);
+                m.sym(3, 0, z, w, None);
             }
             m.sym(1, 0, -5, Lamp, lamp);
             m.add(0, 0, -5, Hull, a);
@@ -141,8 +144,9 @@ pub fn preset(key: &str) -> Design {
             m.sym(1, 1, 2, Hull, o);
             m.sym(1, 1, 0, Hull, a);
         }
-        // the heavy: a wide hull on eight big wheels in armour, a railgun between two flak guns on
-        // the roof, cannons forward, a shield and reactors to feed it all
+        // the heavy: a wide hull on four big steering wheels and two giant ones at the back, in
+        // armour; a railgun between two flak guns on the roof, cannons forward, a shield and
+        // reactors to feed it all
         "rhino" => {
             let (o, d, a) = (Some(0x5c6442), Some(0x33372a), Some(0xd9822b));
             for z in -5..=5 {
@@ -150,9 +154,10 @@ pub fn preset(key: &str) -> Design {
                     m.add(x, 0, z, Hull, if x.abs() == 3 { d } else { o });
                 }
             }
-            for z in [-4, -1, 2, 5] {
+            for z in [-4, -1] {
                 m.sym(4, 0, z, BigWheel, None);
             }
+            m.sym(4, 0, 3, GiantWheel, None);
             for x in -2..=2 {
                 m.add(x, 0, -6, Armor, None);
             }

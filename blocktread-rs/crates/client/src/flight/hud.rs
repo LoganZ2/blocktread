@@ -307,10 +307,10 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
     commands.entity(help).insert((El::Help, Pickable::IGNORE, solid_plate()));
     spawn_header(&mut commands, f, help, "操作|CONTROLS · H 隐藏");
     for (k, v) in [
-        ("W / S", "前进 / 倒车（反着按就是刹车）"),
-        ("A / D", "左右转向"),
+        ("W / S", "前进 / 倒车，反着按就是刹车；推进器跟着 W 推"),
+        ("A / D", "左右转向；没有转向轮就靠两侧差速转"),
         ("鼠标", "转动镜头，武器跟着准星转"),
-        ("Shift", "推进器加速，耗能；耗尽后停 1 秒、松开再按"),
+        ("Shift", "推进器全力加速，耗能；耗尽后停 1 秒、松开再按"),
         ("左键 / 空格", "开火"),
         ("右键 / F", "发射导弹（准星对准目标一会儿即可锁定）"),
         ("R（按住）", "翻车后把车翻回来"),
@@ -576,8 +576,9 @@ pub fn update_hud(
                             warns.push(("能量耗尽 · 松开 Shift 再按才能加速".into(), false));
                         }
                     }
-                    if m.body.power == 0.0 {
-                        warns.push(("车轮全部损毁".into(), true));
+                    if !m.body.can_drive() {
+                        let pads = m.body.movers.iter().any(|&i| m.body.design.blocks[i].ty.drive().is_some_and(|d| d.hover));
+                        warns.push((if pads { "推进器全部损毁 · 悬浮车走不了" } else { "车轮全部损毁" }.into(), true));
                     }
                 }
                 let item = warns.get(i);

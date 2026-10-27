@@ -7,6 +7,8 @@ pub const MAX_BLOCKS: usize = 380;
 
 /// Least power-to-weight a vehicle needs to get going (and up a slope).
 pub const MIN_POWER: f32 = 0.2;
+/// Least push (m/s²) the thrusters must give a vehicle on hover pads, on the throttle alone.
+pub const MIN_PUSH: f32 = 3.0;
 /// Below this tip-over angle (degrees) the checks warn that a vehicle rolls too easily.
 pub const TIP_WARN: f32 = 35.0;
 
@@ -89,7 +91,7 @@ pub struct Stats {
     /// Wheels and hover pads ("movers"); those in the lowest row are the ones on the ground.
     pub wheels: Vec<usize>,
     pub grounded: Vec<usize>,
-    /// The drive power the movers add up to.
+    /// The drive power the wheels add up to (hover pads add none).
     pub power: f32,
     /// Energy per second the hover pads draw.
     pub hover_drain: f32,
@@ -253,7 +255,8 @@ pub fn compute_stats(blocks: &[Block], alive: &[bool]) -> Stats {
     s.grounded = s.wheels.iter().copied().filter(|&i| Some(blocks[i].y) == wheel_row).collect();
     s.power = s.wheels.iter().map(|&i| blocks[i].ty.drive().unwrap().power).sum();
     s.hover_drain = s.wheels.iter().map(|&i| blocks[i].ty.drive().unwrap()).filter(|d| d.hover).map(|d| d.drain).sum();
-    (s.accel, s.max_speed) = crate::drive::performance_of(s.wheels.iter().map(|&i| blocks[i].ty.drive().unwrap()), s.mass);
+    // what it drives on: the movers that reach the ground
+    (s.accel, s.max_speed) = crate::drive::rated(s.grounded.iter().map(|&i| blocks[i].ty.drive().unwrap()), s.thrust, s.mass);
     if s.grounded.len() >= 3 {
         let span = |f: fn(&Block) -> i8| {
             let v = s.grounded.iter().map(|&i| f(&blocks[i]) as f32);
@@ -261,7 +264,7 @@ pub fn compute_stats(blocks: &[Block], alive: &[bool]) -> Stats {
         };
         let ((x0, x1), (z0, z1)) = (span(|b| b.x), span(|b| b.z));
         // the centre of mass over the ground: wheels sit REST_DROP below their blocks
-        let reach = blocks[s.grounded[0]].ty.drive().unwrap().radius;
+        let reach = s.grounded.iter().map(|&i| blocks[i].ty.drive().unwrap().radius).sum::<f32>() / s.grounded.len() as f32;
         let h = (s.com.y - wheel_row.unwrap() as f32 + reach + crate::drive::REST_DROP).max(0.1);
         let reach = (s.com.x - x0).min(x1 - s.com.x).min(s.com.z - z0).min(z1 - s.com.z);
         s.tip = reach.max(0.0).atan2(h).to_degrees();
@@ -461,18 +464,44 @@ pub fn analyze(design: &Design) -> Analysis {
             add(Level::Err, "离地间隙", format!("{} 个方块比车轮还低，会拖在地上。车轮和悬浮器要装在最低的一层", low.len()), low);
         }
     }
-    if !s.wheels.is_empty() {
-        if s.power / s.mass.max(1.0) < MIN_POWER {
-            add(Level::Err, "功重比", format!("动力不足：功重比 {:.2}，至少 {MIN_POWER:.2}。多装车轮、换越野轮，或者减重", s.power / s.mass.max(1.0)), vec![]);
+    // what drives it: the wheels on the ground, or with only hover pads under it, the thrusters
+    let hover = |i: &usize| blocks[*i].ty.drive().is_some_and(|d| d.hover);
+    let pads_only = !s.grounded.is_empty() && s.grounded.iter().all(hover);
+    let power: f32 = s.grounded.iter().map(|&i| blocks[i].ty.drive().unwrap().power).sum();
+    if pads_only {
+        if s.engines.is_empty() {
+            let msg = if s.eng_blocked.is_empty() { "悬浮器只把车托起来，自己不往前走：要装推进器，按 W 推着走" } else { "推进器的尾喷口都被挡住了，推不动悬浮车。推进器正后方必须空着" };
+            add(Level::Err, "推进", msg.into(), s.eng_blocked.clone());
+        } else if s.accel < MIN_PUSH {
+            add(Level::Err, "推进", format!("推力不足：只能推出 {:.1} m/s²，至少 {MIN_PUSH:.0}。多装推进器，或者减重", s.accel), vec![]);
         } else {
-            add(Level::Ok, "功重比", format!("{:.2}（需要 ≥ {MIN_POWER:.2}）", s.power / s.mass.max(1.0)), vec![]);
+            add(Level::Ok, "推进", format!("推进器推着走 · {:.1} m/s²", s.accel), vec![]);
+        }
+    } else if !s.wheels.is_empty() {
+        if power / s.mass.max(1.0) < MIN_POWER {
+            add(Level::Err, "功重比", format!("动力不足：着地车轮的功重比 {:.2}，至少 {MIN_POWER:.2}。多装车轮、换大轮子，或者减重", power / s.mass.max(1.0)), vec![]);
+        } else {
+            add(Level::Ok, "功重比", format!("{:.2}（需要 ≥ {MIN_POWER:.2}）", power / s.mass.max(1.0)), vec![]);
         }
     }
     if s.grounded.len() >= 3 {
-        // hover pads turn the vehicle by themselves; wheels need one ahead of the centre of mass
-        let hovers = s.grounded.iter().any(|&i| blocks[i].ty.drive().is_some_and(|d| d.hover));
-        if !hovers && !s.grounded.iter().any(|&i| (blocks[i].z as f32) < s.com.z - 0.5) {
-            add(Level::Err, "转向", "重心前面没有车轮，转不了向。前面的车轮负责转向".into(), vec![]);
+        // hover pads turn the vehicle by themselves; steering wheels ahead of the centre of mass
+        // steer; with neither, the wheels on the two sides drive against each other
+        let rel = |i: usize| blocks[i].pos().as_vec3() - s.com;
+        let steering: Vec<usize> = s.grounded.iter().copied().filter(|&i| crate::drive::steers(blocks[i].ty.drive().unwrap(), rel(i))).collect();
+        if s.grounded.iter().any(hover) {
+            add(Level::Ok, "转向", "悬浮器自己就能转向".into(), vec![]);
+        } else if !steering.is_empty() {
+            add(Level::Ok, "转向", format!("{} 个转向轮在重心前面", steering.len()), vec![]);
+        } else if !(s.grounded.iter().any(|&i| rel(i).x < -0.5) && s.grounded.iter().any(|&i| rel(i).x > 0.5)) {
+            add(Level::Err, "转向", "转不了向：重心前面没有转向轮，重心左右两侧也没有都装车轮，没法差速转弯".into(), vec![]);
+        } else {
+            let behind: Vec<usize> = s.grounded.iter().copied().filter(|&i| blocks[i].ty.drive().unwrap().steer > 0.0).collect();
+            if behind.is_empty() {
+                add(Level::Ok, "转向", "没有转向轮：靠左右两侧一快一慢转弯，像坦克一样，原地也能掉头".into(), vec![]);
+            } else {
+                add(Level::Warn, "转向", "转向轮都没装在重心前面，打不了方向；现在只能靠左右两侧差速转弯，转得慢".into(), behind);
+            }
         }
         let (xs, zs): (Vec<f32>, Vec<f32>) = s.grounded.iter().map(|&i| (blocks[i].x as f32, blocks[i].z as f32)).unzip();
         let inside = |v: &[f32], c: f32| c > v.iter().copied().fold(f32::MAX, f32::min) + 0.25 && c < v.iter().copied().fold(f32::MIN, f32::max) - 0.25;
@@ -487,16 +516,18 @@ pub fn analyze(design: &Design) -> Analysis {
     if s.hover_drain > s.energy_regen {
         add(Level::Warn, "悬浮耗能", format!("悬浮器每秒耗能 {:.0}，超过能量回复 {:.0}：能量会慢慢耗尽，然后落地。加反应堆", s.hover_drain, s.energy_regen), vec![]);
     }
-    // thrusters: the boost
-    if s.count(BlockType::Engine) + s.count(BlockType::Thruster) == 0 {
-        add(Level::Ok, "推进器", "没有推进器 · 不能加速".into(), vec![]);
-    } else if s.engines.is_empty() {
-        add(Level::Warn, "推进器", "所有推进器的尾喷口都被挡住了，不能加速。推进器正后方必须空着".into(), s.eng_blocked.clone());
-    } else {
-        add(Level::Ok, "推进器", format!("{} 台 · 推力 {:.0}", s.engines.len(), s.thrust), vec![]);
-        if !s.eng_blocked.is_empty() {
-            add(Level::Warn, "推进器", format!("{} 台推进器尾喷口被挡住，不出力", s.eng_blocked.len()), s.eng_blocked.clone());
+    // thrusters: push on the throttle, all out on the boost (a hover vehicle's were checked above)
+    if !pads_only {
+        if s.count(BlockType::Engine) + s.count(BlockType::Thruster) == 0 {
+            add(Level::Ok, "推进器", "没有推进器 · 不能加速".into(), vec![]);
+        } else if s.engines.is_empty() {
+            add(Level::Warn, "推进器", "所有推进器的尾喷口都被挡住了，不出力。推进器正后方必须空着".into(), s.eng_blocked.clone());
+        } else {
+            add(Level::Ok, "推进器", format!("{} 台 · 推力 {:.0} · 按 W 推，Shift 全力", s.engines.len(), s.thrust), vec![]);
         }
+    }
+    if !s.engines.is_empty() && !s.eng_blocked.is_empty() {
+        add(Level::Warn, "推进器", format!("{} 台推进器尾喷口被挡住，不出力", s.eng_blocked.len()), s.eng_blocked.clone());
     }
     // weapons: how each one turns, and whether it can point anywhere at all
     let ms = crate::weapons::mounts(blocks, &alive, &occupancy(blocks, &alive));
