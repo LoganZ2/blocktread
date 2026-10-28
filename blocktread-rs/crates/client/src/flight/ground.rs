@@ -12,6 +12,7 @@ use blocktread_shared::glam::Vec3 as GVec3;
 use blocktread_shared::blocks::Design;
 use blocktread_shared::rng::hash01;
 use blocktread_shared::world::fbm3;
+use blocktread_shared::arena::CAGE_HALF;
 use blocktread_shared::terrain::{CELL, HALF, N, Terrain};
 
 /// Towards the sun.
@@ -113,6 +114,10 @@ fn terrain_mesh(ground: &Terrain) -> Mesh {
             let steep = 1.0 - n.y;
             let patch = smoothstep(0.35, 0.6, fbm3(GVec3::new(x / 90.0, 3.7, z / 90.0), 3));
             let mut c = grass.lerp(dry, patch).lerp(earth, smoothstep(0.04, 0.13, steep)).lerp(stone, smoothstep(0.16, 0.3, steep));
+            if ground.arena.is_some() && x.abs().max(z.abs()) <= CAGE_HALF + CELL {
+                // under the cage's walls: concrete
+                c = linear(0x6e6a63);
+            }
             c *= 0.94 + hash01(i as u32, j as u32 + 7) * 0.12;
             col.push([c.x, c.y, c.z, 1.0]);
         }
@@ -120,6 +125,10 @@ fn terrain_mesh(ground: &Terrain) -> Mesh {
     let mut idx = Vec::with_capacity((N - 1) * (N - 1) * 6);
     for j in 0..N - 1 {
         for i in 0..N - 1 {
+            // the arena draws its own floor and pits
+            if ground.arena.is_some() && super::arena::is_arena_cell(ground, -HALF + i as f32 * CELL, -HALF + j as f32 * CELL) {
+                continue;
+            }
             let a = (j * N + i) as u32;
             let (b, c, d) = (a + 1, a + N as u32, a + N as u32 + 1);
             idx.extend_from_slice(&[a, d, b, a, c, d]);

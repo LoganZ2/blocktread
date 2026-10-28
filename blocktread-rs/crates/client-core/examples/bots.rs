@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use blocktread_client_core::{ClientCore, ConnState, CoreEvent, Phase};
 use blocktread_server::{HubConfig, ServerConfig, start};
 use blocktread_shared::ai::{AiPilot, Contact, Skill};
+use blocktread_shared::arena::{HILL_HALF, HILL_TOP};
 use blocktread_shared::flight::InputCmd;
 use blocktread_shared::presets::{PRESETS, preset};
 use blocktread_shared::protocol::{Mode, Round};
@@ -61,7 +62,7 @@ fn main() -> anyhow::Result<()> {
                 let cmd = p.last_cmd().unwrap_or_default();
                 println!("t={:.1} pos={:.0?} spd={:.0} near={:?} buttons={} range={:.0} weapons={}", t0.elapsed().as_secs_f32(), p.kin.pos, p.kin.vel.length(), near, cmd.buttons, me.body.gun_range, me.body.stats.weapons.len());
             }
-            core.update(dt, &mut |c: &ClientCore, _tick| ai_input(c, ai));
+            core.update(dt, &mut |c: &ClientCore, tick| ai_input(c, ai, tick));
             lobby(core, ci, mode, &mut matches_over);
             // the room's rounds, as the first client sees them
             if ci == 0 && core.round != round {
@@ -143,7 +144,7 @@ fn lobby(core: &mut ClientCore, i: usize, mode: Mode, over: &mut u32) {
     }
 }
 
-fn ai_input(c: &ClientCore, ai: &mut AiPilot) -> InputCmd {
+fn ai_input(c: &ClientCore, ai: &mut AiPilot, tick: u32) -> InputCmd {
     let (Some(pred), Some(me)) = (c.pred.as_ref(), c.my()) else { return InputCmd::default() };
     let others: Vec<Contact> = c
         .ships
@@ -151,5 +152,7 @@ fn ai_input(c: &ClientCore, ai: &mut AiPilot) -> InputCmd {
         .filter(|s| Some(s.id) != c.my_ship)
         .map(|s| Contact { id: s.id, team: s.team, pos: s.pos, vel: s.vel, radius: s.body.radius })
         .collect();
-    ai.think(&pred.kin, &me.body, 0.0, me.team, &others, &c.rocks, blocktread_shared::DT)
+    // in 2v2, make for the hill
+    ai.goal = c.terrain.arena.as_ref().filter(|_| c.hill.is_some()).map(|a| (a.hill.centre().with_y(HILL_TOP), HILL_HALF - 3.0));
+    ai.think(&pred.kin, &me.body, 0.0, me.team, &others, &c.rocks, &c.terrain, tick)
 }

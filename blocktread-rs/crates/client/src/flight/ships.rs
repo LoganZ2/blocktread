@@ -20,8 +20,12 @@ pub struct ShipVis {
     /// Ship-local nozzle positions of the surviving engines and thrusters, with each nozzle's size
     /// (the exhaust system emits from them).
     pub engines: Vec<(Vec3, f32)>,
+    /// Ship-local nozzle positions of the surviving jump jets (they blow down as it jumps).
+    pub jets: Vec<Vec3>,
     bubble: Option<(Entity, Handle<StandardMaterial>)>,
     flash: f32,
+    /// The red shell and light it wears in overdrive (hidden otherwise).
+    aura: (Entity, Handle<StandardMaterial>),
     wheels: Vec<WheelVis>,
     /// Each gun's pivot (it turns to where the gun points), and its mount: the face it sits on
     /// and the mount's entities. Those are also among the gun block's own entities, so whatever
@@ -30,6 +34,11 @@ pub struct ShipVis {
     mounts: HashMap<usize, (IVec3, Vec<Entity>)>,
     /// How far the wheels have rolled (rad).
     roll: f32,
+    /// Each saw's blade and flipper's flap: its block and the pivot that moves it; how far the
+    /// blades have turned (rad) and how far up the flaps are.
+    moving: Vec<(usize, Entity)>,
+    blade: f32,
+    flap: f32,
 }
 
 /// A wheel: its pivot rides the suspension and steers about the kingpin, the spin under it (`reach`
@@ -54,7 +63,7 @@ pub struct FlameMats {
 }
 
 #[derive(Component)]
-pub struct MissileVis(pub u16);
+pub struct MissileVis(pub u32);
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_vis(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<StandardMaterial>, s: &CoreShip) -> ShipVis {
@@ -62,7 +71,11 @@ fn spawn_vis(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<Stan
     let n = s.body.design.blocks.len();
     // thrusters' plumes (they burn while the thrusters push)
     let engines = s.body.stats.engines.iter().map(|&i| nozzle(s, i)).collect();
-    let mut vis = ShipVis { root, blocks: vec![Vec::new(); n], paint: vec![None; n], levels: vec![3; n], engines, bubble: None, flash: 0.0, wheels: Vec::new(), guns: Vec::new(), mounts: HashMap::new(), roll: 0.0 };
+    let jets = jets(s);
+    let aura_mat = mats.add(StandardMaterial { base_color: Color::BLACK, alpha_mode: AlphaMode::Add, unlit: true, ..default() });
+    let aura = commands.spawn((Mesh3d(art.sphere.clone()), MeshMaterial3d(aura_mat.clone()), Transform::from_scale(Vec3::splat(s.body.radius * 1.14)), Visibility::Hidden, ChildOf(root))).id();
+    commands.spawn((PointLight { color: Color::srgb(1.0, 0.25, 0.15), intensity: 250_000.0, range: s.body.radius * 3.0 + 6.0, ..default() }, ChildOf(aura)));
+    let mut vis = ShipVis { root, blocks: vec![Vec::new(); n], paint: vec![None; n], levels: vec![3; n], engines, jets, bubble: None, flash: 0.0, aura: (aura, aura_mat), wheels: Vec::new(), guns: Vec::new(), mounts: HashMap::new(), roll: 0.0, moving: Vec::new(), blade: 0.0, flap: 0.0 };
     for i in 0..n {
         if !s.body.alive[i] {
             continue;
@@ -94,7 +107,11 @@ fn spawn_vis(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<Stan
             }
             (ents, paint)
         } else {
-            art.spawn_block(commands, mats, root, &b, s.body.local(i), level)
+            let (ents, paint, pivot) = art.spawn_block_moving(commands, mats, root, &b, local, level);
+            if let Some(pivot) = pivot {
+                vis.moving.push((i, pivot));
+            }
+            (ents, paint)
         };
         vis.blocks[i] = ents;
         vis.paint[i] = paint;
@@ -109,6 +126,11 @@ fn spawn_vis(commands: &mut Commands, art: &mut BlockArt, mats: &mut Assets<Stan
 }
 
 /// Where an engine's exhaust leaves it, and how big its plume is.
+/// Where each working jump jet's nozzle is, under it.
+fn jets(s: &CoreShip) -> Vec<Vec3> {
+    s.body.stats.gadgets.iter().filter(|&&i| s.body.design.blocks[i].ty == BlockType::JumpJet).map(|&i| s.body.local(i) - Vec3::Y * 0.58).collect()
+}
+
 fn nozzle(s: &CoreShip, i: usize) -> (Vec3, f32) {
     if s.body.design.blocks[i].ty == BlockType::Thruster { (s.body.local(i) + Vec3::Z * 0.49, 0.55) } else { (s.body.local(i) + Vec3::Z * 0.58, 1.0) }
 }
@@ -132,6 +154,7 @@ pub fn apply_events(
     mut art: ResMut<BlockArt>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
     mut fx: ResMut<Fx>,
     mut sounds: ResMut<Sounds>,
     mut hud: ResMut<Hud>,
@@ -147,6 +170,7 @@ pub fn apply_events(
         match ev {
             CoreEvent::Welcome => {
                 ground::spawn_terrain(&mut commands, &mut meshes, &mut mats, &session.core.terrain, old_ground.iter());
+                super::arena::spawn_arena(&mut commands, &mut meshes, &mut mats, &mut images, &session.core.terrain);
                 let rocks = session.core.rocks.clone();
                 env::spawn_rocks(&mut commands, &mut meshes, &mut mats, &rocks);
             }
@@ -278,6 +302,7 @@ pub fn apply_events(
                 }
                 // engines may have been lost: keep exhausting only from the survivors
                 v.engines.retain(|(at, _)| s.body.stats.engines.iter().any(|&i| nozzle(s, i).0.distance(*at) < 0.01));
+                v.jets = jets(s);
                 sounds.play(&mut commands, now, Sfx::Pop, falloff(ear, s.pos), 0.03);
                 if Some(ship) == me {
                     hud.silo_dirty = true;
@@ -306,7 +331,10 @@ pub fn apply_events(
             }
             CoreEvent::Shot { ship, weapon, pos, vel, own } => {
                 let (svel, mine) = session.core.ships.get(&ship).map_or((Vec3::ZERO, false), |s| (s.vel, Some(s.id) == me));
-                fx::bolt(&mut commands, &fx, weapon, pos, vel, ship, vel - svel);
+                // missiles are drawn from the missile list (own ones from their launch on)
+                if !weapon.weapon().is_some_and(|w| w.homing) {
+                    fx::bolt(&mut commands, &fx, weapon, pos, vel, ship, vel - svel);
+                }
                 fx::particle(&mut commands, &mut fx, pos, svel, 0.06, 0.9, 0.3, Kind::Flash, 0.0);
                 let vol = if own || mine { 0.55 } else { falloff(ear, pos) * 0.5 };
                 let gap = if own { 0.045 } else { 0.09 };
@@ -326,6 +354,9 @@ pub fn apply_events(
                 info!("feed: {text}");
                 hud.feed(&text, bad);
             }
+            CoreEvent::Smoke(c) => {
+                sounds.play(&mut commands, now, Sfx::Ignite, falloff(ear, c.pos), 0.1);
+            }
             CoreEvent::YourShip(id) => {
                 if id.is_some() {
                     session.death = None;
@@ -342,6 +373,7 @@ pub fn sync_ships(
     session: Res<Session>,
     mut vis: ResMut<ShipVisuals>,
     mut tf: Query<&mut Transform>,
+    mut shown: Query<&mut Visibility>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut fx: ResMut<Fx>,
     flames: Res<FlameMats>,
@@ -385,6 +417,33 @@ pub fn sync_ships(
                 t.rotation = Quat::from_rotation_y(-yaw) * Quat::from_rotation_x(pitch);
             }
         }
+        // saws spin, faster as they bite (throwing sparks); flaps snap up and settle back
+        v.blade += dt * if s.cutting { 44.0 } else { 26.0 };
+        let up_to = if s.flipping { 1.05 } else { 0.0 };
+        v.flap += (up_to - v.flap) * (1.0 - (-dt * if up_to > v.flap { 40.0 } else { 7.0 }).exp());
+        for &(i, pivot) in &v.moving {
+            let saw = s.body.design.blocks[i].ty == BlockType::Saw;
+            if let Ok(mut t) = tf.get_mut(pivot) {
+                t.rotation = if saw { Quat::from_rotation_x(v.blade) } else { Quat::from_rotation_x(v.flap) };
+            }
+            if saw && s.cutting && s.body.alive[i] && fx.rng.f32() < dt * 40.0 {
+                let fwd = s.rot * Vec3::NEG_Z;
+                let at = s.body.world(s.pos, s.rot, i) + fwd * 0.85 + s.rot * Vec3::Y * 0.1;
+                fx::sparks(&mut commands, &mut fx, at, s.vel + s.rot * Vec3::new(0.0, 3.0, 2.0), 3, 6.0, Kind::Spark);
+            }
+        }
+        // overdrive: a red shell that throbs, and a red light on everything round it
+        let od = core.overdrive_left(s);
+        if let Ok(mut t) = tf.get_mut(v.aura.0) {
+            let pulse = 0.5 + 0.5 * (time.elapsed_secs() * 7.0).sin();
+            t.scale = Vec3::splat(s.body.radius * (1.12 + 0.04 * pulse));
+            if let Some(mut mat) = mats.get_mut(&v.aura.1) {
+                mat.base_color = Color::LinearRgba(LinearRgba::rgb(1.6, 0.22, 0.12) * (0.05 + 0.05 * pulse));
+            }
+        }
+        if let Ok(mut shown) = shown.get_mut(v.aura.0) {
+            shown.set_if_neq(if od > 0.0 { Visibility::Inherited } else { Visibility::Hidden });
+        }
         if let Some((_, m)) = &v.bubble {
             v.flash *= (-dt * 4.0).exp();
             let a = if s.shield_frac > 0.01 { v.flash * 0.9 + if Some(*id) == me { 0.0 } else { 0.03 } } else { 0.0 };
@@ -393,12 +452,11 @@ pub fn sync_ships(
             }
         }
     }
-    // missiles: one entity per server missile, drawn at the interpolated time
-    let mut have: HashMap<u16, Entity> = missiles.iter().map(|(e, m)| (m.0, e)).collect();
-    for (id, m) in &core.missiles {
-        let p = core.missile_pos(m);
-        let rot = Transform::IDENTITY.looking_to(m.vel.normalize_or(Vec3::NEG_Z), Vec3::Y).rotation;
-        match have.remove(id) {
+    // missiles: one entity each, from its launch on (see `ClientCore::missile_draws`)
+    let mut have: HashMap<u32, Entity> = missiles.iter().map(|(e, m)| (m.0, e)).collect();
+    for (key, p, vel) in core.missile_draws() {
+        let rot = Transform::IDENTITY.looking_to(vel.normalize_or(Vec3::NEG_Z), Vec3::Y).rotation;
+        match have.remove(&key) {
             Some(e) => {
                 if let Ok(mut t) = tf.get_mut(e) {
                     t.translation = p;
@@ -410,13 +468,13 @@ pub fn sync_ships(
                     Mesh3d(art.cube.clone()),
                     MeshMaterial3d(flames.missile.clone()),
                     Transform::from_translation(p).with_rotation(rot).with_scale(Vec3::new(0.36, 0.36, 1.6)),
-                    MissileVis(*id),
+                    MissileVis(key),
                     DespawnOnExit(Screen::Flight),
                 ));
             }
         }
         // a small flare at the motor; its exhaust comes from the exhaust system
-        fx::particle(&mut commands, &mut fx, p, -m.vel * 0.1, 0.08, 0.45, 0.2, Kind::Fire, 0.0);
+        fx::particle(&mut commands, &mut fx, p, -vel * 0.1, 0.08, 0.45, 0.2, Kind::Fire, 0.0);
     }
     for (_, e) in have {
         commands.entity(e).despawn();

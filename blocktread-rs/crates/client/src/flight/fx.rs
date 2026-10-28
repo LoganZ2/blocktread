@@ -234,8 +234,9 @@ pub fn update_fx(
                     }
                 }
             }
-            if !dead && nb.y < core.terrain.height(nb.x, nb.z) {
-                hits.push((nb, b.splash));
+            if !dead && let Some(f) = core.terrain.segment_hit(a, nb) {
+                // the ground, a wall, a crate
+                hits.push((a.lerp(nb, f), b.splash));
                 dead = true;
             }
             if !dead {

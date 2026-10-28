@@ -8,7 +8,7 @@
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-  echo "usage: $0 user@host [server args: --queue-wait S --match-secs S --kill-limit N]" >&2
+  echo "usage: $0 user@host [server args: --queue-wait S --match-secs S --win-points N]" >&2
   exit 2
 fi
 HOST="$1"

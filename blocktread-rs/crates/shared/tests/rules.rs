@@ -21,9 +21,11 @@ fn presets_pass_all_checks() {
 fn the_buggys_numbers() {
     let s = analyze(&preset("rover")).stats;
     assert_eq!(s.n, 49);
-    assert!((s.mass - 53.2).abs() < 0.01, "mass {}", s.mass);
+    assert!((s.mass - 54.2).abs() < 0.01, "mass {}", s.mass);
     assert_eq!((s.wheels.len(), s.grounded.len()), (4, 4));
-    assert!((s.cost - 77.8).abs() < 0.05, "cost {}", s.cost);
+    assert!((s.cost - 79.8).abs() < 0.05, "cost {}", s.cost);
+    // two jump jets in its floor
+    assert_eq!(s.gadgets.len(), 2);
     // four wheels drive it, the twin tyres at the back hardest; the thruster pushes on top
     assert!((s.power - 38.0).abs() < 1e-4);
     assert!((s.thrust - 26.0).abs() < 1e-4);
@@ -164,7 +166,7 @@ fn spectators_join_with_their_own_message() {
 fn hit_confirms_come_last_so_older_clients_skip_them() {
     // postcard numbers enum variants in order: the messages an older client knows keep theirs,
     // and the new one carries a number it has never seen, which its decode turns down
-    let scores = ServerMsg::Scores { rows: vec![], wave: 0, enemies: 0, limit: 0, left: 0.0, round: Round::None };
+    let scores = ServerMsg::Scores { rows: vec![], wave: 0, enemies: 0, limit: 0, left: 0.0, round: Round::None, hill: None };
     assert_eq!(encode(&scores)[0], 20);
     let hit = encode(&ServerMsg::HitConfirm { target: 7, shield: true });
     assert_eq!(hit[0], 21);

@@ -44,7 +44,7 @@ pub fn preset(key: &str) -> Design {
     let lamp = Some(0xffe9b0);
     match key {
         // a six-metre buggy: steering wheels in front, twin tyres driving at the back, an engine,
-        // two cannons by the cab
+        // two cannons by the cab, and two jump jets in its floor
         "rover" => {
             let (o, d, a) = (Some(0x77805a), Some(0x3b4030), Some(0xd9822b));
             for z in -4..=4 {
@@ -58,6 +58,8 @@ pub fn preset(key: &str) -> Design {
             }
             m.sym(1, 0, -5, Lamp, lamp);
             m.add(0, 0, -5, Hull, a);
+            m.add(0, 0, -2, JumpJet, None);
+            m.add(0, 0, 2, JumpJet, None);
             m.add(0, 1, -1, Cockpit, None);
             m.add(0, 1, 0, Hull, o);
             m.sym(1, 1, -1, Hull, o);
@@ -88,7 +90,7 @@ pub fn preset(key: &str) -> Design {
             m.sym(1, 0, 3, Thruster, None);
         }
         // six twin-tyred wheels under an armoured cab, none of them steering: it turns by its sides
-        // like a tank. Cannons forward, a railgun on the roof
+        // like a tank. A ram across its nose, cannons forward, a railgun on the roof
         "bison" => {
             let (o, d, a) = (Some(0x6f7a4a), Some(0x3b4030), Some(0xd9822b));
             for z in -4..=4 {
@@ -99,8 +101,9 @@ pub fn preset(key: &str) -> Design {
             for z in [-3, 0, 3] {
                 m.sym(3, 0, z, DualWheel, None);
             }
-            m.add(0, 0, -5, Hull, a);
-            m.sym(1, 0, -5, Lamp, lamp);
+            m.add(0, 0, -5, Ram, None);
+            m.sym(1, 0, -5, Ram, None);
+            m.sym(2, 0, -5, Lamp, lamp);
             for z in -2..=0 {
                 m.sym(2, 1, z, Armor, None);
             }
@@ -115,7 +118,8 @@ pub fn preset(key: &str) -> Design {
             m.sym(1, 1, -3, Cannon, None);
             m.add(0, 2, 0, Railgun, None);
         }
-        // a rack of four missiles on a long six-wheeled bed, a laser under the cab
+        // a rack of four missiles on a long six-wheeled bed, a laser under the cab, smoke to cover
+        // its getaway
         "scorpion" => {
             let (o, d, a) = (Some(0x8a7d55), Some(0x3e3a2c), Some(0xb5432f));
             for z in -4..=5 {
@@ -143,10 +147,11 @@ pub fn preset(key: &str) -> Design {
             }
             m.sym(1, 1, 2, Hull, o);
             m.sym(1, 1, 0, Hull, a);
+            m.add(0, 2, 4, Smoke, None);
         }
         // the heavy: a wide hull on four big steering wheels and two giant ones at the back, in
         // armour; a railgun between two flak guns on the roof, cannons forward, a shield and
-        // reactors to feed it all
+        // reactors to feed it all, and mines for whoever comes up behind
         "rhino" => {
             let (o, d, a) = (Some(0x5c6442), Some(0x33372a), Some(0xd9822b));
             for z in -5..=5 {
@@ -182,6 +187,7 @@ pub fn preset(key: &str) -> Design {
             for z in [0, 1, 3] {
                 m.add(0, 2, z, Hull, d);
             }
+            m.add(0, 2, 4, MineLayer, None);
         }
         _ => m.add(0, 0, 0, Cockpit, None),
     }

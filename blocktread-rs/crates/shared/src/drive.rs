@@ -2,13 +2,16 @@
 //! over the terrain both sides generate. Wheels drive themselves; the steering ones turn, and a
 //! vehicle without them turns by driving its two sides against each other. Hover pads only hold
 //! the vehicle up on energy: they slide, turn it fast, and drag; thrusters push it, on the
-//! throttle and harder while boosting. Deterministic like the rest of shared, so the client
-//! predicts its own vehicle with the very code the server runs.
+//! throttle and harder while boosting. Jump jets kick it up off the ground. Deterministic like the
+//! rest of shared, so the client predicts its own vehicle with the very code the server runs.
 
-use crate::blocks::DriveSpec;
-use crate::flight::{BTN_BOOST, BTN_FLIP, InputCmd, Kin};
+use crate::arena::{Arena, SAW_R, Saw};
+use crate::blocks::{BlockType, DriveSpec, Gadget};
+use crate::flight::{BTN_BOOST, BTN_FLIP, BTN_JUMP, Impact, InputCmd, Kin};
 use crate::ship::ShipBody;
+use crate::solid::Style;
 use crate::terrain::{self, Terrain};
+use crate::world::tick_time;
 use glam::{Quat, Vec3};
 
 pub const GRAVITY: f32 = 14.0;
@@ -45,6 +48,13 @@ const BOOST_DRAIN_PER_THRUST: f32 = 0.2;
 /// After the battery runs dry under boost, the boost stays off this long (and until Shift is
 /// pressed again).
 pub const BOOST_LOCK: f32 = 1.0;
+/// The most a jump kicks a vehicle up by (m/s), however many jets it has.
+pub const JUMP_TOP: f32 = 12.0;
+
+/// How hard `jets` jump jets kick a vehicle of mass `mass` up (m/s).
+pub fn jump_kick(jets: u8, mass: f32) -> f32 {
+    BlockType::JumpJet.gadget().map_or(0.0, |g| (g.power * jets as f32 / mass.max(1.0)).min(JUMP_TOP))
+}
 
 /// Acceleration and top speed (m/s²; m/s) from the movers' power over the vehicle's mass. Top
 /// speed is the movers' own, weighted by their power, and lower for a heavy vehicle.
@@ -99,8 +109,25 @@ pub fn steers(spec: &DriveSpec, local: Vec3) -> bool {
     spec.steer > 0.0 && !spec.hover && local.z < -0.5
 }
 
-/// Where a wheel hanging from `mount` (along `-up`) meets the ground: the distance along the
-/// suspension, and the ground's normal there. None when the vehicle lies on its side or roof.
+/// How far down a wheel looks for something to stand on (beyond its longest reach).
+const WHEEL_REACH: f32 = 3.0;
+/// A face a wheel can stand on points at least this far up (about 60° from level at most).
+const WHEEL_GRIP: f32 = 0.5;
+/// How far a pit's lip tips a hull resting on it towards the pit (as the slope's run over rise).
+const RIM_TIP: f32 = 0.3;
+/// How far the edge of a top tips a hull resting right on it outwards.
+const EDGE_TIP: f32 = 0.5;
+/// Hulls bounce off the arena's pieces with this much of the speed they hit at.
+const SOLID_BOUNCE: f32 = 0.25;
+/// A saw blade throws what touches it off at least this fast (m/s), and up off its wheels (so
+/// that their grip doesn't just stop it); and it bites what is this close.
+const SAW_THROW: f32 = 7.0;
+const SAW_LIFT: f32 = 3.0;
+const SAW_BITE: f32 = 0.15;
+
+/// Where a wheel hanging from `mount` (along `-up`) meets the ground or a piece standing on it: the
+/// distance along the suspension, and the surface's normal there. None when the vehicle lies on
+/// its side or roof.
 pub fn wheel_ray(ground: &Terrain, mount: Vec3, up: Vec3) -> Option<(f32, Vec3)> {
     if up.y < 0.25 {
         return None;
@@ -111,7 +138,19 @@ pub fn wheel_ray(ground: &Terrain, mount: Vec3, up: Vec3) -> Option<(f32, Vec3)>
         t += (p.y - ground.height(p.x, p.z)) / up.y;
     }
     let p = mount - up * t;
-    Some((t, ground.normal(p.x, p.z)))
+    let mut hit = (t, ground.normal(p.x, p.z));
+    // a crate, the hill or a ramp under it; not a wall's face, which a wheel pressed against it
+    // would otherwise drive straight up
+    let end = mount - up * WHEEL_REACH;
+    for s in ground.solids_near(mount, WHEEL_REACH) {
+        if let Some((f, n)) = s.clip(mount, end)
+            && f * WHEEL_REACH < hit.0
+            && n.y > WHEEL_GRIP
+        {
+            hit = (f * WHEEL_REACH, n);
+        }
+    }
+    Some(hit)
 }
 
 /// How far below its block a wheel of `radius` sits, for a suspension `dist` from the ground.
@@ -127,14 +166,15 @@ pub fn spawn_height(body: &ShipBody, ground: &Terrain, x: f32, z: f32, rot: Quat
         if body.alive[i] {
             let l = rot * body.local(i);
             let reach = body.design.blocks[i].ty.drive().map_or(BLOCK_R, |d| d.radius + REST_DROP);
-            y = y.max(ground.height(x + l.x, z + l.z) - l.y + reach);
+            y = y.max(ground.surface(x + l.x, z + l.z) - l.y + reach);
         }
     }
     y + 0.3
 }
 
-/// Advance one vehicle by one tick.
-pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain, dt: f32) {
+/// Advance one vehicle by one tick. Returns the hardest knock against the arena's pieces, if one
+/// was hard enough to hurt (the server deals the damage; prediction ignores it).
+pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain, dt: f32) -> Option<Impact> {
     let st = &body.stats;
     let blocks = &body.design.blocks;
     let m = st.mass.max(1.0);
@@ -158,6 +198,18 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
             k.boost_hold = true;
         }
     }
+    // the jump jets, all at once: a kick along the vehicle's own up, on a battery draw for each
+    k.jump_cd = (k.jump_cd - dt).max(0.0);
+    let jets = body.gadget(Gadget::Jump);
+    if inp.has(BTN_JUMP) && jets > 0 && k.jump_cd <= 0.0 {
+        let spec = BlockType::JumpJet.gadget().unwrap();
+        let cost = spec.energy * jets as f32;
+        if k.energy >= cost {
+            k.energy -= cost;
+            k.jump_cd = spec.cooldown;
+            k.vel += k.up() * jump_kick(jets, m);
+        }
+    }
     // hover pads lift on energy, and drop when it's gone
     let hover_drain: f32 = body.movers.iter().filter_map(|&i| blocks[i].ty.drive().filter(|d| d.hover)).map(|d| d.drain).sum();
     let lifting = k.energy > 0.0;
@@ -178,6 +230,7 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
     let yaw = if skid { -inp.steer_f() * SKID_RATE / (1.0 + speed.abs() / 18.0) } else { 0.0 };
     let push = thrust_push(inp, k.boosting);
     let h = dt / SUBSTEPS as f32;
+    let mut knock: Option<Impact> = None;
     for _ in 0..SUBSTEPS {
         let (up, fwd) = (k.up(), k.fwd());
         let mut force = Vec3::new(0.0, -GRAVITY * m, 0.0);
@@ -289,6 +342,14 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
         k.pos += k.vel * h;
         k.rot = (Quat::from_scaled_axis(k.ang * h) * k.rot).normalize();
         ground_contact(k, body, ground, m, inertia);
+        if let Some(imp) = solid_contact(k, body, ground, m, inertia)
+            && knock.as_ref().is_none_or(|o| imp.speed > o.speed)
+        {
+            knock = Some(imp);
+        }
+        if let Some(a) = &ground.arena {
+            saw_contact(k, body, a, tick_time(inp.tick), m, inertia);
+        }
     }
     // the arena's edge: pushed back in, never past it
     let lim = terrain::HALF - 20.0;
@@ -305,6 +366,7 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
     } else {
         k.shield = (k.shield + st.shield_regen * dt).min(st.shield_cap);
     }
+    knock.filter(|i| i.speed > 8.0)
 }
 
 /// The hull where it reaches into the ground (landing on the roof, scraping over a crest, hover
@@ -317,6 +379,10 @@ fn ground_contact(k: &mut Kin, body: &ShipBody, ground: &Terrain, m: f32, inerti
             continue;
         }
         let w = body.world(k.pos, k.rot, i);
+        // beside a pit, its walls are the ground
+        if ground.arena.as_ref().is_some_and(|a| a.by_rim(w.x, w.z)) {
+            continue;
+        }
         let pen = ground.height(w.x, w.z) + BLOCK_R - w.y;
         if pen > 0.0 && deepest.is_none_or(|d| pen > d.0) {
             deepest = Some((pen, w));
@@ -324,24 +390,116 @@ fn ground_contact(k: &mut Kin, body: &ShipBody, ground: &Terrain, m: f32, inerti
     }
     let Some((pen, p)) = deepest else { return };
     k.pos.y += pen;
-    let n = ground.normal(p.x, p.z);
-    let r = p - k.pos;
+    bump(k, p - k.pos, ground.normal(p.x, p.z), m, inertia, 0.1, 0.6);
+}
+
+/// The hull against the arena's pieces: out of each one it reaches into, at its deepest block,
+/// along that face, with a little bounce. Returns the hardest of the knocks.
+fn solid_contact(k: &mut Kin, body: &ShipBody, ground: &Terrain, m: f32, inertia: Vec3) -> Option<Impact> {
+    let mut knock: Option<Impact> = None;
+    for s in ground.solids_near(k.pos, body.radius + BLOCK_R) {
+        let mut deepest: Option<(f32, Vec3, Vec3)> = None;
+        for i in 0..body.alive.len() {
+            if !body.alive[i] {
+                continue;
+            }
+            let w = body.world(k.pos, k.rot, i);
+            let (d, n) = s.distance(w);
+            let pen = BLOCK_R - d;
+            if pen > 0.0 && deepest.is_none_or(|x| pen > x.0) {
+                deepest = Some((pen, w, n));
+            }
+        }
+        let Some((pen, p, mut n)) = deepest else { continue };
+        let mut friction = s.friction();
+        if n.y > 0.85 {
+            // a hull resting on a top by its edge slides off, so that nothing sits hung on a
+            // ledge (the nearer the edge, the less it holds); on a pit's lip, anywhere along it,
+            // into the pit (wheels ride on regardless)
+            let off = if s.style == Style::PitWall {
+                ground.arena.as_ref().and_then(|a| a.pit_by(p.x, p.z)).map_or(Vec3::ZERO, |q| (q - p).with_y(0.0).normalize_or_zero() * RIM_TIP)
+            } else {
+                let edge = s.edge_off(p);
+                friction *= 1.0 - edge.length();
+                edge * EDGE_TIP
+            };
+            n = (n + off).normalize();
+        }
+        let r = p - k.pos;
+        k.pos += n * pen;
+        let speed = bump(k, r, n, m, inertia, SOLID_BOUNCE, friction);
+        if knock.as_ref().is_none_or(|o| speed > o.speed) {
+            knock = Some(Impact { point: p, speed });
+        }
+    }
+    knock
+}
+
+/// The blocks of a vehicle touching a saw's blade at `t`, deepest first, with where and which
+/// way out from the blade (the server cuts them).
+pub fn saw_bites(k: &Kin, body: &ShipBody, saw: &Saw, t: f64) -> Vec<(usize, Vec3, Vec3)> {
+    let hub = saw.at(t);
+    if hub.distance(k.pos) > body.radius + SAW_R + BLOCK_R {
+        return Vec::new();
+    }
+    let mut bites = Vec::new();
+    let across = saw.dir.cross(Vec3::Y);
+    for i in (0..body.alive.len()).filter(|&i| body.alive[i]) {
+        let w = body.world(k.pos, k.rot, i);
+        let q = saw.nearest(hub, w);
+        let d = w.distance(q);
+        if d < BLOCK_R + SAW_BITE {
+            // in the blade's thickness: out by whichever face is nearer
+            let n = if d > 1e-3 { (w - q) / d } else { across * (w - hub).dot(across).signum() };
+            bites.push((d, i, q, n));
+        }
+    }
+    bites.sort_by(|a, b| a.0.total_cmp(&b.0));
+    bites.into_iter().map(|(_, i, q, n)| (i, q, n)).collect()
+}
+
+/// The arena's saws: a vehicle touching a blade is pushed out of it at its deepest block and
+/// thrown clear, harder than off a wall.
+fn saw_contact(k: &mut Kin, body: &ShipBody, arena: &Arena, t: f64, m: f32, inertia: Vec3) {
+    for saw in &arena.saws {
+        let Some(&(i, q, n)) = saw_bites(k, body, saw, t).first() else { continue };
+        let p = body.world(k.pos, k.rot, i);
+        let pen = BLOCK_R - p.distance(q);
+        if pen <= 0.0 {
+            continue;
+        }
+        k.pos += n * pen;
+        bump(k, p - k.pos, n, m, inertia, 0.6, 0.2);
+        let out = k.vel.dot(n);
+        if out < SAW_THROW {
+            k.vel += n * (SAW_THROW - out);
+        }
+        k.vel.y = k.vel.y.max(SAW_LIFT);
+    }
+}
+
+/// Stop the point `r` from the centre moving into a surface with normal `n`: an impulse that sends
+/// it back out at `bounce` of the speed it came in at, with `friction` along the surface. Returns
+/// that speed (0 when it was moving out already).
+#[allow(clippy::too_many_arguments)]
+fn bump(k: &mut Kin, r: Vec3, n: Vec3, m: f32, inertia: Vec3, bounce: f32, friction: f32) -> f32 {
     let vp = k.vel + k.ang.cross(r);
     let vn = vp.dot(n);
     if vn >= 0.0 {
-        return;
+        return 0.0;
     }
     let rot = k.rot;
     let inv = |v: Vec3| rot * ((rot.inverse() * v) / inertia);
     // how hard it is to change the point's velocity along `d`
     let resist = |d: Vec3| 1.0 / m + r.cross(d).dot(inv(r.cross(d)));
-    let j = -1.1 * vn / resist(n);
+    let j = -(1.0 + bounce) * vn / resist(n);
     let vt = vp - n * vn;
     let mut imp = n * j;
     if vt.length() > 1e-4 {
         let t = vt.normalize();
-        imp -= t * (vt.length() / resist(t)).min(0.6 * j);
+        imp -= t * (vt.length() / resist(t)).min(friction * j);
     }
     k.vel += imp / m;
     k.ang += inv(r.cross(imp));
+    -vn
 }

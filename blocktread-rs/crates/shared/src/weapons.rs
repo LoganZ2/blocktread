@@ -1,5 +1,5 @@
-use crate::blocks::{Block, BlockType};
-use crate::flight::{BTN_FIRE, BTN_MISSILE, InputCmd, Kin};
+use crate::blocks::{Block, BlockType, Gadget};
+use crate::flight::{BTN_FIRE, BTN_FLIPPER, BTN_MINE, BTN_MISSILE, BTN_SMOKE, InputCmd, Kin};
 use crate::grid::{Occupancy, raycast};
 use crate::rng::hash01;
 use crate::ship::ShipBody;
@@ -29,6 +29,22 @@ const CLEAR: f32 = 14.0;
 /// A gun fires only while it points this close to its aim point (radians): one that can't turn
 /// that far holds its fire.
 const ON_TARGET: f32 = 10.0 * std::f32::consts::PI / 180.0;
+/// Missiles leave 40 m/s faster than their vehicle, speed up at `MISSILE_ACCEL` (m/s²) to
+/// `MISSILE_TOP` (m/s), and turn toward a locked target at `MISSILE_TURN` (rad/s).
+pub const MISSILE_ACCEL: f32 = 200.0;
+pub const MISSILE_TOP: f32 = 380.0;
+pub const MISSILE_TURN: f32 = 3.4;
+
+/// Where a missile at `pos` with `vel` is `secs` later if it flies straight on, speeding up as it
+/// does (or was `secs` ago, when negative, at its present speed).
+pub fn missile_ahead(pos: Vec3, vel: Vec3, secs: f32) -> Vec3 {
+    let s0 = vel.length();
+    if secs <= 0.0 || s0 >= MISSILE_TOP {
+        return pos + vel * secs;
+    }
+    let ta = ((MISSILE_TOP - s0) / MISSILE_ACCEL).min(secs);
+    pos + vel.normalize_or_zero() * (s0 * ta + 0.5 * MISSILE_ACCEL * ta * ta + MISSILE_TOP * (secs - ta))
+}
 
 /// One weapon's mount: the face of its cell where its plate sits (towards the block holding it),
 /// and which directions keep its barrel and its line of fire out of its own vehicle (sampled every
@@ -158,6 +174,17 @@ pub struct WeaponState {
     pub cds: Vec<f32>,
     pub aim: Vec<(f32, f32)>,
     pub missile_cd: f32,
+    /// Seconds until the flippers can throw again, and since they last did.
+    pub flip_cd: f32,
+    pub flip_t: f32,
+    /// The flippers threw this tick (the server throws whatever is in front of them).
+    pub flipped: bool,
+    /// Seconds until it can lay a mine, and let off smoke, again; and whether it did this tick
+    /// (the server lays the mine, or lets off the smoke).
+    pub mine_cd: f32,
+    pub smoke_cd: f32,
+    pub mined: bool,
+    pub smoked: bool,
 }
 
 impl WeaponState {
@@ -167,7 +194,7 @@ impl WeaponState {
         for m in &body.mounts {
             aim[m.block] = m.rest();
         }
-        WeaponState { cds: (0..n).map(|i| hash01(i as u32, 7) * 0.3).collect(), aim, missile_cd: 0.0 }
+        WeaponState { cds: (0..n).map(|i| hash01(i as u32, 7) * 0.3).collect(), aim, missile_cd: 0.0, flip_cd: 0.0, flip_t: f32::MAX, flipped: false, mine_cd: 0.0, smoke_cd: 0.0, mined: false, smoked: false }
     }
 }
 
@@ -193,6 +220,43 @@ pub fn step_weapons(k: &mut Kin, body: &ShipBody, ws: &mut WeaponState, inp: &In
         on.push(m.is_clear(yaw, pitch) && barrel_dir(yaw, pitch).angle_between(d) < ON_TARGET);
     }
     ws.missile_cd -= dt;
+    // the flippers all throw together, when they are ready and the battery holds enough for each
+    ws.flip_cd -= dt;
+    ws.flip_t = (ws.flip_t + dt).min(60.0);
+    ws.flipped = false;
+    let flippers = body.stats.melee.iter().filter(|&&i| blocks[i].ty == BlockType::Flipper).count() as f32;
+    if inp.has(BTN_FLIPPER) && ws.flip_cd <= 0.0 && flippers > 0.0 {
+        let spec = BlockType::Flipper.melee().unwrap();
+        if free_energy || k.energy >= spec.energy * flippers {
+            if !free_energy {
+                k.energy -= spec.energy * flippers;
+            }
+            (ws.flip_cd, ws.flip_t, ws.flipped) = (spec.cooldown, 0.0, true);
+        }
+    }
+    // the mine layers and the smoke, each once for the lot of them
+    ws.mine_cd -= dt;
+    ws.smoke_cd -= dt;
+    ws.mined = false;
+    ws.smoked = false;
+    for (g, btn) in [(Gadget::Mine, BTN_MINE), (Gadget::Smoke, BTN_SMOKE)] {
+        let cd = if g == Gadget::Mine { ws.mine_cd } else { ws.smoke_cd };
+        if !inp.has(btn) || cd > 0.0 || body.gadget(g) == 0 {
+            continue;
+        }
+        let spec = BlockType::of_gadget(g).gadget().unwrap();
+        if !free_energy {
+            if k.energy < spec.energy {
+                continue;
+            }
+            k.energy -= spec.energy;
+        }
+        if g == Gadget::Mine {
+            (ws.mine_cd, ws.mined) = (spec.cooldown, true);
+        } else {
+            (ws.smoke_cd, ws.smoked) = (spec.cooldown, true);
+        }
+    }
     let rot = k.rot;
     let fire = |ws: &WeaponState, i: usize| {
         let (yaw, pitch) = ws.aim[i];

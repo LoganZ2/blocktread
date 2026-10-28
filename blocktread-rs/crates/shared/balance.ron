@@ -110,5 +110,26 @@
         GiantWheel: (name: "巨轮", cat: Move, mass: 3.6, hp: 64.0, cost: 6.0, color: 0x8d96a3,
             info: "直径三格多的大块头：不能转向，劲最大、底盘最高，什么坎都压得过去，但又重又慢。前后两个之间至少空出 3 格。",
             drive: Some((radius: 1.6, power: 19.0, top: 31.0, grip: 2.0))),
+        // close quarters: saws and flippers work straight ahead and need the cell in front clear
+        Ram: (name: "撞角", cat: Weapon, mass: 3.5, hp: 70.0, cost: 4.0, color: 0x7a7f88, armor: 6.0,
+            info: "楔形的钢撞角。撞车时接触点在撞角附近，给对方的伤害 ×3，自己只受 1/4；防机炮、霰弹也很硬。装在车头最管用。",
+            melee: Some((kind: Ram, reach: 1.6, dmg: 3.0, guard: 0.25))),
+        Saw: (name: "电锯", cat: Weapon, mass: 2.0, hp: 30.0, cost: 9.0, color: 0x8a8f99,
+            info: "一直在转的圆锯：正前方贴着的敌车方块每秒受 70 点伤害，专切轮子和炮塔。正前方那一格必须空着。",
+            melee: Some((kind: Saw, reach: 1.3, dmg: 70.0))),
+        Flipper: (name: "翻板", cat: Weapon, mass: 2.5, hp: 40.0, cost: 8.0, color: 0x6f7a6a,
+            info: "按 E 猛地掀起：正前方 2.5 m 内的敌车被抛起来，轻的车会被掀翻，正好推进深坑。每次耗 15 能量，3 秒冷却。正前方那一格必须空着。",
+            melee: Some((kind: Flipper, reach: 2.5, dmg: 12.0, energy: 15.0, cooldown: 3.0, lift: 9.0, push: 6.0))),
+        // gadgets: each on a key of its own; however many of a kind a vehicle has, they go off
+        // together
+        JumpJet: (name: "跳跃喷口", cat: Gadget, mass: 1.5, hp: 20.0, cost: 2.0, color: 0x6b7380,
+            info: "按 Q 朝下猛喷一下，把车弹起来：跳上高台、飞过深坑、甩开追兵。装得越多跳得越高，重车要多装几个。每个耗 12 能量，4 秒冷却。喷口朝下，正下方必须空着。",
+            gadget: Some((kind: Jump, energy: 12.0, cooldown: 4.0, power: 250.0))),
+        MineLayer: (name: "布雷器", cat: Gadget, mass: 2.0, hp: 26.0, cost: 6.0, color: 0x6a6f5c,
+            info: "按 G 在车尾放一颗地雷，1 秒后布好：敌车开到 3.5 m 内就炸，70 点范围伤害。每辆车最多同时留 3 颗，多放就收走最早那颗；每颗留 45 秒。耗 10 能量，2.5 秒冷却。",
+            gadget: Some((kind: Mine, energy: 10.0, cooldown: 2.5, reach: 3.5, dmg: 70.0, radius: 3.0, secs: 45.0, count: 3))),
+        Smoke: (name: "烟雾弹", cat: Gadget, mass: 1.5, hp: 20.0, cost: 5.0, color: 0x7a7f88,
+            info: "按 X 在车周围放出一团 14 m 宽的浓烟，挂 8 秒：隔着烟锁定不了，追来的导弹看不见目标就直飞出去，AI 也看不见烟里的车。耗 15 能量，15 秒冷却。",
+            gadget: Some((kind: Smoke, energy: 15.0, cooldown: 15.0, radius: 7.0, secs: 8.0))),
     },
 )

@@ -3,6 +3,7 @@
 
 use crate::blocks::Design;
 use crate::flight::{InputCmd, Kin};
+use crate::terrain::Map;
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -17,7 +18,7 @@ pub enum Mode {
     /// Free-for-all: one room on the server that players drive in and out of, no AI. Its clock
     /// runs while two or more are in; each round is ranked by kills.
     Ffa,
-    /// Two teams of two.
+    /// Two teams of two, fighting over the hill in the middle of the arena.
     Teams,
     /// The test range: one player, nobody else, no limits, on the same map every time.
     Solo,
@@ -28,7 +29,7 @@ impl Mode {
         match self {
             Mode::Coop => "合作波次",
             Mode::Ffa => "自由混战",
-            Mode::Teams => "2v2 团队战",
+            Mode::Teams => "2v2 占点战",
             Mode::Solo => "试车场",
         }
     }
@@ -55,6 +56,15 @@ pub enum Round {
     Running,
     /// The round is over; the next one starts after a short break.
     Over,
+}
+
+/// 2v2's hill: each side's points (team 1's, team 2's), the team alone on top if one is, and
+/// whether both are (then neither scores).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HillState {
+    pub points: [u32; 2],
+    pub holder: Option<u16>,
+    pub contested: bool,
 }
 
 /// One seat in a match, as everyone sees it during the ship pick.
@@ -110,7 +120,7 @@ impl ScoreRow {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMsg {
     /// The game starts (or a spectator is let in): the client's simulation begins here.
-    Welcome { pid: u16, tick: u32, mode: Mode, asteroid_seed: u64 },
+    Welcome { pid: u16, tick: u32, mode: Mode, asteroid_seed: u64, map: Map },
     Reject { reason: String },
     /// The connection is accepted; this is the player's id.
     Connected { pid: u16 },
@@ -139,12 +149,26 @@ pub enum ServerMsg {
     Crash { pos: Vec3 },
     Announce { title: String, sub: String },
     Feed { text: String, bad: bool },
-    /// `limit`: kills that win the match (0 = none); `left`: seconds until it ends (0 = no clock),
-    /// or in the free-for-all room until the round (or the break after it) ends.
-    Scores { rows: Vec<ScoreRow>, wave: u32, enemies: u32, limit: u32, left: f32, round: Round },
+    /// `limit`: kills (on the hill, points) that win the match (0 = none); `left`: seconds until
+    /// it ends (0 = no clock), or in the free-for-all room until the round (or the break after
+    /// it) ends.
+    Scores { rows: Vec<ScoreRow>, wave: u32, enemies: u32, limit: u32, left: f32, round: Round, hill: Option<HillState> },
     /// To the shooter only: one of their rounds landed on `target`, on its shield or its hull.
     /// Last, so the variants before it keep their numbers and older clients skip it unread.
     HitConfirm { target: u16, shield: bool },
+    /// The arena's pick-up pad `pad` (its index in the layout) was taken and is back at server
+    /// tick `back_at`; a newcomer gets one for every pad that is down.
+    PadState { pad: u8, back_at: u32 },
+    /// Ship `id` is in overdrive until server tick `until`.
+    ShipBuff { id: u16, until: u32 },
+    /// A mine laid by `team` lies at `pos`, live from server tick `armed_at`; a newcomer gets one
+    /// for every mine down.
+    MineDropped { id: u16, pos: Vec3, team: u16, armed_at: u32 },
+    /// The mine is gone: set off (the explosion comes on its own), or cleared away.
+    MineGone { id: u16, exploded: bool },
+    /// A cloud of smoke `radius` round `pos`, until server tick `until`; a newcomer gets
+    /// every cloud still hanging.
+    Smoke { pos: Vec3, radius: f32, until: u32 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -157,6 +181,14 @@ pub const FLAG_FIRING: u8 = 1;
 pub const FLAG_BOOST: u8 = 2;
 /// Its thrusters push (on the throttle, or boosting).
 pub const FLAG_THRUST: u8 = 4;
+/// Its saw is biting into something.
+pub const FLAG_CUT: u8 = 8;
+/// Its flipper is up: it threw within the last `FLIP_SHOWN` seconds.
+pub const FLAG_FLIP: u8 = 16;
+pub const FLIP_SHOWN: f32 = 0.45;
+/// Its jump jets fire: it jumped within the last `JUMP_SHOWN` seconds.
+pub const FLAG_JUMP: u8 = 32;
+pub const JUMP_SHOWN: f32 = 0.35;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ShipSnap {
@@ -176,12 +208,18 @@ pub struct MissileSnap {
     pub id: u16,
     pub pos: Vec3,
     pub vel: Vec3,
+    /// The team that fired it: it flies through that team's ships, so they needn't be warned.
+    pub team: u16,
+    /// The ship that fired it: that ship's client draws it on its own (predicted) clock.
+    pub owner: u16,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct OwnState {
     pub ship: u16,
     pub kin: Kin,
+    /// As `ShipSnap::flags`: what it shows that only the server knows (its saw biting).
+    pub flags: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

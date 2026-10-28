@@ -10,9 +10,12 @@ use crate::ui::*;
 use bevy::prelude::*;
 use bevy::text::LetterSpacing;
 use bevy::window::PrimaryWindow;
+use super::arena::{SIGN_UP, pad_color};
+use crate::art::srgb;
 use blocktread_client_core::ConnState;
-use blocktread_shared::blocks::BlockType;
-use blocktread_shared::protocol::{Mode, Round, ScoreRow};
+use blocktread_shared::arena::OVERDRIVE_MUL;
+use blocktread_shared::blocks::{BlockType, Gadget};
+use blocktread_shared::protocol::{HillState, Mode, Round, ScoreRow};
 use blocktread_shared::weapons::intercept;
 
 pub const LOCK_T: f32 = 0.9;
@@ -20,6 +23,11 @@ const BRACKETS: usize = 16;
 const DOTS: usize = 48;
 const FEED: usize = 5;
 const WARNS: usize = 3;
+/// Tags over the arena's pick-up pads (it has eight).
+const PAD_TAGS: usize = 8;
+/// How tall the hill's panel stands at the top of the screen; what sits there otherwise moves
+/// down below it.
+const HILL_H: f32 = 96.0;
 const SHIELD: Color = Color::srgb(0.4, 0.62, 1.0);
 /// The off-screen arrow: half its base, and its height.
 const ARROW_W: f32 = 11.0;
@@ -107,6 +115,13 @@ pub enum El {
     Watch,
     WatchName,
     WatchStat,
+    /// 2v2's hill, top centre: who holds it, and each side's points (`0` blue, `1` red).
+    Hill,
+    HillStatus,
+    HillFill(u8),
+    HillText(u8),
+    /// Over each pick-up pad: what it gives, or how long until it is back.
+    PadTag(usize),
 }
 
 fn abs(left: f32, top: f32) -> Node {
@@ -229,6 +244,7 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
     let radar = commands
         .spawn((Node { position_type: PositionType::Absolute, width: px(140), height: px(140), border: px(1).all(), border_radius: BorderRadius::MAX, ..default() }, BackgroundColor(Color::srgba(0.01, 0.03, 0.05, 0.6)), BorderColor::all(ACCENT.with_alpha(0.35)), El::Radar, Pickable::IGNORE, ChildOf(root)))
         .id();
+    commands.spawn((Node { position_type: PositionType::Absolute, left: px(4), top: px(4), width: px(132), height: px(132), ..default() }, super::radar::RadarMap, Visibility::Hidden, Pickable::IGNORE, ChildOf(radar)));
     commands.spawn((Node { position_type: PositionType::Absolute, left: px(69), top: px(4), width: px(1), height: px(132), ..default() }, BackgroundColor(LINE), Pickable::IGNORE, ChildOf(radar)));
     commands.spawn((Node { position_type: PositionType::Absolute, top: px(69), left: px(4), height: px(1), width: px(132), ..default() }, BackgroundColor(LINE), Pickable::IGNORE, ChildOf(radar)));
     commands.spawn((Node { position_type: PositionType::Absolute, left: px(35), top: px(35), width: px(70), height: px(70), border: px(1).all(), border_radius: BorderRadius::MAX, ..default() }, BorderColor::all(LINE), Pickable::IGNORE, ChildOf(radar)));
@@ -293,6 +309,30 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
         commands.entity(a).insert((BorderColor { left: Color::NONE, right: Color::NONE, top: Color::NONE, bottom: DANGER }, Visibility::Hidden, UiTransform::default()));
     }
 
+    // the hill in 2v2, top centre: who holds it, and each side's points towards the win
+    let hill = spawn_panel(&mut commands, Some(root), Node { position_type: PositionType::Absolute, left: percent(50), top: px(EDGE), margin: UiRect::left(px(-200)), width: px(400), height: px(HILL_H), padding: UiRect::axes(px(PAD), px(12)), flex_direction: FlexDirection::Column, justify_content: JustifyContent::Center, row_gap: px(6), ..default() });
+    commands.entity(hill).insert((El::Hill, Pickable::IGNORE, Visibility::Hidden));
+    commands.spawn((heading(f, "", 16.0, INK), Node { align_self: AlignSelf::Center, ..default() }, El::HillStatus, Pickable::IGNORE, ChildOf(hill)));
+    for (i, team) in [1u16, 2].into_iter().enumerate() {
+        let r = commands.spawn((row(10.0), Pickable::IGNORE, ChildOf(hill))).id();
+        commands.spawn((text(f, team_label(team), 12.0, team_color(team)), Node { width: px(32), ..default() }, Pickable::IGNORE, ChildOf(r)));
+        commands.spawn((Node { flex_grow: 1.0, height: px(8), ..default() }, Plate::gauge(team_color(team), 25.0, 0.0), El::HillFill(i as u8), Pickable::IGNORE, ChildOf(r)));
+        commands.spawn((tech(f, "", 14.0, INK), Node { width: px(64), ..default() }, TextLayout::justify(Justify::Right), El::HillText(i as u8), Pickable::IGNORE, ChildOf(r)));
+    }
+
+    // over the pick-up pads
+    for i in 0..PAD_TAGS {
+        commands.spawn((
+            Node { position_type: PositionType::Absolute, width: px(96), padding: UiRect::axes(px(6), px(2)), justify_content: JustifyContent::Center, ..default() },
+            BackgroundColor(PANEL_SOLID.with_alpha(0.72)),
+            Visibility::Hidden,
+            El::PadTag(i),
+            Pickable::IGNORE,
+            ChildOf(root),
+            children![(text(f, "", 12.0, INK), Pickable::IGNORE)],
+        ));
+    }
+
     // spectator banner, top centre (where the controls help sits for pilots)
     let watch = spawn_panel(&mut commands, Some(root), Node { position_type: PositionType::Absolute, left: percent(50), top: px(EDGE), margin: UiRect::left(px(-240)), width: px(480), padding: UiRect::axes(px(PAD), px(14)), flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(6), ..default() });
     commands.entity(watch).insert((El::Watch, Pickable::IGNORE, Visibility::Hidden));
@@ -314,6 +354,7 @@ pub fn spawn_hud(mut commands: Commands, font: Res<UiFont>, mut hud: ResMut<Hud>
         ("左键 / 空格", "开火"),
         ("右键 / F", "发射导弹（准星对准目标一会儿即可锁定）"),
         ("R（按住）", "翻车后把车翻回来"),
+        ("E · Q · G · X", "翻板 · 跳跃 · 布雷 · 烟雾（车上装了才有）"),
         ("T · C · Tab", "切换目标 · 切换视角 · 记分板"),
         ("Esc", "暂停菜单"),
     ] {
@@ -385,6 +426,8 @@ pub fn update_hud(
         HitKind::Kill => DANGER,
     }
     .with_alpha((hud.hit.1 * 1.8).min(1.0));
+    // the top centre: the hill's panel there in 2v2, what else sits there below it
+    let top_mid = if in_game && core.hill.is_some() { EDGE + HILL_H + GAP_S } else { EDGE };
     let view_id = view.map(|v| v.id);
     let enemies: Vec<_> = core.ships.values().filter(|s| Some(s.id) != view_id && view.is_none_or(|m| m.team != s.team)).collect();
     let friends: Vec<_> = core.ships.values().filter(|s| Some(s.id) != view_id && view.is_some_and(|m| m.team == s.team)).collect();
@@ -417,7 +460,7 @@ pub fn update_hud(
                 let mine = core.scores.iter().find(|r| Some(r.pid) == core.pid);
                 let mode = match core.mode {
                     Some(Mode::Coop) => format!("合作波次 · 第 {} 波", core.wave),
-                    Some(Mode::Teams) => format!("2v2 团队战{}", mine.map_or(String::new(), |r| format!(" · {}", team_label(r.team)))),
+                    Some(Mode::Teams) => format!("{}{}", Mode::Teams.label(), mine.map_or(String::new(), |r| format!(" · {}", team_label(r.team)))),
                     Some(Mode::Ffa) => "自由混战".into(),
                     Some(Mode::Solo) => "试车场 · 只有你".into(),
                     None => "连接中".into(),
@@ -436,8 +479,10 @@ pub fn update_hud(
                 let line = match (core.mode, row) {
                     // the race between the teams, then your own part in it
                     (Some(Mode::Teams), Some(r)) => {
+                        // on the hill the points, otherwise the kills
                         let kills = |t: u16| core.scores.iter().filter(|o| o.team == t).map(|o| o.kills).sum::<u32>();
-                        format!("蓝队 {} : {} 红队  ·  击毁 {}  ·  阵亡 {}", kills(1), kills(2), r.kills, r.deaths)
+                        let (a, b) = core.hill.map_or((kills(1), kills(2)), |h| (h.points[0], h.points[1]));
+                        format!("蓝队 {a} : {b} 红队  ·  击毁 {}  ·  阵亡 {}", r.kills, r.deaths)
                     }
                     // nothing to keep score of on the test range
                     (Some(Mode::Solo), _) => "没有对手 · 不限时间".into(),
@@ -453,7 +498,57 @@ pub fn update_hud(
                 };
                 set_text(kids, ent, line, None);
             }
-            El::Watch => show(&mut vis, in_game && core.watching),
+            El::Watch => {
+                node.top = px(top_mid);
+                show(&mut vis, in_game && core.watching);
+            }
+            El::Hill => show(&mut vis, in_game && core.hill.is_some()),
+            El::HillStatus => {
+                let Some(hill) = core.hill else { continue };
+                let mine = if core.watching { None } else { core.scores.iter().find(|r| Some(r.pid) == core.pid).map(|r| r.team) };
+                let (line, c) = match (hill.holder, hill.contested) {
+                    (_, true) => ("争夺中 · 都不得分".to_string(), WARN),
+                    (Some(t), _) if mine == Some(t) => ("占领中 · 每秒 +1 分".into(), team_color(t)),
+                    (Some(t), _) if mine.is_some() => ("敌方占领 · 快去抢回来".into(), team_color(t)),
+                    (Some(t), _) => (format!("{}占领", team_label(t)), team_color(t)),
+                    (None, _) => ("高台无人 · 开上去占领".into(), MUTED),
+                };
+                set_text(kids, ent, line, Some(c));
+            }
+            El::HillFill(i) | El::HillText(i) => {
+                let Some(hill) = core.hill else { continue };
+                let p = hill.points[i as usize];
+                if let El::HillFill(_) = el {
+                    let fr = if core.limit > 0 { (p as f32 / core.limit as f32).min(1.0) } else { 0.0 };
+                    if let Some(mut pl) = plate
+                        && (pl.frac - fr).abs() > 0.002
+                    {
+                        pl.frac = fr;
+                    }
+                } else {
+                    set_text(kids, ent, if core.limit > 0 { format!("{p}/{}", core.limit) } else { p.to_string() }, None);
+                }
+            }
+            El::PadTag(i) => {
+                let (Some(arena), Some(m)) = (core.terrain.arena.as_ref(), view) else {
+                    show(&mut vis, false);
+                    continue;
+                };
+                let Some(pad) = arena.pads.get(i) else {
+                    show(&mut vis, false);
+                    continue;
+                };
+                let left = core.pad_left(i);
+                let d = m.pos.distance(pad.at);
+                let (sp, off) = screen(pad.at + Vec3::Y * (SIGN_UP + 1.3));
+                // what it gives near enough to read; how long until it is back from further off
+                let near = if left > 0.0 { d < 120.0 } else { d < 60.0 };
+                node.left = px(sp.x - 48.0);
+                node.top = px(sp.y - 8.0);
+                let (line, c) = if left > 0.0 { (format!("{} · {} 秒", pad.kind.label(), left.ceil() as u32), MUTED.mix(&INK, 0.4)) } else { (pad.kind.label().to_string(), srgb(pad_color(pad.kind))) };
+                set_text(kids, ent, line, Some(c));
+                show(&mut vis, in_game && near && !off);
+            }
             El::WatchName => {
                 let name = match (view, session.wreck) {
                     (Some(v), _) => v.name.clone(),
@@ -552,15 +647,30 @@ pub fn update_hud(
                     s.push("武器全毁".into());
                 }
                 if m.body.has_missile && me.is_some() {
-                    s.push(if session.locked { "导弹 · 已锁定，右键发射".into() } else if session.lock > 0.0 { "导弹 · 锁定中…".into() } else { "导弹 · 未锁定".into() });
+                    s.push(if session.veiled { "导弹 · 目标在烟雾后面".into() } else if session.locked { "导弹 · 已锁定，右键发射".into() } else if session.lock > 0.0 { "导弹 · 锁定中…".into() } else { "导弹 · 未锁定".into() });
+                }
+                // the flipper and the gadgets: their keys, and how long until each is ready
+                if me.is_some()
+                    && let Some(p) = core.pred.as_ref()
+                {
+                    let flippers = m.body.stats.melee.iter().any(|&i| m.body.design.blocks[i].ty == BlockType::Flipper);
+                    let keyed = [(flippers, "E", "翻板", p.ws.flip_cd), (m.body.gadget(Gadget::Jump) > 0, Gadget::Jump.key(), Gadget::Jump.label(), p.kin.jump_cd), (m.body.gadget(Gadget::Mine) > 0, Gadget::Mine.key(), Gadget::Mine.label(), p.ws.mine_cd), (m.body.gadget(Gadget::Smoke) > 0, Gadget::Smoke.key(), Gadget::Smoke.label(), p.ws.smoke_cd)];
+                    for (_, key, label, cd) in keyed.into_iter().filter(|k| k.0) {
+                        s.push(if cd > 0.0 { format!("{key} {label} · {:.1} 秒", cd) } else { format!("{key} {label} · 就绪") });
+                    }
                 }
                 set_text(kids, ent, s.join("\n"), None);
             }
             El::Warn(i) => {
                 let mut warns: Vec<(String, bool)> = Vec::new();
                 if let Some(m) = me {
-                    if core.missiles.values().any(|ms| core.missile_pos(ms).distance(m.pos) < 300.0 && ms.vel.dot(m.pos - core.missile_pos(ms)) > 0.0) {
+                    // only missiles that can hit us: our own and our team's fly through
+                    if core.missiles.values().any(|ms| ms.team != m.team && core.missile_pos(ms).is_some_and(|p| p.distance(m.pos) < 300.0 && ms.vel.dot(m.pos - p) > 0.0)) {
                         warns.push(("导弹接近".into(), true));
+                    }
+                    let od = core.overdrive_left(m);
+                    if od > 0.0 {
+                        warns.push((format!("超载 · 伤害 ×{OVERDRIVE_MUL} · 还剩 {} 秒", od.ceil() as u32), false));
                     }
                     if m.pos.x.abs().max(m.pos.z.abs()) > blocktread_shared::ARENA_R * 0.9 {
                         warns.push(("到战区边缘了，请掉头".into(), true));
@@ -608,15 +718,17 @@ pub fn update_hud(
                     continue;
                 };
                 let inv_rot = m.rot.inverse();
+                // an arena shows whole on the radar, the open ground out to 900 m
+                let range = if core.terrain.arena.is_some() { super::radar::ARENA_RANGE } else { 900.0 };
                 let all: Vec<(Vec3, Color)> = enemies
                     .iter()
                     .map(|s| (s.pos, if Some(s.id) == session.target { SIGNAL } else { DANGER }))
                     .chain(friends.iter().map(|s| (s.pos, ACCENT)))
-                    .chain(core.rocks.iter().filter(|r| r.pos.distance(m.pos) < 900.0 + r.r).map(|r| (r.pos, Color::srgba(0.63, 0.59, 0.55, 0.45))))
+                    .chain(core.rocks.iter().filter(|r| r.pos.distance(m.pos) < range + r.r).map(|r| (r.pos, Color::srgba(0.63, 0.59, 0.55, 0.45))))
                     .collect();
                 if let Some((p, c)) = all.get(i) {
                     let l = inv_rot * (*p - m.pos);
-                    let mut v = Vec2::new(l.x, l.z) / 900.0 * 66.0;
+                    let mut v = Vec2::new(l.x, l.z) / range * 66.0;
                     if v.length() > 66.0 {
                         v = v.normalize() * 66.0;
                     }
@@ -701,7 +813,8 @@ pub fn update_hud(
                     }
                     El::BracketText(_) => {
                         let d = view.map_or(0.0, |m| m.pos.distance(s.pos));
-                        set_text(kids, ent, format!("{} · {:.0}m", s.name, d), Some(col));
+                        let od = if core.overdrive_left(s) > 0.0 { " · 超载" } else { "" };
+                        set_text(kids, ent, format!("{} · {:.0}m{od}", s.name, d), Some(col));
                     }
                     _ => {
                         node.width = percent(s.body.hp_total() / s.body.max_hp * 100.0);
@@ -759,7 +872,10 @@ pub fn update_hud(
                 }
             }
             El::VigRed | El::VigBlue => {}
-            El::Help => show(&mut vis, in_game && !core.watching && hud.show_help && hud.help_t > 0.0 && !session.paused),
+            El::Help => {
+                node.top = px(top_mid);
+                show(&mut vis, in_game && !core.watching && hud.show_help && hud.help_t > 0.0 && !session.paused);
+            }
             El::Silo => silo_entity = Some(ent),
         }
     }
@@ -894,7 +1010,7 @@ pub fn flight_overlays(mut commands: Commands, session: Res<Session>, keys: Res<
             if over {
                 commands.spawn((text(f, "按击毁数排名 · 下一局开始时比分清零", 13.0, MUTED), ChildOf(p)));
             }
-            spawn_score_table(&mut commands, f, p, &core.scores, core.mode, core.pid);
+            spawn_score_table(&mut commands, f, p, &core.scores, core.mode, core.pid, core.hill);
         }
     }
 }
@@ -909,8 +1025,8 @@ pub fn team_color(team: u16) -> Color {
 }
 
 /// The scoreboard table (in flight and in the results): one row per pilot, grouped by team in
-/// 2v2 with each team's kills in its header.
-pub fn spawn_score_table(commands: &mut Commands, f: &UiFont, parent: Entity, rows: &[ScoreRow], mode: Option<Mode>, me: Option<u16>) {
+/// 2v2 with each team's points on the hill (or its kills, with no hill) in its header.
+pub fn spawn_score_table(commands: &mut Commands, f: &UiFont, parent: Entity, rows: &[ScoreRow], mode: Option<Mode>, me: Option<u16>, hill: Option<HillState>) {
     let grid = commands
         .spawn((Node { display: Display::Grid, grid_template_columns: vec![GridTrack::px(36.0), GridTrack::flex(1.0), GridTrack::px(64.0), GridTrack::px(64.0), GridTrack::px(72.0)], row_gap: px(GAP_S), column_gap: px(12), ..default() }, ChildOf(parent)))
         .id();
@@ -933,9 +1049,10 @@ pub fn spawn_score_table(commands: &mut Commands, f: &UiFont, parent: Entity, ro
     for (team, list) in groups {
         if let Some(t) = team {
             let kills: u32 = list.iter().map(|r| r.kills).sum();
+            let points = hill.and_then(|h| h.points.get(t as usize - 1).copied()).map_or(String::new(), |p| format!("  ·  {p} 分"));
             commands.spawn((Node { grid_column: GridPlacement::span(5), margin: UiRect::top(px(4)), column_gap: px(8), align_items: AlignItems::Center, ..default() }, ChildOf(grid), children![
                 (Node { width: px(3), height: px(14), ..default() }, BackgroundColor(team_color(t))),
-                strong(f, format!("{}  ·  击毁 {kills}", team_label(t)), 13.0, team_color(t)),
+                strong(f, format!("{}{points}  ·  击毁 {kills}", team_label(t)), 13.0, team_color(t)),
             ]));
         }
         for (i, r) in list.into_iter().enumerate() {

@@ -6,15 +6,17 @@ use std::sync::Arc;
 use blocktread_shared::ai::{AiPilot, Contact, Skill};
 use blocktread_shared::analysis::analyze;
 use blocktread_shared::balance::balance;
-use blocktread_shared::blocks::{BlockType, DamageKind, Design};
-use blocktread_shared::drive::{spawn_height, step_drive};
+use blocktread_shared::blocks::{BlockType, DamageKind, Design, Melee, MeleeSpec};
+use blocktread_shared::drive::{saw_bites, spawn_height, step_drive};
 use blocktread_shared::flight::{InputCmd, Kin, NO_LOCK, collide_asteroids, look_rotation};
+use blocktread_shared::gadgets::{Cloud, MINE_ARM, hidden};
 use blocktread_shared::presets::{PRESETS, enemy_colors, preset};
 use blocktread_shared::protocol::*;
 use blocktread_shared::rng::Rng;
 use blocktread_shared::ship::ShipBody;
-use blocktread_shared::weapons::{Shot, WeaponState, step_weapons};
-use blocktread_shared::terrain::Terrain;
+use blocktread_shared::weapons::{MISSILE_ACCEL, MISSILE_TOP, MISSILE_TURN, Shot, WeaponState, step_weapons};
+use blocktread_shared::arena::{HILL_HALF, HILL_KILL, HILL_TOP, KILL_Y, OVERDRIVE_MUL, OVERDRIVE_SECS, PadKind, SAW_DMG, VENT_DPS, VENT_HIGH};
+use blocktread_shared::terrain::{Map, Terrain};
 use blocktread_shared::world::{Asteroid, PLAYER_SPAWN, generate_boulders, tick_time};
 use blocktread_shared::{DT, HISTORY_TICKS, SNAPSHOT_INTERVAL, TICK_RATE};
 
@@ -75,10 +77,23 @@ struct Ship {
     hist: Vec<(Vec3, Quat)>,
     spawn_tick: u32,
     last_attacker: Option<u16>,
+    /// Seconds since someone last hit it: whoever drove it into a pit only gets the kill while
+    /// this is short.
+    since_hit: f32,
+    /// Seconds its centre has been over a pit: one that stays hung on the edge goes in.
+    over_pit: f32,
     collide_cd: f32,
+    /// Seconds until its saws cut again; how much longer it shows them cutting; until the
+    /// arena's saws can bite it again, and its vents burn it again.
+    cut_cd: f32,
+    cutting: f32,
+    bite_cd: f32,
+    burn_cd: f32,
     recent_dmg: f32,
     disabled_t: Option<f32>,
     dmg_mul: f32,
+    /// Seconds of overdrive left (from a pad): its weapons hit harder.
+    overdrive: f32,
     destroyed: Vec<u16>,
     damaged: Vec<(u16, u8)>,
     killed: bool,
@@ -100,6 +115,21 @@ struct BotSeat {
 }
 
 impl Ship {
+    /// What its weapons' damage is multiplied by.
+    fn hits_mul(&self) -> f32 {
+        self.dmg_mul * if self.overdrive > 0.0 { OVERDRIVE_MUL } else { 1.0 }
+    }
+
+    /// Whether it has any use for what a pad gives.
+    fn wants(&self, kind: PadKind) -> bool {
+        let st = &self.body.stats;
+        match kind {
+            PadKind::Repair => self.body.hp_total() < self.body.max_hp - 1.0,
+            PadKind::Energy => self.kin.energy < st.energy_cap * 0.9 || self.kin.shield < st.shield_cap * 0.9,
+            PadKind::Overdrive => true,
+        }
+    }
+
     fn transform_at(&self, now: u32, rewind: u32) -> (Vec3, Quat) {
         if rewind == 0 || now < rewind || now - rewind <= self.spawn_tick {
             return (self.kin.pos, self.kin.rot);
@@ -117,6 +147,7 @@ impl Ship {
         self.recent_dmg += dmg;
         if src.is_some() {
             self.last_attacker = src;
+            self.since_hit = 0.0;
         }
         if self.body.damage(i, dmg) {
             self.body.destroy(i);
@@ -142,6 +173,43 @@ impl Ship {
     fn contact(&self) -> Contact {
         Contact { id: self.id, team: self.team, pos: self.kin.pos, vel: self.kin.vel, radius: self.body.radius }
     }
+
+    /// A ram on it close enough to `p` to take a crash there.
+    fn ram_at(&self, p: Vec3) -> Option<&'static MeleeSpec> {
+        let blocks = &self.body.design.blocks;
+        self.body.stats.melee.iter().map(|&i| (i, blocks[i].ty.melee().unwrap())).find(|(i, m)| m.kind == Melee::Ram && self.body.world(self.kin.pos, self.kin.rot, *i).distance(p) < m.reach).map(|(_, m)| m)
+    }
+
+    /// What its saws and flippers reach: each one's kind and the middle and radius of the space
+    /// in front of it.
+    fn melee_reach(&self) -> impl Iterator<Item = (&'static MeleeSpec, Vec3, f32)> + '_ {
+        let fwd = self.kin.fwd();
+        let blocks = &self.body.design.blocks;
+        self.body.stats.melee.iter().map(move |&i| (i, blocks[i].ty.melee().unwrap())).filter(|(_, m)| m.kind != Melee::Ram).map(move |(i, m)| {
+            let face = self.body.world(self.kin.pos, self.kin.rot, i) + fwd * 0.5;
+            (m, face + fwd * m.reach * 0.5, m.reach * 0.5 + 0.5)
+        })
+    }
+
+    fn flags(&self) -> u8 {
+        (if self.input.has(blocktread_shared::flight::BTN_FIRE) { FLAG_FIRING } else { 0 })
+            | (if self.kin.boosting { FLAG_BOOST } else { 0 })
+            | (if self.body.stats.thrust > 0.0 && blocktread_shared::drive::thrust_push(&self.input, self.kin.boosting) > 0.0 { FLAG_THRUST } else { 0 })
+            | (if self.cutting > 0.0 { FLAG_CUT } else { 0 })
+            | (if self.ws.flip_t < FLIP_SHOWN { FLAG_FLIP } else { 0 })
+            | (if self.kin.jump_cd > BlockType::JumpJet.gadget().map_or(0.0, |g| g.cooldown) - JUMP_SHOWN { FLAG_JUMP } else { 0 })
+    }
+}
+
+/// A mine lying in wait: who laid it (their ship, for the kill) and for which side, and the
+/// ticks it goes live and is cleared away at.
+struct Mine {
+    id: u16,
+    pos: Vec3,
+    team: u16,
+    owner: u16,
+    armed_at: u32,
+    gone_at: u32,
 }
 
 struct Bolt {
@@ -198,7 +266,43 @@ pub struct Game {
     pub rounds: Option<f32>,
     round: Round,
     round_end: u32,
+    /// The tick each of the arena's pick-up pads is back up (up now once it has passed).
+    pads: Vec<u32>,
+    /// 2v2 in the arena: the fight over the hill (None in the other modes).
+    hill: Option<Hill>,
+    /// Mines down, oldest first, and the clouds of smoke hanging.
+    mines: Vec<Mine>,
+    next_mine: u16,
+    clouds: Vec<Cloud>,
 }
+
+/// 2v2's hill: each team's points (from holding it, and kills), the team alone on top if one is,
+/// whether both are, and how long the holder has held it towards its next point.
+#[derive(Default)]
+struct Hill {
+    points: BTreeMap<u16, u32>,
+    holder: Option<u16>,
+    contested: bool,
+    held: f32,
+}
+
+/// How a ship was lost, for the feed.
+#[derive(Clone, Copy)]
+enum Fate {
+    Wrecked,
+    Fell,
+}
+
+/// Seconds a hit counts towards a fall into a pit.
+const PIT_CREDIT: f32 = 8.0;
+/// Seconds a vehicle may stay over a pit (a jump takes well under one) before it is lost to it.
+const PIT_HANG: f32 = 2.0;
+/// Saws cut in chunks this many seconds apart (so armour meets each chunk, not each tick), and
+/// vents burn in chunks too.
+const CUT_EVERY: f32 = 0.1;
+const BURN_EVERY: f32 = 0.25;
+/// A crash bounces vehicles apart this hard (1 + restitution).
+const CRASH_BOUNCE: f32 = 1.8;
 
 fn secs(s: f32) -> u32 {
     (s * TICK_RATE as f32) as u32
@@ -226,9 +330,21 @@ impl Game {
         Self::with_seed(cfg, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7))
     }
 
-    /// A game whose asteroids and randomness come from `seed` (for reproducible simulations).
+    /// A game whose ground and randomness come from `seed` (for reproducible simulations), on its
+    /// mode's map: free-for-all and 2v2 in the cage, the rest in the desert.
     pub fn with_seed(cfg: GameConfig, seed: u64) -> Self {
-        let terrain = Arc::new(Terrain::generate(seed));
+        let map = match cfg.mode {
+            Mode::Ffa | Mode::Teams => Map::Cage,
+            Mode::Coop | Mode::Solo => Map::Desert,
+        };
+        Self::with_map(cfg, seed, map)
+    }
+
+    pub fn with_map(cfg: GameConfig, seed: u64, map: Map) -> Self {
+        let terrain = Arc::new(Terrain::for_map(map, seed));
+        let arena = terrain.arena.as_ref();
+        let pads = arena.map_or(Vec::new(), |a| vec![0; a.pads.len()]);
+        let hill = (cfg.mode == Mode::Teams && arena.is_some()).then(Hill::default);
         Game {
             cfg,
             tick: 0,
@@ -238,7 +354,8 @@ impl Game {
             next_ship: 1,
             bolts: Vec::new(),
             next_bolt: 1,
-            rocks: generate_boulders(seed, &terrain),
+            // the arena's pieces take the boulders' place
+            rocks: if map == Map::Desert { generate_boulders(seed, &terrain) } else { Vec::new() },
             terrain,
             seed,
             wave: 0,
@@ -257,6 +374,11 @@ impl Game {
             rounds: None,
             round: Round::None,
             round_end: 0,
+            pads,
+            hill,
+            mines: Vec::new(),
+            next_mine: 0,
+            clouds: Vec::new(),
         }
     }
 
@@ -264,8 +386,9 @@ impl Game {
         self.tick
     }
 
-    pub fn team_kills(&self) -> &BTreeMap<u16, u32> {
-        &self.team_kills
+    /// What a match is won on, by team: its kills, or on the hill its points.
+    pub fn points(&self) -> &BTreeMap<u16, u32> {
+        self.hill.as_ref().map_or(&self.team_kills, |h| &h.points)
     }
 
     /// Players still connected (pilots and spectators).
@@ -350,7 +473,7 @@ impl Game {
             respawn_at: None,
             order: self.joins,
         };
-        p.send(&ServerMsg::Welcome { pid, tick: self.tick, mode: self.cfg.mode, asteroid_seed: self.seed });
+        p.send(&ServerMsg::Welcome { pid, tick: self.tick, mode: self.cfg.mode, asteroid_seed: self.seed, map: self.terrain.map });
         // bring the newcomer up to date with every ship, including blocks already shot off
         for s in self.ships.values() {
             p.send(&spawn_msg(s));
@@ -365,6 +488,18 @@ impl Game {
             if !hurt.is_empty() {
                 p.send(&ServerMsg::BlocksDamaged { ship: s.id, hits: hurt });
             }
+            if s.overdrive > 0.0 {
+                p.send(&ServerMsg::ShipBuff { id: s.id, until: self.tick + secs(s.overdrive) });
+            }
+        }
+        for (i, &back_at) in self.pads.iter().enumerate().filter(|&(_, &b)| b > self.tick) {
+            p.send(&ServerMsg::PadState { pad: i as u8, back_at });
+        }
+        for m in &self.mines {
+            p.send(&ServerMsg::MineDropped { id: m.id, pos: m.pos, team: m.team, armed_at: m.armed_at });
+        }
+        for c in &self.clouds {
+            p.send(&ServerMsg::Smoke { pos: c.pos, radius: c.radius, until: c.until });
         }
         let watching = p.watching();
         self.players.insert(pid, p);
@@ -396,6 +531,10 @@ impl Game {
                 self.spawn_player(pid);
                 let sub = match (self.cfg.mode, self.limit) {
                     _ if self.rounds.is_some() => self.room_status(),
+                    (Mode::Teams, n) if self.hill.is_some() => {
+                        let win = if n > 0 { format!("先到 {n} 分的队伍获胜") } else { "分高的队伍获胜".into() };
+                        Some(format!("占住中央高台每秒得 1 分，击毁得 {HILL_KILL} 分 · {win}"))
+                    }
                     (Mode::Teams, 0) => Some("击毁对方队伍的战车".to_string()),
                     (Mode::Teams, n) => Some(format!("先拿到 {n} 次击毁的队伍获胜")),
                     (_, 0) => Some("击毁任何其他战车".to_string()),
@@ -449,10 +588,17 @@ impl Game {
             hist: vec![(pos, rot); HISTORY_TICKS],
             spawn_tick: self.tick,
             last_attacker: None,
+            since_hit: f32::MAX,
+            over_pit: 0.0,
             collide_cd: 0.0,
+            cut_cd: 0.0,
+            cutting: 0.0,
+            bite_cd: 0.0,
+            burn_cd: 0.0,
             recent_dmg: 0.0,
             disabled_t: None,
             dmg_mul,
+            overdrive: 0.0,
             destroyed: Vec::new(),
             damaged: Vec::new(),
             killed: false,
@@ -534,6 +680,20 @@ impl Game {
     /// Where a ship of `team` enters: in 2v2 each team on its own side of the arena, facing the
     /// middle; otherwise anywhere clear.
     fn spawn_point(&mut self, team: u16) -> (Vec3, Quat) {
+        let terrain = self.terrain.clone();
+        if let Some(a) = &terrain.arena {
+            // the map's own spots: a free one, then the one the fewest enemies can see, then the
+            // one farthest from every ship
+            let spots = if self.cfg.mode == Mode::Teams { &a.team_spawns[(team % 2) as usize] } else { &a.spawns };
+            let seen = |p: Vec3| self.ships.values().filter(|s| s.team != team && terrain.segment_hit(p + Vec3::Y * 2.0, s.kin.pos + Vec3::Y).is_none()).count() as f32;
+            let room = |p: Vec3| {
+                let gap = self.ships.values().map(|s| s.kin.pos.with_y(0.0).distance(p)).fold(f32::MAX, f32::min);
+                gap.min(200.0) - seen(p) * 300.0 - if gap < 20.0 { 1e5 } else { 0.0 }
+            };
+            let first = self.rng.below(spots.len());
+            let pos = (0..spots.len()).map(|k| spots[(first + k) % spots.len()]).fold(spots[first], |best, p| if room(p) > room(best) + 1.0 { p } else { best });
+            return (pos, look_rotation(pos, Vec3::ZERO, Vec3::Y));
+        }
         if self.cfg.mode != Mode::Teams {
             return self.ffa_spawn_point();
         }
@@ -695,22 +855,28 @@ impl Game {
             }
         }
 
-        // bots
+        // bots: they don't see enemies through smoke, and know when a missile is after them
         let contacts: Vec<Contact> = self.ships.values().filter(|s| !s.killed).map(|s| s.contact()).collect();
+        let goals: BTreeMap<u16, Option<(Vec3, f32)>> = self.ships.values().filter(|s| s.ai.is_some()).map(|s| (s.id, self.bot_goal(s))).collect();
+        let hunted: Vec<u16> = self.bolts.iter().filter_map(|b| b.target.filter(|id| self.ships.get(id).is_some_and(|s| s.kin.pos.distance(b.pos) < 160.0))).collect();
         for s in self.ships.values_mut() {
             if let Some(ai) = s.ai.as_mut() {
-                let others: Vec<Contact> = contacts.iter().filter(|c| c.id != s.id).copied().collect();
-                let mut cmd = ai.think(&s.kin, &s.body, s.recent_dmg, s.team, &others, &self.rocks, DT);
-                cmd.tick = t;
-                s.input = cmd;
+                ai.goal = goals.get(&s.id).copied().flatten();
+                ai.hunted = hunted.contains(&s.id);
+                let eye = s.kin.pos + Vec3::Y * 1.5;
+                let others: Vec<Contact> = contacts.iter().filter(|c| c.id != s.id && (c.team == s.team || !hidden(&self.clouds, eye, c.pos, t))).copied().collect();
+                s.input = ai.think(&s.kin, &s.body, s.recent_dmg, s.team, &others, &self.rocks, &self.terrain, t);
             }
         }
 
-        // flight + weapons
+        // flight + weapons (and the gadgets: where each mine is laid, where smoke goes up)
         let mut crashes = Vec::new();
+        let (mut laid, mut smoke) = (Vec::new(), Vec::new());
         for s in self.ships.values_mut() {
-            step_drive(&mut s.kin, &s.body, &s.input, &self.terrain, DT);
-            if let Some(imp) = collide_asteroids(&mut s.kin, &s.body, &self.rocks, tick_time(t))
+            let knock = step_drive(&mut s.kin, &s.body, &s.input, &self.terrain, DT);
+            let rock = collide_asteroids(&mut s.kin, &s.body, &self.rocks, tick_time(t));
+            // the harder of a wall's knock and a rock's
+            if let Some(imp) = knock.into_iter().chain(rock).max_by(|a, b| a.speed.total_cmp(&b.speed))
                 && s.collide_cd <= 0.0
             {
                 s.collide_cd = 0.3;
@@ -719,9 +885,20 @@ impl Game {
                 crashes.push(imp.point);
             }
             s.collide_cd -= DT;
+            s.overdrive = (s.overdrive - DT).max(0.0);
+            s.since_hit += DT;
             s.recent_dmg *= (-1.5 * DT).exp();
             self.shots.clear();
             step_weapons(&mut s.kin, &s.body, &mut s.ws, &s.input, DT, t, false, &mut self.shots);
+            if s.ws.mined {
+                // on the ground just behind it (short of a wall there)
+                let (from, back) = (s.kin.pos, s.kin.pos - s.kin.fwd().with_y(0.0).normalize_or(Vec3::Z) * (s.body.radius - 0.4));
+                let at = from.lerp(back, self.terrain.segment_hit(from, back).map_or(1.0, |f| (f - 0.1).max(0.0)));
+                laid.push((s.id, s.team, at.with_y(self.terrain.surface(at.x, at.z) + 0.1)));
+            }
+            if s.ws.smoked {
+                smoke.push(s.kin.pos);
+            }
             for shot in &self.shots {
                 let spec = shot.weapon.weapon().unwrap();
                 let id = self.next_bolt;
@@ -734,7 +911,7 @@ impl Game {
                     team: s.team,
                     owner: s.id,
                     weapon: shot.weapon,
-                    dmg: spec.dmg * s.dmg_mul,
+                    dmg: spec.dmg * s.hits_mul(),
                     life: spec.life,
                     rewind: if s.owner.is_some() && !spec.homing { s.input.view_lag as u32 } else { 0 },
                     target: (spec.homing && s.input.lock != NO_LOCK).then_some(s.input.lock),
@@ -746,10 +923,36 @@ impl Game {
         for p in crashes {
             self.events.push(ServerMsg::Crash { pos: p });
         }
+        for (owner, team, pos) in laid {
+            self.lay_mine(owner, team, pos);
+        }
+        if let Some(spec) = BlockType::Smoke.gadget() {
+            for pos in smoke {
+                let c = Cloud { pos, radius: spec.radius, until: t + secs(spec.secs) };
+                self.events.push(ServerMsg::Smoke { pos, radius: c.radius, until: c.until });
+                self.clouds.push(c);
+            }
+        }
 
         self.ship_collisions();
+        self.melee();
+        self.hazards(t);
+        self.mines(t);
         self.update_bolts(t);
         self.settle_ships();
+        self.pick_ups();
+        self.hold_hill();
+
+        // into a pit (or hung on its edge): down to whoever last hit it, if that was lately
+        if let Some(a) = &self.terrain.arena {
+            for s in self.ships.values_mut() {
+                s.over_pit = if a.in_pit(s.kin.pos.x, s.kin.pos.z) { s.over_pit + DT } else { 0.0 };
+            }
+            let fell: Vec<(u16, Option<u16>)> = self.ships.values().filter(|s| s.kin.pos.y < KILL_Y || s.over_pit > PIT_HANG).map(|s| (s.id, s.last_attacker.filter(|_| s.since_hit < PIT_CREDIT))).collect();
+            for (id, by) in fell {
+                self.kill(id, by, Fate::Fell);
+            }
+        }
 
         // vehicles that can neither drive nor shoot give up after a few seconds
         let mut give_up = Vec::new();
@@ -763,7 +966,7 @@ impl Game {
             }
         }
         for (id, by) in give_up {
-            self.kill(id, by);
+            self.kill(id, by, Fate::Wrecked);
         }
 
         match self.cfg.mode {
@@ -773,63 +976,203 @@ impl Game {
         self.flush(t);
     }
 
+    /// Vehicles that run into each other: pushed apart and bounced off, and both hurt round where
+    /// they touched. The heavier one takes less, and so does the one that drove into the other;
+    /// a ram there hits much harder and takes little.
     fn ship_collisions(&mut self) {
         let ids: Vec<u16> = self.ships.keys().copied().collect();
         for a in 0..ids.len() {
             for b in a + 1..ids.len() {
                 let (ia, ib) = (ids[a], ids[b]);
-                let (sa, sb) = {
-                    let sa = &self.ships[&ia];
-                    let sb = &self.ships[&ib];
-                    if sa.kin.pos.distance(sb.kin.pos) > sa.body.radius + sb.body.radius {
-                        continue;
-                    }
-                    (sa, sb)
-                };
-                let mut contact = None;
-                for i in 0..sa.body.alive.len() {
-                    if !sa.body.alive[i] {
-                        continue;
-                    }
+                let (sa, sb) = (&self.ships[&ia], &self.ships[&ib]);
+                if sa.kin.pos.distance(sb.kin.pos) > sa.body.radius + sb.body.radius {
+                    continue;
+                }
+                // where they touch: the middle of A's blocks that are inside B's
+                let (mut sum, mut n_in) = (Vec3::ZERO, 0);
+                for i in (0..sa.body.alive.len()).filter(|&i| sa.body.alive[i]) {
                     let w = sa.body.world(sa.kin.pos, sa.kin.rot, i);
-                    let g = sb.body.to_grid(sb.kin.pos, sb.kin.rot, w).round().as_ivec3();
-                    if sb.body.block_at(g).is_some() {
-                        contact = Some(w);
-                        break;
+                    if sb.body.block_at(sb.body.to_grid(sb.kin.pos, sb.kin.rot, w).round().as_ivec3()).is_some() {
+                        sum += w;
+                        n_in += 1;
                     }
                 }
-                let Some(cp) = contact else { continue };
+                if n_in == 0 {
+                    continue;
+                }
+                let cp = sum / n_in as f32;
                 let n = (sa.kin.pos - sb.kin.pos).normalize_or(Vec3::Y);
                 let (ma, mb) = (sa.body.stats.mass.max(1.0), sb.body.stats.mass.max(1.0));
                 let rel = (sa.kin.vel - sb.kin.vel).dot(n);
                 let cd_ready = sa.collide_cd <= 0.0 || sb.collide_cd <= 0.0;
-                let (team_a, team_b) = (sa.team, sb.team);
-                {
-                    let sa = self.ships.get_mut(&ia).unwrap();
-                    sa.kin.pos += n * 0.8 * mb / (ma + mb);
+                let friendly = sa.team == sb.team;
+                // which of them drove into the other, and the rams at the point
+                let (into_a, into_b) = (sa.kin.vel.dot(-n), sb.kin.vel.dot(n));
+                let (ram_a, ram_b) = (sa.ram_at(cp), sb.ram_at(cp));
+                self.ships.get_mut(&ia).unwrap().kin.pos += n * 0.8 * mb / (ma + mb);
+                self.ships.get_mut(&ib).unwrap().kin.pos -= n * 0.8 * ma / (ma + mb);
+                if rel >= 0.0 {
+                    continue;
                 }
-                {
-                    let sb = self.ships.get_mut(&ib).unwrap();
-                    sb.kin.pos -= n * 0.8 * ma / (ma + mb);
+                let j = -CRASH_BOUNCE * rel / (1.0 / ma + 1.0 / mb);
+                self.ships.get_mut(&ia).unwrap().kin.vel += n * (j / ma);
+                self.ships.get_mut(&ib).unwrap().kin.vel -= n * (j / mb);
+                if !cd_ready {
+                    continue;
                 }
-                if rel < 0.0 {
-                    let j = -1.4 * rel / (1.0 / ma + 1.0 / mb);
-                    self.ships.get_mut(&ia).unwrap().kin.vel += n * (j / ma);
-                    self.ships.get_mut(&ib).unwrap().kin.vel -= n * (j / mb);
-                    if cd_ready {
-                        let dmg = (-rel * 1.2).min(90.0);
-                        let friendly = team_a == team_b;
-                        let f = if friendly { 0.3 } else { 1.0 };
-                        for (id, other, share) in [(ia, ib, mb / (ma + mb)), (ib, ia, ma / (ma + mb))] {
-                            let s = self.ships.get_mut(&id).unwrap();
-                            s.collide_cd = 0.35;
-                            let (pos, rot) = (s.kin.pos, s.kin.rot);
-                            s.splash(pos, rot, cp, 1.9, dmg * 2.0 * share * f, DamageKind::Kinetic, Some(other));
+                let dmg = (-rel * 1.2).min(90.0) * if friendly { 0.3 } else { 1.0 };
+                let rammed = |by: Option<&MeleeSpec>| by.map_or(1.0, |m| m.dmg);
+                let guarded = |own: Option<&MeleeSpec>| own.map_or(1.0, |m| m.guard);
+                let (drove_a, drove_b) = if into_a > into_b + 1.0 { (0.7, 1.3) } else if into_b > into_a + 1.0 { (1.3, 0.7) } else { (1.0, 1.0) };
+                let to_a = dmg * 2.0 * mb / (ma + mb) * drove_a * rammed(ram_b) * guarded(ram_a);
+                let to_b = dmg * 2.0 * ma / (ma + mb) * drove_b * rammed(ram_a) * guarded(ram_b);
+                for (id, other, d) in [(ia, ib, to_a), (ib, ia, to_b)] {
+                    let s = self.ships.get_mut(&id).unwrap();
+                    s.collide_cd = 0.35;
+                    let (pos, rot) = (s.kin.pos, s.kin.rot);
+                    s.splash(pos, rot, cp, 1.9, d, DamageKind::Kinetic, Some(other));
+                }
+                self.events.push(ServerMsg::Crash { pos: cp });
+            }
+        }
+    }
+
+    /// Saws cut what is just ahead of them, a chunk at a time; flippers that threw this tick throw
+    /// whatever enemy is in front of them up and over.
+    fn melee(&mut self) {
+        // (attacker, target, block, damage, where, by a saw); (target, its change of speed and of
+        // spin)
+        let mut cuts: Vec<(u16, u16, usize, f32, Vec3, bool)> = Vec::new();
+        let mut throws: Vec<(u16, Vec3, Vec3)> = Vec::new();
+        for s in self.ships.values_mut() {
+            s.cut_cd -= DT;
+            s.cutting -= DT;
+        }
+        for s in self.ships.values() {
+            let flipping = s.ws.flipped;
+            if s.body.stats.melee.is_empty() || (s.cut_cd > 0.0 && !flipping) {
+                continue;
+            }
+            let fwd = s.kin.fwd().with_y(0.0).normalize_or(Vec3::NEG_Z);
+            for o in self.ships.values() {
+                if o.team == s.team || o.kin.pos.distance(s.kin.pos) > s.body.radius + o.body.radius + 3.0 {
+                    continue;
+                }
+                let mut thrown = false;
+                for (m, mid, r) in s.melee_reach() {
+                    let nearest = o.body.within(o.kin.pos, o.kin.rot, mid, r).into_iter().min_by(|a, b| a.1.total_cmp(&b.1));
+                    let Some((i, _)) = nearest else { continue };
+                    let at = o.body.world(o.kin.pos, o.kin.rot, i);
+                    match m.kind {
+                        Melee::Saw if s.cut_cd <= 0.0 => cuts.push((s.id, o.id, i, m.dmg * CUT_EVERY * s.hits_mul(), at, true)),
+                        Melee::Flipper if flipping && !thrown => {
+                            thrown = true;
+                            // light vehicles fly, heavy ones only rock
+                            let k = (70.0 / o.body.stats.mass.max(1.0)).clamp(0.35, 1.2);
+                            throws.push((o.id, (Vec3::Y * m.lift + fwd * m.push) * k, Vec3::Y.cross(fwd) * 3.0 * k));
+                            cuts.push((s.id, o.id, i, m.dmg * s.hits_mul(), at, false));
                         }
-                        self.events.push(ServerMsg::Crash { pos: cp });
+                        _ => {}
                     }
                 }
             }
+        }
+        for (by, target, i, dmg, at, saw) in cuts {
+            self.ships.get_mut(&target).unwrap().hit_block(i, dmg, DamageKind::Kinetic, Some(by));
+            if saw {
+                let s = self.ships.get_mut(&by).unwrap();
+                (s.cut_cd, s.cutting) = (CUT_EVERY, 0.25);
+            } else {
+                self.events.push(ServerMsg::Crash { pos: at });
+            }
+        }
+        for (target, dv, spin) in throws {
+            let o = self.ships.get_mut(&target).unwrap();
+            o.kin.vel += dv;
+            o.kin.ang += spin;
+        }
+    }
+
+    /// The arena's saws bite what touches them, and its vents burn what stands in their flames.
+    /// No one gets the kill for either, unless they hit the victim lately.
+    fn hazards(&mut self, t: u32) {
+        let ground = self.terrain.clone();
+        let Some(a) = ground.arena.as_ref() else { return };
+        let now = tick_time(t);
+        for s in self.ships.values_mut() {
+            s.bite_cd -= DT;
+            s.burn_cd -= DT;
+            if s.bite_cd <= 0.0
+                && let Some((_, q, _)) = a.saws.iter().find_map(|saw| saw_bites(&s.kin, &s.body, saw, now).first().copied())
+            {
+                let (pos, rot) = (s.kin.pos, s.kin.rot);
+                s.splash(pos, rot, q, 1.3, SAW_DMG, DamageKind::Kinetic, None);
+                s.bite_cd = 0.3;
+                self.events.push(ServerMsg::Crash { pos: q });
+            }
+            if s.burn_cd <= 0.0 {
+                for v in a.vents.iter().filter(|v| v.burning(now)) {
+                    let hot: Vec<usize> = (0..s.body.alive.len()).filter(|&i| s.body.alive[i]).filter(|&i| {
+                        let w = s.body.world(s.kin.pos, s.kin.rot, i);
+                        v.area.contains(w.x, w.z) && w.y < VENT_HIGH
+                    }).collect();
+                    if !hot.is_empty() {
+                        let each = VENT_DPS * BURN_EVERY / hot.len() as f32;
+                        for i in hot {
+                            s.hit_block(i, each, DamageKind::Energy, None);
+                        }
+                        s.burn_cd = BURN_EVERY;
+                    }
+                }
+            }
+        }
+    }
+
+    /// A mine laid: one vehicle's oldest goes when it has as many down as it may.
+    fn lay_mine(&mut self, owner: u16, team: u16, pos: Vec3) {
+        let Some(spec) = BlockType::MineLayer.gadget() else { return };
+        let mine = self.mines.iter().filter(|m| m.owner == owner).count();
+        if mine >= spec.count as usize
+            && let Some(i) = self.mines.iter().position(|m| m.owner == owner)
+        {
+            let old = self.mines.remove(i);
+            self.events.push(ServerMsg::MineGone { id: old.id, exploded: false });
+        }
+        let id = self.next_mine;
+        self.next_mine = self.next_mine.wrapping_add(1);
+        let armed_at = self.tick + secs(MINE_ARM);
+        self.mines.push(Mine { id, pos, team, owner, armed_at, gone_at: self.tick + secs(spec.secs) });
+        self.events.push(ServerMsg::MineDropped { id, pos, team, armed_at });
+    }
+
+    /// Live mines go off under the first enemy to come near, blasting every enemy in reach (and
+    /// kicking them up a little); old ones are cleared away. Clouds that have cleared go too.
+    fn mines(&mut self, t: u32) {
+        self.clouds.retain(|c| c.until > t);
+        let Some(spec) = BlockType::MineLayer.gadget() else { return };
+        let mut i = 0;
+        while i < self.mines.len() {
+            let m = &self.mines[i];
+            if t >= m.gone_at {
+                self.events.push(ServerMsg::MineGone { id: m.id, exploded: false });
+                self.mines.remove(i);
+                continue;
+            }
+            let near = |s: &Ship, r: f32| !s.killed && s.team != m.team && s.kin.pos.distance(m.pos) < s.body.radius + r && !s.body.within(s.kin.pos, s.kin.rot, m.pos, r).is_empty();
+            if t < m.armed_at || !self.ships.values().any(|s| near(s, spec.reach)) {
+                i += 1;
+                continue;
+            }
+            let caught: Vec<u16> = self.ships.values().filter(|s| near(s, spec.radius.max(spec.reach))).map(|s| s.id).collect();
+            let m = self.mines.remove(i);
+            for id in caught {
+                let s = self.ships.get_mut(&id).unwrap();
+                let (pos, rot) = (s.kin.pos, s.kin.rot);
+                s.splash(pos, rot, m.pos, spec.radius, spec.dmg, DamageKind::Explosive, Some(m.owner));
+                s.kin.vel += Vec3::Y * 5.0 * (50.0 / s.body.stats.mass.max(1.0)).clamp(0.3, 1.0);
+            }
+            self.events.push(ServerMsg::Explosion { pos: m.pos + Vec3::Y * 0.5, size: 1.6 });
+            self.events.push(ServerMsg::MineGone { id: m.id, exploded: true });
         }
     }
 
@@ -844,16 +1187,20 @@ impl Game {
             if spec.homing {
                 let cur = b.vel.normalize_or(Vec3::NEG_Z);
                 let mut dir = cur;
+                // smoke between it and its target: it loses it, and flies on straight
+                if b.target.and_then(|tid| self.ships.get(&tid)).is_some_and(|tg| hidden(&self.clouds, b.pos, tg.kin.pos, t)) {
+                    b.target = None;
+                }
                 if let Some(tid) = b.target
                     && let Some(tg) = self.ships.get(&tid)
                 {
                     let des = (tg.kin.pos - b.pos).normalize_or(cur);
                     let ang = cur.angle_between(des);
                     if ang > 1e-4 {
-                        dir = cur.lerp(des, (3.4 * DT / ang).min(1.0)).normalize_or(cur);
+                        dir = cur.lerp(des, (MISSILE_TURN * DT / ang).min(1.0)).normalize_or(cur);
                     }
                 }
-                b.speed = (b.speed + 200.0 * DT).min(380.0);
+                b.speed = (b.speed + MISSILE_ACCEL * DT).min(MISSILE_TOP);
                 b.vel = dir * b.speed;
             }
             b.pos += b.vel * DT;
@@ -875,6 +1222,7 @@ impl Game {
                         s.kin.shield_delay = 3.0;
                         s.recent_dmg += b.dmg * 0.5;
                         s.last_attacker = Some(b.owner);
+                        s.since_hit = 0.0;
                         landed.push((b.owner, s.id, true));
                         self.events.push(ServerMsg::ShieldHit { ship: s.id, pos: pt });
                         if spec.splash > 0.0 {
@@ -904,10 +1252,10 @@ impl Game {
                     }
                 }
             }
-            if !dead && b.pos.y < self.terrain.height(b.pos.x, b.pos.z) {
-                // into the ground
+            if !dead && let Some(tt) = self.terrain.segment_hit(b.prev, b.pos) {
+                // into the ground, a wall, a crate
                 if spec.splash > 0.0 {
-                    self.events.push(ServerMsg::Explosion { pos: b.pos, size: 0.7 });
+                    self.events.push(ServerMsg::Explosion { pos: b.prev.lerp(b.pos, tt), size: 0.7 });
                 }
                 dead = true;
             }
@@ -964,11 +1312,11 @@ impl Game {
             }
         }
         for (id, by) in kills {
-            self.kill(id, by);
+            self.kill(id, by, Fate::Wrecked);
         }
     }
 
-    fn kill(&mut self, id: u16, by: Option<u16>) {
+    fn kill(&mut self, id: u16, by: Option<u16>, fate: Fate) {
         let Some(mut victim) = self.ships.remove(&id) else { return };
         victim.killed = true;
         self.events.push(ServerMsg::ShipKilled { id, killer: by });
@@ -985,6 +1333,9 @@ impl Game {
         let counts = self.round != Round::Over;
         if let Some(k) = killer.filter(|k| k.team != victim.team && counts) {
             *self.team_kills.entry(k.team).or_insert(0) += 1;
+            if let Some(h) = self.hill.as_mut() {
+                *h.points.entry(k.team).or_insert(0) += HILL_KILL;
+            }
         }
         let pts = 100 + (victim.body.max_hp / 10.0) as u32;
         if let Some(pid) = killer_owner.filter(|_| counts)
@@ -1011,12 +1362,92 @@ impl Game {
                 p.respawn_at = Some(self.tick + secs(4.0));
             }
         }
-        let text = match killer_name {
-            Some(k) => format!("{k} 击毁了 {}", victim.name),
-            None => format!("{} 报废了", victim.name),
+        let text = match (killer_name, fate) {
+            (Some(k), Fate::Wrecked) => format!("{k} 击毁了 {}", victim.name),
+            (None, Fate::Wrecked) => format!("{} 报废了", victim.name),
+            (Some(k), Fate::Fell) => format!("{k} 把 {} 逼进了深坑", victim.name),
+            (None, Fate::Fell) => format!("{} 掉进了深坑", victim.name),
         };
         self.feed(text, victim.owner.is_some());
         self.scores_dirty = true;
+    }
+
+    /// Where a bot would rather be than wherever its fight takes it: a repair when it is badly
+    /// hurt, an overdrive close by, and in 2v2 the top of the hill. With the radius it counts as
+    /// there within.
+    fn bot_goal(&self, s: &Ship) -> Option<(Vec3, f32)> {
+        let a = self.terrain.arena.as_ref()?;
+        let nearest = |kind: PadKind| {
+            a.pads.iter().zip(&self.pads).filter(|(p, b)| p.kind == kind && **b <= self.tick).map(|(p, _)| p.at).min_by(|x, y| x.distance_squared(s.kin.pos).total_cmp(&y.distance_squared(s.kin.pos)))
+        };
+        if s.body.hp_total() < s.body.max_hp * 0.45
+            && let Some(p) = nearest(PadKind::Repair)
+        {
+            return Some((p, 1.0));
+        }
+        if s.overdrive <= 0.0
+            && let Some(p) = nearest(PadKind::Overdrive).filter(|p| p.distance(s.kin.pos) < 50.0)
+        {
+            return Some((p, 1.0));
+        }
+        self.hill.as_ref().map(|_| (a.hill.centre().with_y(HILL_TOP), HILL_HALF - 3.0))
+    }
+
+    /// The arena's pads: the nearest vehicle on one that is up, and that has a use for it, takes
+    /// it, and it comes back a while later.
+    fn pick_ups(&mut self) {
+        let ground = self.terrain.clone();
+        let Some(a) = ground.arena.as_ref() else { return };
+        for (i, pad) in a.pads.iter().enumerate() {
+            if self.pads[i] > self.tick {
+                continue;
+            }
+            let on = self.ships.values_mut().filter(|s| pad.under(s.kin.pos) && s.wants(pad.kind));
+            let Some(s) = on.min_by(|x, y| x.kin.pos.distance_squared(pad.at).total_cmp(&y.kin.pos.distance_squared(pad.at))) else { continue };
+            match pad.kind {
+                PadKind::Repair => {
+                    s.body.repair();
+                    s.disabled_t = None;
+                    self.events.push(ServerMsg::ShipRepaired { id: s.id });
+                }
+                PadKind::Energy => {
+                    s.kin.energy = s.body.stats.energy_cap;
+                    s.kin.shield = s.body.stats.shield_cap;
+                }
+                PadKind::Overdrive => {
+                    s.overdrive = OVERDRIVE_SECS;
+                    self.events.push(ServerMsg::ShipBuff { id: s.id, until: self.tick + secs(OVERDRIVE_SECS) });
+                    self.events.push(ServerMsg::Feed { text: format!("{} 拿到了超载", s.name), bad: false });
+                }
+            }
+            self.pads[i] = self.tick + secs(pad.kind.respawn());
+            self.events.push(ServerMsg::PadState { pad: i as u8, back_at: self.pads[i] });
+        }
+    }
+
+    /// 2v2 on the hill: a team alone on top scores a point a second; with both on it, neither does.
+    fn hold_hill(&mut self) {
+        let (Some(a), Some(h)) = (self.terrain.arena.as_ref(), self.hill.as_mut()) else { return };
+        let mut on: Vec<u16> = self.ships.values().filter(|s| a.on_hill(s.kin.pos)).map(|s| s.team).collect();
+        on.sort_unstable();
+        on.dedup();
+        let (holder, contested) = match on[..] {
+            [] => (None, false),
+            [t] => (Some(t), false),
+            _ => (None, true),
+        };
+        if (holder, contested) != (h.holder, h.contested) {
+            (h.holder, h.contested, h.held) = (holder, contested, 0.0);
+            self.scores_dirty = true;
+        }
+        if let Some(t) = holder {
+            h.held += DT;
+            if h.held >= 1.0 {
+                h.held -= 1.0;
+                *h.points.entry(t).or_insert(0) += 1;
+                self.scores_dirty = true;
+            }
+        }
     }
 
     fn coop_logic(&mut self) {
@@ -1216,7 +1647,8 @@ impl Game {
                 Round::None => self.ends_at,
             };
             let left = end.map_or(0.0, |e| e.saturating_sub(self.tick) as f32 / TICK_RATE as f32);
-            self.events.push(ServerMsg::Scores { rows, wave: self.wave, enemies, limit: self.limit, left, round: self.round });
+            let hill = self.hill.as_ref().map(|h| HillState { points: [1, 2].map(|t| h.points.get(&t).copied().unwrap_or(0)), holder: h.holder, contested: h.contested });
+            self.events.push(ServerMsg::Scores { rows, wave: self.wave, enemies, limit: self.limit, left, round: self.round, hill });
         }
         self.send_events();
         if t % SNAPSHOT_INTERVAL != 0 {
@@ -1230,17 +1662,15 @@ impl Game {
                 pos: s.kin.pos,
                 rot: quantize_quat(s.kin.rot),
                 vel: s.kin.vel,
-                flags: (if s.input.has(blocktread_shared::flight::BTN_FIRE) { FLAG_FIRING } else { 0 })
-                    | (if s.kin.boosting { FLAG_BOOST } else { 0 })
-                    | (if s.body.stats.thrust > 0.0 && blocktread_shared::drive::thrust_push(&s.input, s.kin.boosting) > 0.0 { FLAG_THRUST } else { 0 }),
+                flags: s.flags(),
                 throttle: (s.input.throttle_f() * 255.0) as u8,
                 shield: if s.body.stats.shield_cap > 0.0 { (s.kin.shield / s.body.stats.shield_cap * 255.0) as u8 } else { 0 },
                 aim: s.input.aim,
             })
             .collect();
-        let missiles: Vec<MissileSnap> = self.bolts.iter().filter(|b| b.weapon == BlockType::Missile).map(|b| MissileSnap { id: b.id, pos: b.pos, vel: b.vel }).collect();
+        let missiles: Vec<MissileSnap> = self.bolts.iter().filter(|b| b.weapon == BlockType::Missile).map(|b| MissileSnap { id: b.id, pos: b.pos, vel: b.vel, team: b.team, owner: b.owner }).collect();
         for p in self.players.values() {
-            let own = p.ship.and_then(|id| self.ships.get(&id).map(|s| OwnState { ship: id, kin: s.kin }));
+            let own = p.ship.and_then(|id| self.ships.get(&id).map(|s| OwnState { ship: id, kin: s.kin, flags: s.flags() }));
             let ships: Vec<ShipSnap> = all.iter().filter(|s| Some(s.id) != p.ship).copied().collect();
             let lead = (p.newest as i64 - t as i64).clamp(i16::MIN as i64, i16::MAX as i64) as i16;
             let mut snap = Snapshot { tick: t, ack: p.ack, lead, own, ships, missiles: missiles.clone() };
@@ -1277,7 +1707,7 @@ pub struct Duel {
 /// other in the normal arena, asteroids and all, until one goes down or `max_secs` pass. Run it
 /// many times with different seeds; one fight says little.
 pub fn duel(a: &Design, b: &Design, seed: u64, max_secs: f32) -> Duel {
-    let mut g = Game::with_seed(GameConfig { mode: Mode::Ffa, bots: 0, budget: None, verbose: false }, seed);
+    let mut g = Game::with_map(GameConfig { mode: Mode::Ffa, bots: 0, budget: None, verbose: false }, seed, Map::Desert);
     // full damage on both sides: free-for-all bots normally hit a little softer than players
     let skill = Skill { dmg_mul: 1.0, ..Skill::ffa_bot() };
     // two spots 300 m apart, clear of rocks, facing each other
@@ -1342,7 +1772,7 @@ mod tests {
     fn frag(g: &mut Game, killer: u16, victim: u16) {
         let ship = |g: &Game, pid: u16| g.players[&pid].ship.unwrap();
         let (k, v) = (ship(g, killer), ship(g, victim));
-        g.kill(v, Some(k));
+        g.kill(v, Some(k), Fate::Wrecked);
         g.spawn_player(victim);
     }
 
@@ -1385,6 +1815,345 @@ mod tests {
         g.tick();
         assert_eq!(g.round, Round::Running);
         assert!(g.scores().iter().all(|r| r.kills == 0 && r.deaths == 0));
+    }
+
+    #[test]
+    fn bots_find_their_way_round_the_cage() {
+        for seed in [1, 5, 8] {
+            // a room of six bots, someone watching so that they keep coming
+            let mut g = Game::with_seed(GameConfig { mode: Mode::Ffa, bots: 6, budget: None, verbose: false }, seed);
+            let (out, _rx) = unbounded_channel();
+            g.join(1, "观众".into(), None, None, out);
+            let (mut alive, mut stuck) = (BTreeMap::<u16, f32>::new(), BTreeMap::<u16, f32>::new());
+            let mut movers = BTreeMap::<u16, usize>::new();
+            let mut fell = std::collections::BTreeSet::new();
+            for _ in 0..secs(120.0) {
+                g.tick();
+                for s in g.ships.values() {
+                    // only while it has all its wheels: one shot to pieces is stuck for a reason
+                    if *movers.entry(s.id).or_insert(s.body.movers.len()) > s.body.movers.len() {
+                        continue;
+                    }
+                    *alive.entry(s.id).or_default() += DT;
+                    if s.kin.vel.length() < 1.0 {
+                        *stuck.entry(s.id).or_default() += DT;
+                    }
+                    if s.kin.pos.y < -1.0 {
+                        fell.insert(s.id);
+                    }
+                }
+            }
+            let kills: u32 = g.seats.iter().map(|s| s.kills).sum();
+            let deaths: u32 = g.seats.iter().map(|s| s.deaths).sum();
+            let worst = alive.iter().filter(|(_, t)| **t > 15.0).map(|(id, t)| stuck.get(id).copied().unwrap_or(0.0) / t).fold(0.0f32, f32::max);
+            println!("seed {seed}: {} vehicles, {kills} kills, {deaths} losses, {} into a pit; the most stuck one sat still {:.0}% of its life", alive.len(), fell.len(), worst * 100.0);
+            assert!(kills >= 4, "they should find each other");
+            assert!(worst < 0.3, "no one should sit stuck");
+            assert!(fell.len() * 3 <= deaths as usize + 1, "pits shouldn't take most of them");
+        }
+    }
+
+    /// The cage with no one in it, for setting vehicles down where a test wants them.
+    fn bare_cage() -> Game {
+        Game::with_map(GameConfig { mode: Mode::Ffa, bots: 0, budget: None, verbose: false }, 1, Map::Cage)
+    }
+
+    fn put(g: &mut Game, d: Design, team: u16, at: Vec3, facing: Vec3) -> u16 {
+        g.add_ship(Arc::new(d), format!("{team}"), team, None, at, look_rotation(at, at + facing, Vec3::Y), None)
+    }
+
+    /// The rover with a row of `t` across its nose.
+    fn nosed(t: BlockType) -> Design {
+        let mut d = preset("rover");
+        for x in -1..=1 {
+            d.blocks.push(blocktread_shared::blocks::Block::new(x, 0, -6, t, None));
+        }
+        d
+    }
+
+    fn lost(g: &Game, id: u16) -> f32 {
+        g.ships.get(&id).map_or(f32::INFINITY, |s| s.body.max_hp - s.body.hp_total())
+    }
+
+    /// Two vehicles driven head on into each other: what each lost.
+    fn head_on(a: Design, b: Design) -> (f32, f32) {
+        let mut g = bare_cage();
+        let (pa, pb) = (Vec3::new(-96.0, 0.0, -25.0), Vec3::new(-74.0, 0.0, -25.0));
+        let ia = put(&mut g, a, 1, pa, Vec3::X);
+        let ib = put(&mut g, b, 2, pb, Vec3::NEG_X);
+        for _ in 0..secs(2.5) {
+            for id in [ia, ib] {
+                if let Some(s) = g.ships.get_mut(&id) {
+                    s.input.drive = 127;
+                }
+            }
+            g.tick();
+        }
+        (lost(&g, ia), lost(&g, ib))
+    }
+
+    #[test]
+    fn a_ram_hits_hard_and_takes_little() {
+        // against the same weight of armour on the nose
+        let (armour_took, armour_dealt) = head_on(nosed(BlockType::Armor), preset("rover"));
+        let (ram_took, ram_dealt) = head_on(nosed(BlockType::Ram), preset("rover"));
+        println!("armoured nose: took {armour_took:.0}, dealt {armour_dealt:.0}; ram: took {ram_took:.0}, dealt {ram_dealt:.0}");
+        assert!(armour_dealt > 10.0, "a crash should hurt");
+        assert!(ram_dealt > armour_dealt * 2.0, "the ram should deal far more");
+        assert!(ram_took < armour_took * 0.6, "and take less");
+    }
+
+    #[test]
+    fn a_flipper_throws_what_is_in_front_of_it() {
+        let mut g = bare_cage();
+        let at = Vec3::new(-90.0, 0.0, -25.0);
+        let ia = put(&mut g, nosed(BlockType::Flipper), 1, at, Vec3::X);
+        // the other's tail a metre off the flipper's lip
+        let ib = put(&mut g, preset("rover"), 2, at + Vec3::X * 12.5, Vec3::X);
+        for _ in 0..secs(0.5) {
+            g.tick();
+        }
+        let gap = g.ships[&ib].kin.pos.x - g.ships[&ia].kin.pos.x;
+        g.ships.get_mut(&ia).unwrap().input.buttons = blocktread_shared::flight::BTN_FLIPPER;
+        g.tick();
+        let b = &g.ships[&ib];
+        println!("{gap:.1} m apart: thrown at {:.1?}", b.kin.vel);
+        assert!(b.kin.vel.y > 3.0 && b.kin.vel.x > 2.0, "it should go up and away");
+        assert!(lost(&g, ib) > 1.0 && b.last_attacker == Some(ia));
+        // and the next press does nothing for a while
+        let vy = g.ships[&ib].kin.vel.y;
+        g.tick();
+        assert!(g.ships[&ib].kin.vel.y < vy, "only gravity now");
+    }
+
+    #[test]
+    fn a_saw_cuts_what_is_just_ahead_of_it() {
+        let mut g = bare_cage();
+        let at = Vec3::new(-90.0, 0.0, -25.0);
+        let ia = put(&mut g, nosed(BlockType::Saw), 1, at, Vec3::X);
+        // the other's tail a metre off the blade
+        let ib = put(&mut g, preset("rover"), 2, at + Vec3::X * 11.5, Vec3::X);
+        let mut shown = false;
+        for _ in 0..secs(1.0) {
+            g.tick();
+            shown |= g.ships[&ia].flags() & FLAG_CUT != 0;
+        }
+        println!("cut {:.0} in a second", lost(&g, ib));
+        assert!(lost(&g, ib) > 40.0 && g.ships[&ib].last_attacker == Some(ia));
+        assert!(shown, "others should see it cutting");
+        // nothing for one out of reach
+        let ic = put(&mut g, preset("rover"), 3, at + Vec3::new(0.0, 0.0, 20.0), Vec3::NEG_X);
+        let id = put(&mut g, preset("rover"), 4, at + Vec3::new(11.8, 0.0, 30.0), Vec3::NEG_X);
+        for _ in 0..secs(1.0) {
+            g.tick();
+        }
+        assert_eq!((lost(&g, ic), lost(&g, id)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_vent_burns_only_while_it_breathes_fire() {
+        let mut g = bare_cage();
+        let v = g.terrain.arena.as_ref().unwrap().vents[0];
+        let id = put(&mut g, preset("rover"), 1, v.area.centre(), Vec3::X);
+        let mut by = Vec::new();
+        for _ in 0..secs(6.0) {
+            g.tick();
+            by.push((tick_time(g.tick), lost(&g, id)));
+        }
+        let at = |t: f64| by.iter().find(|b| b.0 >= t).unwrap().1;
+        println!("burnt {:.0} by 2 s, {:.0} by 5.9 s", at(2.0), at(5.9));
+        assert!(at(2.0) > 60.0, "it should burn while the vent is on");
+        assert!(at(5.9) - at(2.3) < 1.0, "and not while it is off");
+    }
+
+    /// The index and place of the cage's first pad of this kind.
+    fn pad_of(g: &Game, kind: PadKind) -> (usize, Vec3) {
+        let pads = &g.terrain.arena.as_ref().unwrap().pads;
+        pads.iter().enumerate().find(|(_, p)| p.kind == kind).map(|(i, p)| (i, p.at)).unwrap()
+    }
+
+    #[test]
+    fn a_pad_goes_to_who_needs_it_and_comes_back() {
+        let mut g = bare_cage();
+        let (i, at) = pad_of(&g, PadKind::Repair);
+        let id = put(&mut g, preset("rover"), 1, at, Vec3::X);
+        for _ in 0..10 {
+            g.tick();
+        }
+        assert!(g.pads[i] <= g.tick, "nothing to mend: it stays up");
+        g.ships.get_mut(&id).unwrap().hit_block(3, 25.0, DamageKind::Kinetic, None);
+        g.tick();
+        assert_eq!(lost(&g, id), 0.0, "mended");
+        let back = g.pads[i];
+        assert!(back > g.tick);
+        // hurt again, nothing until it is back up
+        g.ships.get_mut(&id).unwrap().hit_block(3, 25.0, DamageKind::Kinetic, None);
+        while g.tick + 1 < back {
+            g.tick();
+            assert!(lost(&g, id) > 0.0);
+        }
+        g.tick();
+        assert_eq!(lost(&g, id), 0.0, "and again once it is back");
+    }
+
+    #[test]
+    fn overdrive_hits_harder_for_a_while() {
+        let mut g = bare_cage();
+        let (_, at) = pad_of(&g, PadKind::Overdrive);
+        let id = put(&mut g, preset("rover"), 1, at, Vec3::X);
+        g.tick();
+        assert_eq!(g.ships[&id].hits_mul(), OVERDRIVE_MUL);
+        for _ in 0..=secs(OVERDRIVE_SECS) {
+            g.tick();
+        }
+        assert_eq!(g.ships[&id].hits_mul(), 1.0);
+    }
+
+    /// The cage set up for 2v2, no one in it yet.
+    fn hill_cage() -> Game {
+        Game::with_map(GameConfig { mode: Mode::Teams, bots: 0, budget: None, verbose: false }, 1, Map::Cage)
+    }
+
+    #[test]
+    fn the_hill_scores_for_a_side_alone_on_it() {
+        let mut g = hill_cage();
+        let top = Vec3::Y * HILL_TOP;
+        let a = put(&mut g, preset("rover"), 1, top + Vec3::X * 4.0, Vec3::X);
+        for _ in 0..secs(3.2) {
+            g.tick();
+        }
+        assert_eq!(g.points().get(&1), Some(&3), "a point a second");
+        // the other side comes up: neither scores
+        let b = put(&mut g, preset("rover"), 2, top - Vec3::X * 4.0, Vec3::NEG_X);
+        for _ in 0..secs(2.0) {
+            g.tick();
+        }
+        assert_eq!((g.points().get(&1), g.points().get(&2)), (Some(&3), None));
+        assert!(g.hill.as_ref().unwrap().contested);
+        // a kill is worth five, and the hill is theirs again
+        g.kill(b, Some(a), Fate::Wrecked);
+        g.tick();
+        assert_eq!(g.points()[&1], 3 + HILL_KILL);
+        assert_eq!(g.hill.as_ref().unwrap().holder, Some(1));
+    }
+
+    #[test]
+    fn bots_fight_over_the_hill() {
+        let mut g = hill_cage();
+        let (out, _rx) = unbounded_channel();
+        g.join(1, "观众".into(), None, None, out);
+        for (i, ship) in ["bison", "scorpion", "rover", "bison"].iter().enumerate() {
+            g.add_seat(format!("AI{i}"), preset(ship), Some(1 + i as u16 % 2));
+        }
+        let (mut held, mut contested) = (0.0, 0.0);
+        // seconds of vehicles up there, by side
+        let mut up: BTreeMap<u16, f32> = BTreeMap::new();
+        for _ in 0..secs(90.0) {
+            g.tick();
+            for s in g.ships.values().filter(|s| g.terrain.arena.as_ref().is_some_and(|a| a.on_hill(s.kin.pos))) {
+                *up.entry(s.team).or_insert(0.0) += DT;
+            }
+            let h = g.hill.as_ref().unwrap();
+            if h.holder.is_some() {
+                held += DT;
+            }
+            if h.contested {
+                contested += DT;
+            }
+        }
+        let p = g.points();
+        println!("points {p:?}; held {held:.0} s, contested {contested:.0} s; time up there by team {up:?}");
+        assert!(held + contested > 30.0, "they should get up there");
+        assert!(up.len() == 2 && up.values().all(|&t| t > 10.0), "both sides should");
+        assert!(contested > 5.0, "and fight over it");
+    }
+
+    #[test]
+    fn a_mine_waits_for_an_enemy_and_goes_off_under_it() {
+        let mut g = bare_cage();
+        let ground = g.terrain.clone();
+        let on_floor = |x: f32, z: f32| Vec3::new(x, ground.surface(x, z) + 0.1, z);
+        let owner = put(&mut g, preset("rhino"), 1, Vec3::new(-100.0, 0.0, -45.0), Vec3::X);
+        // a friend drives over a live one
+        g.lay_mine(owner, 1, on_floor(-85.0, -25.0));
+        let friend = put(&mut g, preset("rover"), 1, Vec3::new(-96.0, 0.0, -25.0), Vec3::X);
+        for _ in 0..secs(2.5) {
+            g.ships.get_mut(&friend).unwrap().input.drive = 127;
+            g.tick();
+        }
+        assert!(g.ships[&friend].kin.pos.x > -80.0, "it should have driven over it");
+        assert_eq!((g.mines.len(), lost(&g, friend)), (1, 0.0), "a mine is no danger to its own side");
+        g.ships.remove(&friend);
+        // one laid under an enemy waits until it is live, then goes off
+        let enemy = put(&mut g, preset("rover"), 2, Vec3::new(-60.0, 0.0, -25.0), Vec3::X);
+        for _ in 0..secs(1.0) {
+            g.tick();
+        }
+        g.lay_mine(owner, 1, on_floor(-60.0, -25.0));
+        for _ in 0..secs(0.5) {
+            g.tick();
+        }
+        assert_eq!(g.mines.len(), 2, "not live yet");
+        for _ in 0..secs(0.7) {
+            g.tick();
+        }
+        assert_eq!(g.mines.len(), 1, "it should have gone off");
+        let e = &g.ships[&enemy];
+        println!("the mine took {:.0} hit points off the rover", lost(&g, enemy));
+        assert!(lost(&g, enemy) > 40.0, "and hurt it");
+        assert_eq!(e.last_attacker, Some(owner), "the kill would be the layer's");
+        // no more than three down: the fourth takes the place of the oldest
+        let first = g.mines[0].id;
+        for x in [-30.0, -20.0, -10.0] {
+            g.lay_mine(owner, 1, on_floor(x, -60.0));
+        }
+        assert_eq!(g.mines.len(), 3);
+        assert!(g.mines.iter().all(|m| m.id != first));
+    }
+
+    /// A missile `target` is after, from off to one side.
+    fn missile_at(g: &mut Game, owner: u16, target: u16) {
+        let pos = g.ships[&target].kin.pos + Vec3::new(-40.0, 3.0, -18.0);
+        g.bolts.push(Bolt { id: 900, pos, prev: pos, vel: Vec3::X * 120.0, team: g.ships[&owner].team, owner, weapon: BlockType::Missile, dmg: 30.0, life: 5.0, rewind: 0, target: Some(target), speed: 120.0 });
+    }
+
+    #[test]
+    fn smoke_makes_a_missile_lose_its_target() {
+        let hit = |smoke: bool| {
+            let mut g = bare_cage();
+            let target = put(&mut g, preset("rover"), 2, Vec3::new(-60.0, 0.0, -25.0), Vec3::X);
+            let shooter = put(&mut g, preset("scorpion"), 1, Vec3::new(-100.0, 0.0, -60.0), Vec3::X);
+            if smoke {
+                g.clouds.push(Cloud { pos: g.ships[&target].kin.pos, radius: 7.0, until: g.tick + secs(8.0) });
+            }
+            missile_at(&mut g, shooter, target);
+            for _ in 0..secs(1.5) {
+                g.tick();
+            }
+            lost(&g, target)
+        };
+        let (clear, smoked) = (hit(false), hit(true));
+        println!("lost {clear:.0} to a missile it couldn't hide from, {smoked:.0} in smoke");
+        assert!(clear > 10.0, "the missile should find it");
+        assert_eq!(smoked, 0.0, "it shouldn't in smoke");
+    }
+
+    #[test]
+    fn a_bot_with_a_missile_after_it_lets_off_smoke_and_then_cant_be_seen() {
+        let mut g = bare_cage();
+        let at = Vec3::new(-60.0, 0.0, -25.0);
+        let bot = g.add_ship(Arc::new(preset("scorpion")), "bot".into(), 2, None, at, Quat::IDENTITY, Some(Skill::ffa_bot()));
+        let foe = put(&mut g, preset("rover"), 1, Vec3::new(-100.0, 0.0, -60.0), Vec3::X);
+        missile_at(&mut g, foe, bot);
+        for _ in 0..3 {
+            g.tick();
+        }
+        assert_eq!(g.clouds.len(), 1, "it should let off smoke");
+        assert!(g.bolts.iter().all(|b| b.target.is_none()), "and the missile lose it");
+        // a bot in the open sees it; one outside the cloud looking in doesn't
+        let watcher = Vec3::new(-100.0, 1.5, -25.0);
+        assert!(hidden(&g.clouds, watcher, g.ships[&bot].kin.pos, g.tick));
+        assert!(!hidden(&g.clouds, watcher, g.ships[&foe].kin.pos, g.tick));
     }
 
     #[test]

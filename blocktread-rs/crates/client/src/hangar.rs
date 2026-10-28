@@ -973,6 +973,10 @@ fn part_detail(t: BlockType) -> String {
         Some(d) => format!("{weapon} · 直径 {:.1} · {}", d.radius * 2.0, if d.steer > 0.0 { "能转向" } else { "不能转向" }),
         None => weapon,
     };
+    let weapon = match t.gadget() {
+        Some(g) => format!("{weapon} · 按 {} · 冷却 {} 秒", g.kind.key(), g.cooldown),
+        None => weapon,
+    };
     format!("造价 {} · 质量 {} · 耐久 {}{}\n{}", i.cost, i.mass, i.hp, weapon, i.info)
 }
 

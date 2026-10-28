@@ -32,6 +32,12 @@ pub enum BlockType {
     Hover,
     DualWheel,
     GiantWheel,
+    Ram,
+    Saw,
+    Flipper,
+    JumpJet,
+    MineLayer,
+    Smoke,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -44,11 +50,13 @@ pub enum Category {
     System,
     /// What the vehicle stands and drives on: wheels, hover pads.
     Move,
+    /// Something it sets off on a key of its own: a jump, a mine, smoke.
+    Gadget,
 }
 
 impl Category {
     /// In the garage's order.
-    pub const ALL: [Category; 6] = [Category::Core, Category::Move, Category::Mobility, Category::Structure, Category::Weapon, Category::System];
+    pub const ALL: [Category; 7] = [Category::Core, Category::Move, Category::Mobility, Category::Structure, Category::Weapon, Category::Gadget, Category::System];
     pub fn label(self) -> &'static str {
         match self {
             Category::Core => "核心部件 · 必需",
@@ -57,6 +65,7 @@ impl Category {
             Category::Move => "行动",
             Category::Weapon => "武器",
             Category::System => "系统",
+            Category::Gadget => "装置",
         }
     }
 }
@@ -101,6 +110,109 @@ pub struct TypeInfo {
     /// A wheel or hover pad: what it stands on the ground with and drives by.
     #[serde(default)]
     pub drive: Option<DriveSpec>,
+    /// A close-quarters block: a ram, a saw, a flipper.
+    #[serde(default)]
+    pub melee: Option<MeleeSpec>,
+    /// Something it sets off on a key: a jump jet, a mine layer, smoke.
+    #[serde(default)]
+    pub gadget: Option<GadgetSpec>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub enum Melee {
+    /// Hits harder and takes less in a crash that lands near it.
+    Ram,
+    /// Cuts whatever is just ahead of it.
+    Saw,
+    /// Throws whatever is just ahead of it up and over, on E.
+    Flipper,
+}
+
+/// What a close-quarters block does. Saws and flippers work straight ahead (−z), and need the
+/// cell in front of them clear.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MeleeSpec {
+    pub kind: Melee,
+    /// How far from the block it works (m): round a ram, ahead of a saw or a flipper.
+    pub reach: f32,
+    /// Ram: what a crash near it deals, as a multiple. Saw: damage a second. Flipper: damage a
+    /// flip.
+    pub dmg: f32,
+    /// Ram: the share of a crash near it its own vehicle takes.
+    #[serde(default = "one_f")]
+    pub guard: f32,
+    /// Flipper: energy a flip, seconds between flips, and the throw: speed up, and on ahead (m/s).
+    #[serde(default)]
+    pub energy: f32,
+    #[serde(default)]
+    pub cooldown: f32,
+    #[serde(default)]
+    pub lift: f32,
+    #[serde(default)]
+    pub push: f32,
+}
+
+fn one_f() -> f32 {
+    1.0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub enum Gadget {
+    /// Kicks the vehicle up off the ground, on Q.
+    Jump,
+    /// Drops a mine behind it, on G.
+    Mine,
+    /// Lets off a cloud of smoke round it, on X.
+    Smoke,
+}
+
+impl Gadget {
+    pub const ALL: [Gadget; 3] = [Gadget::Jump, Gadget::Mine, Gadget::Smoke];
+    pub fn index(self) -> usize {
+        self as usize
+    }
+    /// The key it goes off on.
+    pub fn key(self) -> &'static str {
+        match self {
+            Gadget::Jump => "Q",
+            Gadget::Mine => "G",
+            Gadget::Smoke => "X",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Gadget::Jump => "跳跃",
+            Gadget::Mine => "布雷",
+            Gadget::Smoke => "烟雾",
+        }
+    }
+}
+
+/// What a gadget does. However many of a kind the vehicle carries, they go off together, on one
+/// battery draw and one cooldown; more jump jets throw it higher.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GadgetSpec {
+    pub kind: Gadget,
+    /// Energy it takes (each jump jet), and seconds before it can go again.
+    pub energy: f32,
+    pub cooldown: f32,
+    /// Jump: the kick each jet gives, as a change of speed (m/s) times the vehicle's mass.
+    #[serde(default)]
+    pub power: f32,
+    /// Mine: how near an enemy sets it off (m), and what its blast deals and reaches.
+    #[serde(default)]
+    pub reach: f32,
+    #[serde(default)]
+    pub dmg: f32,
+    /// Mine: its blast's reach. Smoke: the cloud's.
+    #[serde(default)]
+    pub radius: f32,
+    /// Mine: how long it lies there. Smoke: how long the cloud hangs.
+    #[serde(default)]
+    pub secs: f32,
+    /// Mine: how many one vehicle may have down at once (the oldest goes when it lays one more).
+    #[serde(default)]
+    pub count: u8,
 }
 
 /// A block the vehicle stands and drives on.
@@ -184,7 +296,7 @@ fn one() -> u8 {
 }
 
 impl BlockType {
-    pub const ALL: [BlockType; 26] = [
+    pub const ALL: [BlockType; 32] = [
         BlockType::Cockpit,
         BlockType::Wing,
         BlockType::Engine,
@@ -211,6 +323,12 @@ impl BlockType {
         BlockType::Hover,
         BlockType::DualWheel,
         BlockType::GiantWheel,
+        BlockType::Ram,
+        BlockType::Saw,
+        BlockType::Flipper,
+        BlockType::JumpJet,
+        BlockType::MineLayer,
+        BlockType::Smoke,
     ];
 
     pub fn index(self) -> usize {
@@ -237,6 +355,25 @@ impl BlockType {
     /// What it drives with, if it is a wheel or a hover pad.
     pub fn drive(self) -> Option<&'static DriveSpec> {
         self.info().drive.as_ref()
+    }
+
+    /// What it does up close, if it is a ram, a saw or a flipper.
+    pub fn melee(self) -> Option<&'static MeleeSpec> {
+        self.info().melee.as_ref()
+    }
+
+    /// What it sets off on its key, if it is a gadget.
+    pub fn gadget(self) -> Option<&'static GadgetSpec> {
+        self.info().gadget.as_ref()
+    }
+
+    /// The gadget of this kind (its spec is the block type's).
+    pub fn of_gadget(g: Gadget) -> BlockType {
+        match g {
+            Gadget::Jump => BlockType::JumpJet,
+            Gadget::Mine => BlockType::MineLayer,
+            Gadget::Smoke => BlockType::Smoke,
+        }
     }
 
     /// New blocks of these types take the selected paint color instead of their default color.

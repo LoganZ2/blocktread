@@ -4,8 +4,8 @@
 //! 2v2: a player connects and queues. When a queue holds a full match, or its first player has
 //! waited `queue_wait`, a match is made: players get seats and AI takes the rest. Everyone picks
 //! a ship and sees the others' picks; once all have locked in, or the pick time is up, the match
-//! plays out in a `Game` of its own until a side reaches the kill limit or time runs out. Then
-//! everyone gets the results and is back in the lobby.
+//! plays out in a `Game` of its own, the two sides fighting over the arena's hill, until one has
+//! the points to win or time runs out. Then everyone gets the results and is back in the lobby.
 //!
 //! Free-for-all: one room per server, no AI, no seat limit. Queueing for it gets a one-seat pick
 //! (the client sends the vehicle in view at once) and then drives straight into the room, which
@@ -19,6 +19,7 @@ use crate::{NetEvent, Outgoing};
 use bytes::Bytes;
 use std::collections::{BTreeMap, HashMap};
 use blocktread_shared::analysis::analyze;
+use blocktread_shared::arena::HILL_WIN;
 use blocktread_shared::balance::balance;
 use blocktread_shared::blocks::Design;
 use blocktread_shared::presets::{PRESETS, preset, rover};
@@ -39,14 +40,14 @@ pub fn team_name(team: u16) -> &'static str {
 pub struct HubConfig {
     /// Seconds a queue waits for more players before AI fills a match (0 for local play).
     pub queue_wait: f32,
-    /// A 2v2 match's length (and a free-for-all round's), and the kills that end a 2v2 early.
+    /// A 2v2 match's length (and a free-for-all round's), and the points that win a 2v2.
     pub match_secs: f32,
-    pub kill_limit: u32,
+    pub win_points: u32,
 }
 
 impl Default for HubConfig {
     fn default() -> Self {
-        HubConfig { queue_wait: 15.0, match_secs: 480.0, kill_limit: 10 }
+        HubConfig { queue_wait: 15.0, match_secs: 480.0, win_points: HILL_WIN }
     }
 }
 
@@ -416,7 +417,7 @@ impl Hub {
             Phase::Pick { .. } => Next::Wait,
             Phase::Play(g) => {
                 g.tick();
-                let best = g.team_kills().values().copied().max().unwrap_or(0);
+                let best = g.points().values().copied().max().unwrap_or(0);
                 if !g.has_players() {
                     // everyone left: nobody to finish it for
                     Next::Drop
@@ -447,7 +448,7 @@ impl Hub {
         // the test range: the same map every time, and no end
         let mut game = Box::new(if m.mode == Mode::Solo { Game::with_seed(cfg, SOLO_SEED) } else { Game::new(cfg) });
         if m.mode != Mode::Solo {
-            game.limit = self.cfg.kill_limit;
+            game.limit = self.cfg.win_points;
             game.ends_at = Some(secs(self.cfg.match_secs));
         }
         let slots = std::mem::take(&mut m.slots);
@@ -500,12 +501,13 @@ impl Hub {
     fn finish(&mut self, id: u32) {
         let Some(m) = self.matches.remove(&id) else { return };
         let Phase::Play(g) = m.phase else { return };
-        let kills = g.team_kills();
-        let best = kills.values().copied().max().unwrap_or(0);
-        let leaders: Vec<u16> = kills.iter().filter(|&(_, &k)| k == best && best > 0).map(|(&t, _)| t).collect();
+        let points = g.points();
+        let best = points.values().copied().max().unwrap_or(0);
+        let leaders: Vec<u16> = points.iter().filter(|&(_, &k)| k == best && best > 0).map(|(&t, _)| t).collect();
+        let tally = |t: u16| points.get(&t).copied().unwrap_or(0);
         let winner = match (m.mode, leaders.as_slice()) {
             (_, [] | [_, _, ..]) => "平局".to_string(),
-            (Mode::Teams, [t]) => format!("{}获胜", team_name(*t)),
+            (Mode::Teams, [t]) => format!("{}获胜 · {} : {}", team_name(*t), tally(*t), tally(if *t == TEAMS[0] { TEAMS[1] } else { TEAMS[0] })),
             (_, [t]) => m.slots.iter().find(|s| s.team == *t).map_or("平局".to_string(), |s| format!("{} 获胜", s.name)),
         };
         g.broadcast(&ServerMsg::MatchOver { winner, rows: g.scores() });

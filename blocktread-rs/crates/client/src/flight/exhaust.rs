@@ -99,7 +99,8 @@ struct Puff {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Emitter {
     Engine(Entity, IVec3),
-    Missile(u16),
+    /// Its draw key (see `ClientCore::missile_draws`).
+    Missile(u32),
 }
 
 /// Where an emitter was last frame, so this frame's puffs can be spread along the path between.
@@ -222,6 +223,23 @@ pub fn update_exhaust(session: Res<Session>, vis: Res<ShipVisuals>, time: Res<Ti
     for (id, v) in &vis.0 {
         let Some(s) = core.ships.get(id) else { continue };
         let palette = if Some(*id) == core.my_ship || my_team == Some(s.team) { FRIENDLY } else { HOSTILE };
+        // jump jets blow straight down, hard and short
+        if s.jumping {
+            for &at in &v.jets {
+                emissions.push(Emission {
+                    key: Emitter::Engine(v.root, (at * 100.0).round().as_ivec3()),
+                    now: Nozzle { pos: s.pos + s.rot * at, dir: s.rot * Vec3::NEG_Y, vel: s.vel, owed: 0.0 },
+                    palette,
+                    rate: 420.0,
+                    exhaust_speed: 34.0,
+                    carry: 0.4,
+                    life: 0.4,
+                    size: (0.3, 1.5),
+                    strength: 1.3,
+                    throat: 0.42,
+                });
+            }
+        }
         // thrusters burn at half on the throttle, at full while boosting
         if !s.thrusting && !s.boosting {
             continue;
@@ -244,10 +262,10 @@ pub fn update_exhaust(session: Res<Session>, vis: Res<ShipVisuals>, time: Res<Ti
             });
         }
     }
-    for (id, m) in &core.missiles {
+    for (key, pos, vel) in core.missile_draws() {
         emissions.push(Emission {
-            key: Emitter::Missile(*id),
-            now: Nozzle { pos: core.missile_pos(m), dir: -m.vel.normalize_or(Vec3::Z), vel: m.vel, owed: 0.0 },
+            key: Emitter::Missile(key),
+            now: Nozzle { pos, dir: -vel.normalize_or(Vec3::Z), vel, owed: 0.0 },
             palette: MISSILE,
             rate: 160.0,
             exhaust_speed: 25.0,

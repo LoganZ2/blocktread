@@ -1,10 +1,13 @@
 //! The battle: drives the client core each frame and presents its state.
 
+pub mod arena;
 pub mod env;
 pub mod exhaust;
 pub mod fx;
+pub mod gadgets;
 pub mod ground;
 pub mod hud;
+pub mod radar;
 pub mod ships;
 
 use crate::audio::{Sfx, Sounds};
@@ -22,7 +25,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use blocktread_client_core::{ClientCore, ConnState, Phase};
 use blocktread_shared::protocol::Mode;
 use blocktread_shared::ai::{AiPilot, Contact, Skill};
-use blocktread_shared::flight::{BTN_BOOST, BTN_FIRE, BTN_FLIP, BTN_MISSILE, InputCmd, NO_LOCK, q_axis, quantize_aim};
+use blocktread_shared::flight::{BTN_BOOST, BTN_FIRE, BTN_FLIP, BTN_FLIPPER, BTN_JUMP, BTN_MINE, BTN_MISSILE, BTN_SMOKE, InputCmd, NO_LOCK, q_axis, quantize_aim};
 
 /// A connection to a server, from the mode select until the player goes back to it: it lives
 /// through matchmaking, any number of matches and their results.
@@ -36,6 +39,8 @@ pub struct Session {
     pub target: Option<u16>,
     pub lock: f32,
     pub locked: bool,
+    /// Smoke hangs between us and the target: no lock through it.
+    pub veiled: bool,
     pub throttle: f32,
     pub cockpit_cam: bool,
     /// What the crosshair is on (world point): the guns turn to it.
@@ -43,6 +48,9 @@ pub struct Session {
     /// Where the camera looks, in world angles: yaw round the vertical, pitch (rad).
     look: Vec2,
     pub cam_init: bool,
+    /// How much of its full distance the camera keeps from the vehicle: less while a wall would
+    /// come in between.
+    cam_pull: f32,
     pub paused: bool,
     pub death: Option<(Vec3, f32)>,
     pub shake: f32,
@@ -67,11 +75,13 @@ impl Session {
             target: None,
             lock: 0.0,
             locked: false,
+            veiled: false,
             throttle: 0.7,
             cockpit_cam: false,
             aim: Vec3::NEG_Z * 300.0,
             look: Vec2::ZERO,
             cam_init: false,
+            cam_pull: 1.0,
             paused: false,
             death: None,
             shake: 0.0,
@@ -90,6 +100,7 @@ impl Session {
         self.target = None;
         self.lock = 0.0;
         self.locked = false;
+        self.veiled = false;
         self.throttle = 0.7;
         self.cam_init = false;
         self.paused = false;
@@ -130,11 +141,14 @@ struct Hum;
 #[derive(Component)]
 struct Burner;
 
+/// The gadgets' keys.
+const GADGETS: u8 = BTN_JUMP | BTN_MINE | BTN_SMOKE;
+
 pub struct FlightPlugin;
 
 impl Plugin for FlightPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(exhaust::ExhaustPlugin)
+        app.add_plugins((exhaust::ExhaustPlugin, radar::RadarPlugin))
             .init_resource::<ships::ShipVisuals>()
             .init_resource::<hud::Hud>()
             .add_systems(Startup, setup_assets)
@@ -146,7 +160,7 @@ impl Plugin for FlightPlugin {
             .add_systems(Update, step_core.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Match)).run_if(resource_exists::<Session>))
             .add_systems(
                 Update,
-                (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, aim_at, exhaust::update_exhaust, fx::update_fx, env::orient_rocks, hud::update_hud, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum, grab_cursor, hud::dev_hide_hud)
+                (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, aim_at, exhaust::update_exhaust, fx::update_fx, env::orient_rocks, (arena::update_traps, arena::update_pads, arena::update_hill_light, gadgets::sync_mines, gadgets::sync_smoke), hud::update_hud, radar::update_radar_map, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum, grab_cursor, hud::dev_hide_hud)
                     .chain()
                     .run_if(in_state(Screen::Flight))
                     .run_if(resource_exists::<Session>),
@@ -156,6 +170,7 @@ impl Plugin for FlightPlugin {
 
 fn setup_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<StandardMaterial>>, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(fx::Fx::new(&mut meshes, &mut mats));
+    commands.insert_resource(gadgets::GadgetArt::new(&mut meshes, &mut mats));
     commands.insert_resource(ships::flame_mats(&mut mats));
     commands.insert_resource(ground::DaySky(ground::build_day_sky(&mut images)));
     commands.insert_resource(ground::build_stage(&mut meshes, &mut mats));
@@ -221,7 +236,7 @@ fn end_session(mut commands: Commands, session: Option<Res<Session>>, screen: Re
     commands.remove_resource::<Session>();
 }
 
-fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>>, mut session: ResMut<Session>) {
+fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButton>>, mut session: ResMut<Session>, dev: Res<DevOpts>, time: Res<Time>) {
     let s = &mut *session;
     if s.paused || s.core.watching {
         s.buttons = 0;
@@ -246,6 +261,16 @@ fn read_pilot(keys: Res<ButtonInput<KeyCode>>, mouse: Res<ButtonInput<MouseButto
     if keys.pressed(KeyCode::KeyR) {
         b |= BTN_FLIP;
     }
+    // the flipper and the gadgets, each on its own key
+    for (k, btn) in [(KeyCode::KeyE, BTN_FLIPPER), (KeyCode::KeyQ, BTN_JUMP), (KeyCode::KeyG, BTN_MINE), (KeyCode::KeyX, BTN_SMOKE)] {
+        if keys.pressed(k) {
+            b |= btn;
+        }
+    }
+    // for screenshots: every gadget, as often as it goes
+    if dev.forced("gadgets", time.elapsed_secs()) {
+        b |= GADGETS;
+    }
     s.buttons = b;
 }
 
@@ -257,12 +282,15 @@ fn step_core(mut commands: Commands, mut session: ResMut<Session>, time: Res<Tim
     let (drive, steer, buttons, locked, target) = (s.drive, s.steer, s.buttons, s.locked, s.target);
     let aim = quantize_aim(s.aim);
     let mut ai = s.ai.take();
-    s.core.update(dt, &mut |c: &ClientCore, _tick| {
+    s.core.update(dt, &mut |c: &ClientCore, tick| {
         if let Some(ai) = ai.as_mut()
             && let (Some(p), Some(me)) = (c.pred.as_ref(), c.my())
         {
             let others: Vec<Contact> = c.ships.values().filter(|o| Some(o.id) != c.my_ship).map(|o| Contact { id: o.id, team: o.team, pos: o.pos, vel: o.vel, radius: o.body.radius }).collect();
-            return ai.think(&p.kin, &me.body, 0.0, me.team, &others, &c.rocks, blocktread_shared::DT);
+            // the autopilot drives; the gadget keys still work
+            let mut cmd = ai.think(&p.kin, &me.body, 0.0, me.team, &others, &c.rocks, &c.terrain, tick);
+            cmd.buttons |= buttons & GADGETS;
+            return cmd;
         }
         let mut cmd = InputCmd { drive: q_axis(drive), steer: q_axis(steer), buttons, aim, ..Default::default() };
         cmd.lock = if locked { target.unwrap_or(NO_LOCK) } else { NO_LOCK };
@@ -314,7 +342,13 @@ fn targeting(keys: Res<ButtonInput<KeyCode>>, mut session: ResMut<Session>, time
         s.lock = 0.0;
     }
     let was = s.locked;
+    s.veiled = false;
     match (me.body.has_missile, s.target.and_then(|t| s.core.ships.get(&t))) {
+        // smoke in the way: the lock is lost at once, and can't be had through it
+        (true, Some(t)) if s.core.smoke_between(me.pos + Vec3::Y * 1.5, t.pos) => {
+            s.veiled = true;
+            s.lock = 0.0;
+        }
         (true, Some(t)) => {
             let to = t.pos - me.pos;
             if look.angle_between(to) < 0.3 && to.length() < 950.0 {
@@ -417,7 +451,14 @@ fn ride(s: &mut Session, o: Rider, t: &mut Transform, dt: f32, side: bool) -> f3
         // the pivot sits above the vehicle, so it rides in the lower part of the view
         let r = o.radius;
         let pivot = o.pos + Vec3::Y * (1.5 + r * 0.25);
-        t.translation = pivot - look * Vec3::NEG_Z * (r * 1.7 + 6.0);
+        let dist = r * 1.7 + 6.0;
+        let back = look * Vec3::Z;
+        // a wall or a crate in between: come in in front of it at once, and ease back out
+        let ground = &s.core.terrain;
+        let end = pivot + back * dist;
+        let clear = ground.solids_near((pivot + end) * 0.5, dist * 0.5).filter_map(|w| w.clip(pivot, end)).map(|(f, _)| ((f * dist - 0.8) / dist).max(1.5 / dist)).fold(1.0, f32::min);
+        s.cam_pull = if clear < s.cam_pull { clear } else { s.cam_pull + (clear - s.cam_pull) * (1.0 - (-dt * 2.0).exp()) };
+        t.translation = pivot + back * dist * s.cam_pull;
         t.rotation = look;
     }
     (o.speed / 30.0).clamp(0.0, 1.0) * 6.0 + if o.boosting { 6.0 } else { 0.0 }
@@ -448,7 +489,15 @@ fn camera_follow(
     }
     let mut fov = 66.0;
     let side = dev.forced("side", time.elapsed_secs());
-    if let Some(v) = s.view().map(Rider::of) {
+    if dev.forced("overview", time.elapsed_secs()) {
+        // dev view: the whole arena from above one end
+        t.translation = Vec3::new(0.0, 125.0, 165.0);
+        t.look_at(Vec3::new(0.0, 0.0, 12.0), Vec3::Y);
+    } else if dev.forced("hillcam", time.elapsed_secs()) {
+        // dev view: the hill from the south, past the overdrive pad before it
+        t.translation = Vec3::new(16.0, 13.0, 50.0);
+        t.look_at(Vec3::new(0.0, 2.0, 12.0), Vec3::Y);
+    } else if let Some(v) = s.view().map(Rider::of) {
         // your own vehicle, or the one you are spectating: the same camera either way
         fov += ride(s, v, &mut t, dt, side);
     } else if let Some((p, left, _)) = s.wreck {
@@ -471,7 +520,7 @@ fn camera_follow(
             t.translation = t.translation.lerp(want, (dt * 3.0).min(1.0));
             t.look_at(o.pos, Vec3::Y);
         } else {
-            t.translation = Vec3::new(0.0, 120.0, 420.0);
+            t.translation = if s.core.terrain.arena.is_some() { Vec3::new(0.0, 70.0, 175.0) } else { Vec3::new(0.0, 120.0, 420.0) };
             t.look_at(Vec3::ZERO, Vec3::Y);
         }
     }
@@ -491,8 +540,8 @@ fn camera_follow(
     }
 }
 
-/// What the crosshair, in the middle of the screen, is on: the first enemy, rock or patch of ground
-/// along the camera's line of sight, else a point far down it. The guns turn to it.
+/// What the crosshair, in the middle of the screen, is on: the first enemy, rock, wall or patch of
+/// ground along the camera's line of sight, else a point far down it. The guns turn to it.
 fn aim_at(mut session: ResMut<Session>, cam: Single<&GlobalTransform, With<MainCamera>>) {
     let (o, d) = (cam.translation(), cam.forward().as_vec3());
     let s = &mut *session;
@@ -511,6 +560,15 @@ fn aim_at(mut session: ResMut<Session>, cam: Single<&GlobalTransform, With<MainC
     for r in &core.rocks {
         if let Some(t) = sphere(r.pos, r.r * 0.7) {
             best = best.min(t);
+        }
+    }
+    // the arena's walls and crates
+    let far = best;
+    for w in &core.terrain.solids {
+        if let Some((f, _)) = w.clip(o, o + d * far)
+            && f > 0.0
+        {
+            best = best.min(f * far);
         }
     }
     // the ground: march along the line, then halve in on where it goes under

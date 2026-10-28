@@ -39,7 +39,7 @@ pub enum Finish {
 impl Finish {
     pub fn of(t: BlockType) -> Finish {
         match t {
-            BlockType::Armor => Finish::Armor,
+            BlockType::Armor | BlockType::Ram => Finish::Armor,
             BlockType::Lamp => Finish::Glow,
             _ => Finish::Paint,
         }
@@ -56,6 +56,9 @@ pub struct Part {
 #[derive(Resource)]
 pub struct BlockArt {
     pub parts: Vec<Vec<Part>>,
+    /// The parts of a block that move (a saw's blade, a flipper's flap), about the point they
+    /// turn round, and that point in the block.
+    moving: Vec<Option<(Vec3, Vec<Part>)>>,
     /// A weapon's mount, for a weapon held from below.
     mount: Vec<Part>,
     strut: StrutArt,
@@ -84,6 +87,10 @@ struct StrutArt {
     steel: PartMat,
     rubber: PartMat,
 }
+
+/// Where a saw's blade turns, and where a flipper's flap is hinged, in their blocks.
+const SAW_AXLE: Vec3 = Vec3::new(0.0, 0.0, -0.35);
+const FLAP_HINGE: Vec3 = Vec3::new(0.0, 0.32, 0.4);
 
 /// How far from a wheel's centre (along x, towards the block holding it) its strut stands: the
 /// axis the wheel steers about.
@@ -163,6 +170,13 @@ impl BlockArt {
 
     /// Spawn one block's parts under `parent`, centred at `local`. Returns (all entities, paint entity).
     pub fn spawn_block(&mut self, commands: &mut Commands, mats: &mut Assets<StandardMaterial>, parent: Entity, b: &Block, local: Vec3, level: u8) -> (Vec<Entity>, Option<Entity>) {
+        let (out, paint, _) = self.spawn_block_moving(commands, mats, parent, b, local, level);
+        (out, paint)
+    }
+
+    /// As `spawn_block`, and the pivot its moving parts hang on, if it has any (turn it to move
+    /// them). The pivot isn't among the entities: despawning those leaves it empty.
+    pub fn spawn_block_moving(&mut self, commands: &mut Commands, mats: &mut Assets<StandardMaterial>, parent: Entity, b: &Block, local: Vec3, level: u8) -> (Vec<Entity>, Option<Entity>, Option<Entity>) {
         let mut out = Vec::new();
         let mut paint = None;
         let parts = self.parts[b.ty.index()].clone();
@@ -175,7 +189,15 @@ impl BlockArt {
             }
             out.push(e);
         }
-        (out, paint)
+        let pivot = self.moving[b.ty.index()].clone().map(|(at, parts)| {
+            let pivot = commands.spawn((Transform::from_translation(local + at), Visibility::default(), ChildOf(parent))).id();
+            for part in &parts {
+                let mat = self.material_for(mats, part, b, level);
+                out.push(commands.spawn((Mesh3d(part.mesh.clone()), MeshMaterial3d(mat), part.tf, ChildOf(pivot))).id());
+            }
+            pivot
+        });
+        (out, paint, pivot)
     }
 }
 
@@ -365,7 +387,12 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let sphere = m(Sphere::new(1.0).mesh().ico(2).unwrap());
     let nozzle_s = m(ConicalFrustum { radius_top: 0.28, radius_bottom: 0.22, height: 0.24 }.into());
     let disc_s = m(Circle::new(0.21).into());
+    let spike = m(Cone { radius: 0.1, height: 0.3 }.into());
+    let blade = m(Cylinder::new(0.5, 0.04).into());
+    let saw_hub = m(Cylinder::new(0.13, 0.14).into());
     let flak_barrel = m(Cylinder::new(0.19, 0.62).into());
+    let launcher = m(Cylinder::new(0.1, 0.46).into());
+    let puck = m(Cylinder::new(0.3, 0.1).into());
     // a tyre for each wheel size, as wide as it is sturdy
     // wheels, by radius and width: the tyre, its rounded shoulders, the rim and its lip, the hub
     let wheel_r = |t: BlockType| t.drive().map_or(0.7, |d| d.radius);
@@ -404,6 +431,8 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let rim_white = fixed(StandardMaterial { base_color: srgb(0xc6cacf), metallic: 0.5, perceptual_roughness: 0.38, ..default() });
     let rim_amber = fixed(StandardMaterial { base_color: srgb(0xc98f24), metallic: 0.3, perceptual_roughness: 0.5, ..default() });
     let red = fixed(StandardMaterial { base_color: srgb(0xd83a3a), metallic: 0.3, perceptual_roughness: 0.4, ..default() });
+    let steel = fixed(StandardMaterial { base_color: srgb(0xb4bac2), metallic: 0.85, perceptual_roughness: 0.28, ..default() });
+    let hazard = fixed(StandardMaterial { base_color: srgb(0xe0b020), metallic: 0.2, perceptual_roughness: 0.5, ..default() });
     // nozzle throat: white-hot but not blown out; the plume carries the colour
     let g_engine = fixed(StandardMaterial { base_color: Color::BLACK, emissive: glow(0xd8ecff, 2.5), ..default() });
     let g_red = fixed(StandardMaterial { base_color: Color::BLACK, emissive: glow(0xff3344, 40.0), ..default() });
@@ -636,6 +665,75 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         }
     }
     parts[GiantWheel.index()] = v;
+    // 撞角: an armoured block with a steel wedge on its nose, its point down the middle, and three
+    // spikes along the point
+    let mut ram = vec![p(&cube, &PartMat::Armor, [0.0, 0.0, 0.08], z, [1.0, 1.0, 0.84])];
+    for side in [-1.0, 1.0] {
+        ram.push(p(&cube, &steel, [side * 0.25, 0.0, -0.36], [0.0, -side * 0.62, 0.0], [0.6, 0.92, 0.1]));
+    }
+    for y in [-0.3, 0.0, 0.3] {
+        ram.push(p(&spike, &dark, [0.0, y, -0.68], [-HP, 0.0, 0.0], one));
+    }
+    parts[Ram.index()] = ram;
+    // 电锯: a housing at the back, a guard over the top, and the blade standing out of the front
+    // on its axle (the blade and its teeth spin, see `moving`)
+    parts[Saw.index()] = vec![
+        p(&cube, &paint, [0.0, 0.0, 0.2], z, [0.9, 0.9, 0.6]),
+        p(&cube, &hazard, [0.0, 0.47, -0.08], z, [0.3, 0.06, 0.62]),
+        p(&cube, &dark, [0.0, 0.0, -0.18], z, [0.34, 0.3, 0.36]),
+    ];
+    let mut teeth = vec![p(&blade, &steel, z, [0.0, 0.0, HP], one), p(&saw_hub, &dark, z, [0.0, 0.0, HP], one)];
+    for k in 0..14 {
+        let a = k as f32 * tau / 14.0;
+        teeth.push(p(&cube, &steel, round(0.0, 0.52, a), [a + 0.5, 0.0, 0.0], [0.06, 0.1, 0.1]));
+    }
+    // 翻板: a low body, hinge knuckles at the back of its top, and the flap lying over it, its lip
+    // out past the front (the flap swings up on its hinge, see `moving`)
+    parts[Flipper.index()] = vec![
+        p(&cube, &paint, [0.0, -0.14, 0.04], z, [1.0, 0.72, 0.92]),
+        p(&cube, &dark, [0.36, 0.3, 0.4], z, [0.16, 0.16, 0.16]),
+        p(&cube, &dark, [-0.36, 0.3, 0.4], z, [0.16, 0.16, 0.16]),
+        p(&cube, &hazard, [0.0, 0.23, -0.47], z, [0.9, 0.04, 0.06]),
+    ];
+    let flap = vec![
+        p(&cube, &steel, [0.0, -0.06, -0.6], [-0.1, 0.0, 0.0], [0.96, 0.07, 1.2]),
+        p(&cube, &dark, [0.0, -0.13, -1.18], [-0.1, 0.0, 0.0], [0.96, 0.06, 0.1]),
+        p(&cube, &dark, [0.0, 0.0, 0.0], z, [0.56, 0.14, 0.14]),
+    ];
+    // 跳跃喷口: a squat housing, hazard bands round its sides, and a nozzle out of its floor
+    // (it blows straight down)
+    let mut jet = vec![
+        p(&cube, &paint, [0.0, 0.1, 0.0], z, [0.92, 0.8, 0.92]),
+        p(&cube, &dark, [0.0, -0.36, 0.0], z, [0.98, 0.14, 0.98]),
+        p(&nozzle, &dark, [0.0, -0.42, 0.0], [std::f32::consts::PI, 0.0, 0.0], one),
+        p(&disc, &g_engine, [0.0, -0.585, 0.0], [HP, 0.0, 0.0], one),
+    ];
+    for (x, zz, sx, sz) in [(0.47, 0.0, 0.04, 0.6), (-0.47, 0.0, 0.04, 0.6), (0.0, 0.47, 0.6, 0.04), (0.0, -0.47, 0.6, 0.04)] {
+        jet.push(p(&cube, &hazard, [x, 0.1, zz], z, [sx, 0.12, sz]));
+    }
+    parts[JumpJet.index()] = jet;
+    // 布雷器: a magazine of mines stacked on top, and the chute they drop out of at the back,
+    // a hazard stripe over its mouth
+    let mut layer = vec![
+        p(&cube, &paint, [0.0, -0.08, -0.02], z, [0.94, 0.8, 0.9]),
+        p(&cube, &dark, [0.0, -0.3, 0.44], z, [0.7, 0.3, 0.14]),
+        p(&cube, &hazard, [0.0, -0.1, 0.47], z, [0.86, 0.08, 0.06]),
+    ];
+    for (k, y) in [0.36, 0.45].into_iter().enumerate() {
+        layer.push(p(&puck, if k == 0 { &dark } else { &rim }, [0.0, y, -0.02], z, one));
+    }
+    parts[MineLayer.index()] = layer;
+    // 烟雾弹: three launcher tubes on a low base, splayed up and out, their caps on
+    let mut smoke = vec![p(&cube, &paint, [0.0, -0.2, 0.0], z, [0.92, 0.6, 0.92]), p(&cube, &dark, [0.0, 0.12, 0.08], z, [0.8, 0.1, 0.5])];
+    for x in [-0.27, 0.0, 0.27] {
+        let tilt = [-0.55, 0.0, -x * 1.4];
+        smoke.push(p(&launcher, &dark, [x, 0.3, -0.04], tilt, one));
+        smoke.push(p(&cube, &steel, [x - x * 0.28, 0.5, -0.16], tilt, [0.2, 0.05, 0.2]));
+    }
+    parts[Smoke.index()] = smoke;
+    let mut moving = vec![None; BlockType::ALL.len()];
+    moving[Saw.index()] = Some((SAW_AXLE, teeth));
+    moving[Flipper.index()] = Some((FLAP_HINGE, flap));
     // a hover pad: a squat housing over a skirt, its underside glowing
     parts[Hover.index()] = vec![
         p(&cube, &paint, [0.0, 0.12, 0.0], z, [0.92, 0.6, 0.92]),
@@ -650,5 +748,5 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         p(&stem, &dark, [0.0, -0.26, 0.0], z, one),
     ];
     let strut = StrutArt { cube: cube.clone(), body: strut_body, cap: strut_cap, coil: strut_coil, bellows: strut_bellows, rod: strut_rod, dark: dark.clone(), steel: rim.clone(), rubber: rubber.clone() };
-    BlockArt { parts, mount, strut, cube, sphere, paint_tex, armor_tex, cache: HashMap::new() }
+    BlockArt { parts, moving, mount, strut, cube, sphere, paint_tex, armor_tex, cache: HashMap::new() }
 }

@@ -170,7 +170,7 @@ fn rebuild_stage(mut commands: Commands, session: Res<Session>, roots: Query<Ent
             if let Some(r) = me {
                 commands.spawn((text(f, format!("你的战绩：击毁 {} · 阵亡 {} · {} 分", r.kills, r.deaths, r.score), 14.0, MUTED), ChildOf(p)));
             }
-            spawn_score_table(&mut commands, f, p, rows, core.mode, core.pid);
+            spawn_score_table(&mut commands, f, p, rows, core.mode, core.pid, core.hill);
             let foot = commands.spawn((Node { justify_content: JustifyContent::FlexEnd, column_gap: px(GAP_S), ..default() }, ChildOf(p))).id();
             spawn_btn(&mut commands, f, foot, Kind::Normal, "返回大厅", UiAction::LeaveFlight, Some("Esc"));
             let again = spawn_btn(&mut commands, f, foot, Kind::Accent, if core.watching { "继续观战" } else { "再来一局" }, UiAction::PlayAgain, Some("Enter"));

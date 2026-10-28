@@ -20,6 +20,8 @@ pub struct Kin {
     pub boost_lock: f32,
     /// The battery ran dry under boost: Shift has to be let go before it boosts again.
     pub boost_hold: bool,
+    /// Seconds until its jump jets can kick again.
+    pub jump_cd: f32,
 }
 
 impl Kin {
@@ -35,6 +37,7 @@ impl Kin {
             boosting: false,
             boost_lock: 0.0,
             boost_hold: false,
+            jump_cd: 0.0,
         }
     }
     pub fn fwd(&self) -> Vec3 {
@@ -50,6 +53,12 @@ pub const BTN_MISSILE: u8 = 2;
 pub const BTN_BOOST: u8 = 4;
 /// Held: turn the vehicle back onto its wheels.
 pub const BTN_FLIP: u8 = 8;
+/// Pressed: throw the flipper up (E).
+pub const BTN_FLIPPER: u8 = 32;
+/// Pressed: the gadgets, each on its key: jump (Q), lay a mine (G), let off smoke (X).
+pub const BTN_JUMP: u8 = 16;
+pub const BTN_MINE: u8 = 64;
+pub const BTN_SMOKE: u8 = 128;
 pub const NO_LOCK: u16 = u16::MAX;
 
 /// One tick of player intent. Quantised so that client prediction and the server feed the

@@ -3,15 +3,19 @@
 
 pub mod ai;
 pub mod analysis;
+pub mod arena;
 pub mod balance;
 pub mod blocks;
 pub mod drive;
 pub mod flight;
+pub mod gadgets;
 pub mod grid;
+pub mod nav;
 pub mod presets;
 pub mod protocol;
 pub mod rng;
 pub mod ship;
+pub mod solid;
 pub mod terrain;
 pub mod weapons;
 pub mod world;
@@ -31,7 +35,9 @@ pub const SNAPSHOT_INTERVAL: u32 = 2;
 /// 7: free-for-all is one drop-in room with rounds (`Round` in the scores).
 /// 8: hover pads only lift, thrusters push on the throttle; wheels that steer and wheels that
 ///    don't (two new ones), and turning by the sides.
-pub const PROTOCOL_VERSION: u32 = 8;
+/// 9: missiles carry the team and the ship that fired them; maps (the welcome names one); the
+///    arena's pads and hill, close-quarters blocks and gadgets.
+pub const PROTOCOL_VERSION: u32 = 9;
 pub const DEFAULT_PORT: u16 = 4433;
 /// The arena's reach from its centre (the ground is a square of twice this).
 pub const ARENA_R: f32 = terrain::HALF;

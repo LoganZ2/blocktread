@@ -231,15 +231,15 @@ fn refresh_play(
 
     let modes = spawn_section(&mut commands, f, p, "模式|MODE");
     let seg = commands.spawn((row(0.0), ChildOf(modes))).id();
-    for (key, label) in [("ffa", "自由混战"), ("2v2", "2v2 团队战"), ("solo", "试车场")] {
+    for (key, label) in [("ffa", Mode::Ffa.label()), ("2v2", Mode::Teams.label()), ("solo", Mode::Solo.label())] {
         let b = spawn_btn(&mut commands, f, seg, Kind::Segment, label, UiAction::HostMode(key), None);
         commands.entity(b).insert(Selected(mode_of(key) == mode));
         set_enabled(&mut commands, b, !busy);
     }
     let desc = match mode {
-        Mode::Teams => "蓝红两队各 2 人，空位由 AI 补齐。",
-        Mode::Solo => "只有你自己：没有对手，不限时间，每次都是同一张地图。在本机运行，不连服务器。",
-        _ => "服务器上的混战房间，随时进出，没有 AI，开着当前这辆车直接进场。场上有 2 人以上才开始计时，每局按击毁数排名。",
+        Mode::Teams => "蓝红两队各 2 人，抢竞技场中央的高台：只有一方在台上时每秒得 1 分，击毁对手得 5 分，先到 100 分的队获胜。空位由 AI 补齐。",
+        Mode::Solo => "只有你自己：没有对手，不限时间，每次都是同一张沙漠地图。在本机运行，不连服务器。",
+        _ => "服务器上的混战房间，在封闭竞技场里打，随时进出，没有 AI，开着当前这辆车直接进场。场上有 2 人以上才开始计时，每局按击毁数排名。",
     };
     commands.spawn((para(f, desc, 12.0, MUTED), ChildOf(modes)));
 

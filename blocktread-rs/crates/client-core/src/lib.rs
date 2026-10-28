@@ -16,12 +16,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use blocktread_shared::blocks::{BlockType, Design};
 use blocktread_shared::flight::{BTN_FIRE, InputCmd};
+use blocktread_shared::gadgets::{Cloud, hidden};
 use blocktread_shared::protocol::*;
 use blocktread_shared::ship::ShipBody;
-use blocktread_shared::weapons::{Shot, WeaponState, step_weapons};
-use blocktread_shared::terrain::Terrain;
+use blocktread_shared::weapons::{MISSILE_ACCEL, MISSILE_TOP, Shot, WeaponState, missile_ahead, step_weapons};
+use blocktread_shared::terrain::{Map, Terrain};
 use blocktread_shared::world::{Asteroid, generate_boulders, tick_time};
-use blocktread_shared::{DT, PROTOCOL_VERSION, TICK_RATE};
+use blocktread_shared::{DT, PROTOCOL_VERSION, SNAPSHOT_INTERVAL, TICK_RATE};
 
 pub struct CoreShip {
     pub id: u16,
@@ -35,6 +36,12 @@ pub struct CoreShip {
     pub boosting: bool,
     /// Its thrusters push: on the throttle, or boosting.
     pub thrusting: bool,
+    /// Its saw bites into something; its flipper is up; its jump jets fire.
+    pub cutting: bool,
+    pub flipping: bool,
+    pub jumping: bool,
+    /// The server tick its overdrive (from a pad) runs out.
+    pub overdrive_until: u32,
     pub throttle: f32,
     /// Its guns' cooldowns and where they point, as turned by its last known aim.
     pub ws: WeaponState,
@@ -44,11 +51,51 @@ pub struct CoreShip {
     pub vel: Vec3,
 }
 
+/// A mine lying in wait: where, whose side laid it, and the server tick it is live from.
+#[derive(Clone, Copy, Debug)]
+pub struct MineView {
+    pub pos: Vec3,
+    pub team: u16,
+    pub armed_at: u32,
+}
+
+#[derive(Clone, Copy)]
 pub struct MissileView {
     pub pos: Vec3,
     pub vel: Vec3,
+    /// The team that fired it.
+    pub team: u16,
+    /// What it is drawn as: its own id, or the key of the launch it took over from.
+    pub key: u32,
+    /// Fired by this client's ship: drawn on the predicted ship's clock at first.
+    own: bool,
+    /// Seconds since it showed up here.
+    age: f32,
+    /// A fading correction that keeps its drawn path continuous across updates.
+    off: Vec3,
+    /// The snapshot that first carried it, and the latest one.
+    born: u32,
     tick: u32,
 }
+
+/// A missile this client's ship just fired, drawn from the launcher until the server's copy of it
+/// arrives. It is at `pos` after tick `tick`, as the server would have it (it leaves on the next).
+struct Launch {
+    key: u32,
+    tick: u32,
+    pos: Vec3,
+    vel: Vec3,
+}
+
+/// An own missile moves over from the predicted ship's clock to the world's (the one everything
+/// else is drawn at) over its first this many seconds.
+const MISSILE_WARP: f32 = 0.7;
+/// Launch keys sit above the server's missile ids.
+const LAUNCH_KEYS: u32 = 1 << 16;
+/// A launch waits this many ticks past its own for a snapshot carrying the server's copy (a few
+/// snapshots can be lost); a launch the server never made (it disagreed about the energy, say) is
+/// dropped after that.
+const LAUNCH_WAIT: u32 = 10;
 
 /// Things the presentation layer should react to (spawn effects, update meshes, show text).
 #[derive(Clone, Debug)]
@@ -69,6 +116,8 @@ pub enum CoreEvent {
     Feed { text: String, bad: bool },
     /// One of our rounds landed on `target`: on its shield, or its hull.
     HitConfirm { target: u16, shield: bool },
+    /// A cloud of smoke goes up.
+    Smoke(Cloud),
     YourShip(Option<u16>),
 }
 
@@ -143,9 +192,18 @@ pub struct ClientCore {
     pub left: f32,
     /// The free-for-all room's round (`left` counts down the round, or the break after it).
     pub round: Round,
+    /// 2v2's hill: the points and who holds it.
+    pub hill: Option<HillState>,
+    /// The server tick each of the arena's pick-up pads is back up.
+    pub pads: Vec<u32>,
+    /// Mines down, by id, and the clouds of smoke hanging.
+    pub mines: BTreeMap<u16, MineView>,
+    pub clouds: Vec<Cloud>,
     pub events: Vec<CoreEvent>,
     pub stats: NetStats,
     shots: Vec<Shot>,
+    launches: Vec<Launch>,
+    next_launch: u32,
 }
 
 impl ClientCore {
@@ -182,9 +240,15 @@ impl ClientCore {
             limit: 0,
             left: 0.0,
             round: Round::None,
+            hill: None,
+            pads: Vec::new(),
+            mines: BTreeMap::new(),
+            clouds: Vec::new(),
             events: Vec::new(),
             stats: NetStats::default(),
             shots: Vec::new(),
+            launches: Vec::new(),
+            next_launch: 0,
         }
     }
 
@@ -243,6 +307,7 @@ impl ClientCore {
     fn reset_world(&mut self) {
         self.ships.clear();
         self.missiles.clear();
+        self.launches.clear();
         self.my_ship = None;
         self.pred = None;
         self.scores.clear();
@@ -250,6 +315,10 @@ impl ClientCore {
         self.limit = 0;
         self.left = 0.0;
         self.round = Round::None;
+        self.hill = None;
+        self.pads.clear();
+        self.mines.clear();
+        self.clouds.clear();
     }
 
     pub fn my(&self) -> Option<&CoreShip> {
@@ -258,6 +327,21 @@ impl ClientCore {
 
     pub fn render_tick(&self) -> f64 {
         self.clock.render_tick()
+    }
+
+    /// Seconds until pick-up pad `i` is back up (0: it is up).
+    pub fn pad_left(&self, i: usize) -> f32 {
+        self.pads.get(i).map_or(0.0, |&b| b.saturating_sub(self.clock.latest) as f32 / TICK_RATE as f32)
+    }
+
+    /// Whether smoke hides `b` from `a` now.
+    pub fn smoke_between(&self, a: Vec3, b: Vec3) -> bool {
+        hidden(&self.clouds, a, b, self.clock.latest)
+    }
+
+    /// Seconds of overdrive `s` has left.
+    pub fn overdrive_left(&self, s: &CoreShip) -> f32 {
+        s.overdrive_until.saturating_sub(self.clock.latest) as f32 / TICK_RATE as f32
     }
 
     /// Server time (seconds) to turn the asteroids to when drawing them: the predicted tick while
@@ -315,6 +399,11 @@ impl ClientCore {
                 let p = self.pred.as_mut().unwrap();
                 p.step(cmd, &self.ships[&sid].body, &self.terrain, &self.rocks, &mut self.shots);
                 for s in self.shots.drain(..) {
+                    // a missile leaves the launcher at once; the server's copy takes over when it arrives
+                    if s.weapon.weapon().is_some_and(|w| w.homing) {
+                        self.launches.push(Launch { key: LAUNCH_KEYS + self.next_launch, tick: tick.saturating_sub(1), pos: s.pos, vel: s.vel });
+                        self.next_launch = (self.next_launch + 1) % LAUNCH_KEYS;
+                    }
                     self.events.push(CoreEvent::Shot { ship: sid, weapon: s.weapon, pos: s.pos, vel: s.vel, own: true });
                 }
             }
@@ -333,6 +422,8 @@ impl ClientCore {
                 s.thrusting = s.body.stats.thrust > 0.0 && p.last_cmd().is_some_and(|c| blocktread_shared::drive::thrust_push(&c, p.kin.boosting) > 0.0);
                 s.throttle = p.last_cmd().map_or(0.7, |c| c.throttle_f());
                 s.shield_frac = if s.body.stats.shield_cap > 0.0 { p.kin.shield / s.body.stats.shield_cap } else { 0.0 };
+                s.flipping = p.ws.flip_t < FLIP_SHOWN;
+                s.jumping = p.kin.jump_cd > BlockType::JumpJet.gadget().map_or(0.0, |g| g.cooldown) - JUMP_SHOWN;
             }
         }
 
@@ -350,6 +441,9 @@ impl ClientCore {
                 s.firing = flags & FLAG_FIRING != 0;
                 s.boosting = flags & FLAG_BOOST != 0;
                 s.thrusting = flags & FLAG_THRUST != 0;
+                s.cutting = flags & FLAG_CUT != 0;
+                s.flipping = flags & FLAG_FLIP != 0;
+                s.jumping = flags & FLAG_JUMP != 0;
             }
             if s.cos_tick == 0 || target_tick.saturating_sub(s.cos_tick) > 6 {
                 s.cos_tick = target_tick;
@@ -369,25 +463,72 @@ impl ClientCore {
             }
         }
         let latest = self.clock.latest;
+        self.clouds.retain(|c| c.until > latest);
         self.missiles.retain(|_, m| latest.saturating_sub(m.tick) < 20);
+        let fade = (-dt * 12.0).exp();
         for m in self.missiles.values_mut() {
-            let _ = m;
+            m.age += dt;
+            m.off *= fade;
+        }
+        self.launches.retain(|l| latest <= l.tick + LAUNCH_WAIT);
+    }
+
+    /// The tick the own ship is drawn at, while flying one.
+    fn own_tick(&self) -> Option<f64> {
+        self.pred.as_ref().map(|p| p.render_tick())
+    }
+
+    /// The tick to draw a missile at: the world's, as everything else, except that an own missile
+    /// leaves on the predicted ship's clock (drawn on the world's, the ship would already be past
+    /// it) and eases over to the world's as it flies out to whatever it is after.
+    fn missile_tick(&self, m: &MissileView) -> f64 {
+        let world = self.clock.render_tick();
+        match self.own_tick() {
+            Some(own) if m.own => {
+                let x = (m.age / MISSILE_WARP).min(1.0);
+                world + (own - world) * (1.0 - x * x * (3.0 - 2.0 * x)) as f64
+            }
+            _ => world,
         }
     }
 
-    /// Where to draw a missile this frame.
-    pub fn missile_pos(&self, m: &MissileView) -> Vec3 {
-        m.pos + m.vel * ((self.clock.render_tick() - m.tick as f64) as f32 / TICK_RATE as f32)
+    /// Where to draw a missile this frame, if at all: not before it is launched on the clock it
+    /// is drawn at, nor further than the snapshots carried it (it hit something or burnt out).
+    pub fn missile_pos(&self, m: &MissileView) -> Option<Vec3> {
+        let t = self.missile_tick(m);
+        let gone = self.clock.latest >= m.tick + 2 * SNAPSHOT_INTERVAL;
+        if t < m.born as f64 - 1.0 || (gone && t > (m.tick + SNAPSHOT_INTERVAL) as f64) {
+            return None;
+        }
+        Some(missile_ahead(m.pos, m.vel, (t - m.tick as f64) as f32 / TICK_RATE as f32) + m.off)
+    }
+
+    /// Where a launch is now, and how fast it flies.
+    fn launch_draw(&self, l: &Launch) -> Option<(Vec3, Vec3)> {
+        let secs = (self.own_tick()? - l.tick as f64) as f32 / TICK_RATE as f32;
+        let speed = (l.vel.length() + MISSILE_ACCEL * secs.max(0.0)).min(MISSILE_TOP);
+        Some((missile_ahead(l.pos, l.vel, secs), l.vel.normalize_or_zero() * speed))
+    }
+
+    /// Every missile to draw this frame: (key, position, velocity). A missile keeps its key when
+    /// the server's copy takes over from the launch drawn until it arrived.
+    pub fn missile_draws(&self) -> impl Iterator<Item = (u32, Vec3, Vec3)> + '_ {
+        let server = self.missiles.values().filter_map(|m| Some((m.key, self.missile_pos(m)?, m.vel)));
+        server.chain(self.launches.iter().filter_map(|l| {
+            let (pos, vel) = self.launch_draw(l)?;
+            Some((l.key, pos, vel))
+        }))
     }
 
     fn on_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::Welcome { pid, tick, mode, asteroid_seed } => {
+            ServerMsg::Welcome { pid, tick, mode, asteroid_seed, map } => {
                 self.reset_world();
                 self.pid = Some(pid);
                 self.mode = Some(mode);
-                self.terrain = Arc::new(Terrain::generate(asteroid_seed));
-                self.rocks = generate_boulders(asteroid_seed, &self.terrain);
+                self.terrain = Arc::new(Terrain::for_map(map, asteroid_seed));
+                self.pads = vec![0; self.terrain.arena.as_ref().map_or(0, |a| a.pads.len())];
+                self.rocks = if map == Map::Desert { generate_boulders(asteroid_seed, &self.terrain) } else { Vec::new() };
                 self.clock.sync(tick);
                 self.state = ConnState::InGame;
                 self.phase = Phase::Playing;
@@ -430,7 +571,7 @@ impl ClientCore {
                 let ws = WeaponState::new(&body);
                 self.ships.insert(
                     id,
-                    CoreShip { id, team, name, owner, body, interp, shield_frac: 1.0, firing: false, boosting: false, thrusting: false, throttle: 0.7, ws, cos_tick: 0, pos: kin.pos, rot: kin.rot, vel: kin.vel },
+                    CoreShip { id, team, name, owner, body, interp, shield_frac: 1.0, firing: false, boosting: false, thrusting: false, cutting: false, flipping: false, jumping: false, overdrive_until: 0, throttle: 0.7, ws, cos_tick: 0, pos: kin.pos, rot: kin.rot, vel: kin.vel },
                 );
                 self.events.push(CoreEvent::ShipSpawned(id));
             }
@@ -490,7 +631,29 @@ impl ClientCore {
             ServerMsg::Announce { title, sub } => self.events.push(CoreEvent::Announce { title, sub }),
             ServerMsg::Feed { text, bad } => self.events.push(CoreEvent::Feed { text, bad }),
             ServerMsg::HitConfirm { target, shield } => self.events.push(CoreEvent::HitConfirm { target, shield }),
-            ServerMsg::Scores { rows, wave, enemies, limit, left, round } => {
+            ServerMsg::PadState { pad, back_at } => {
+                if let Some(p) = self.pads.get_mut(pad as usize) {
+                    *p = back_at;
+                }
+            }
+            ServerMsg::ShipBuff { id, until } => {
+                if let Some(s) = self.ships.get_mut(&id) {
+                    s.overdrive_until = until;
+                }
+            }
+            ServerMsg::MineDropped { id, pos, team, armed_at } => {
+                self.mines.insert(id, MineView { pos, team, armed_at });
+            }
+            ServerMsg::MineGone { id, .. } => {
+                self.mines.remove(&id);
+            }
+            ServerMsg::Smoke { pos, radius, until } => {
+                let c = Cloud { pos, radius, until };
+                self.clouds.push(c);
+                self.events.push(CoreEvent::Smoke(c));
+            }
+            ServerMsg::Scores { rows, wave, enemies, limit, left, round, hill } => {
+                self.hill = hill;
                 self.scores = rows;
                 self.wave = wave;
                 self.enemies = enemies;
@@ -518,14 +681,44 @@ impl ClientCore {
                 ship.throttle = sn.throttle as f32 / 255.0;
             }
         }
-        for m in &s.missiles {
-            self.missiles.insert(m.id, MissileView { pos: m.pos, vel: m.vel, tick: s.tick });
+        for sm in &s.missiles {
+            let (mut m, before) = match self.missiles.get(&sm.id) {
+                // a late snapshot, older than the one it has
+                Some(m) if m.tick >= s.tick => continue,
+                Some(m) => (*m, self.missile_pos(m)),
+                None => {
+                    let own = Some(sm.owner) == self.my_ship;
+                    let mut m = MissileView { pos: sm.pos, vel: sm.vel, team: sm.team, key: sm.id as u32, own, age: 0.0, off: Vec3::ZERO, born: s.tick, tick: s.tick };
+                    // our own missile takes over from its launch: the first one made by this
+                    // snapshot's tick (the server counts ticks as the prediction does)
+                    let mut before = None;
+                    if own && let Some(i) = self.launches.iter().position(|l| l.tick < s.tick) {
+                        let l = self.launches.remove(i);
+                        m.key = l.key;
+                        before = self.launch_draw(&l).map(|(p, _)| p);
+                    }
+                    (m, before)
+                }
+            };
+            m.pos = sm.pos;
+            m.vel = sm.vel;
+            m.tick = s.tick;
+            // fade out the step between where it was drawn and where it is now
+            if let (Some(b), Some(a)) = (before, self.missile_pos(&m)) {
+                m.off += b - a;
+                if m.off.length() > 20.0 {
+                    m.off = Vec3::ZERO;
+                }
+            }
+            self.missiles.insert(sm.id, m);
         }
         let Some(own) = s.own else { return };
         if Some(own.ship) != self.my_ship {
             return;
         }
-        let Some(ship) = self.ships.get(&own.ship) else { return };
+        let Some(ship) = self.ships.get_mut(&own.ship) else { return };
+        ship.cutting = own.flags & FLAG_CUT != 0;
+        let ship = &*ship;
         let rtt_ticks = (self.net.rtt() * TICK_RATE as f32).ceil() as u32;
         let target = s.tick + rtt_ticks + TARGET_LEAD as u32 + 1;
         let reinit = match self.pred.as_mut() {

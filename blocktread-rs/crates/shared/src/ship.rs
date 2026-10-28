@@ -1,6 +1,6 @@
 use crate::analysis::{Stats, compute_stats, occupancy};
 use crate::balance::balance;
-use crate::blocks::{BlockType, Design};
+use crate::blocks::{BlockType, Design, Gadget};
 use crate::grid::{DIRS6, Occupancy, raycast};
 use crate::weapons::{Mount, mounts};
 use glam::{IVec3, Quat, Vec3};
@@ -35,6 +35,8 @@ pub struct ShipBody {
     pub power: f32,
     /// Every weapon's mount: how it turns and where it can point.
     pub mounts: Vec<Mount>,
+    /// How many working gadgets of each kind it has (by `Gadget::index`).
+    pub gadgets: [u8; 3],
 }
 
 impl ShipBody {
@@ -61,6 +63,7 @@ impl ShipBody {
             movers: Vec::new(),
             power: 0.0,
             mounts: Vec::new(),
+            gadgets: [0; 3],
         };
         body.rebuild();
         body
@@ -85,6 +88,15 @@ impl ShipBody {
         self.movers = self.stats.wheels.clone();
         self.power = self.stats.power;
         self.mounts = mounts(blocks, &self.alive, &self.occ);
+        self.gadgets = [0; 3];
+        for &i in &self.stats.gadgets {
+            self.gadgets[blocks[i].ty.gadget().unwrap().kind.index()] += 1;
+        }
+    }
+
+    /// How many working gadgets of this kind it has.
+    pub fn gadget(&self, g: Gadget) -> u8 {
+        self.gadgets[g.index()]
     }
 
     pub fn repair(&mut self) {

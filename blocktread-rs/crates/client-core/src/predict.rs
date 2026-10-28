@@ -172,4 +172,10 @@ impl Predictor {
         let rot = self.off_rot * self.prev.rot.slerp(self.kin.rot, a);
         (pos, rot)
     }
+
+    /// The tick `render` shows, as the server's snapshots count them (`kin` is the state after
+    /// tick `tick - 1`, `prev` the one before).
+    pub fn render_tick(&self) -> f64 {
+        self.tick as f64 - 2.0 + (self.accum / DT).clamp(0.0, 1.0) as f64
+    }
 }

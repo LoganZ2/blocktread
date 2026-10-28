@@ -1,5 +1,5 @@
 use crate::balance::balance;
-use crate::blocks::{Block, BlockType, Design};
+use crate::blocks::{Block, BlockType, Design, Gadget, Melee};
 use crate::grid::{DIRS6, Occupancy, in_grid};
 use glam::{IVec3, Vec2, Vec3};
 
@@ -48,6 +48,12 @@ pub struct Stats {
     pub engines: Vec<usize>,
     pub eng_blocked: Vec<usize>,
     pub weapons: Vec<usize>,
+    /// Rams, and the saws and flippers with the cell ahead of them clear; and those without.
+    pub melee: Vec<usize>,
+    pub melee_blocked: Vec<usize>,
+    /// Gadgets, but for jump jets with something below them; and those.
+    pub gadgets: Vec<usize>,
+    pub gadgets_blocked: Vec<usize>,
     pub wings: Vec<usize>,
     pub wings_buried: Vec<usize>,
     /// Fins with air on at least one side, and those boxed in on both.
@@ -165,6 +171,11 @@ pub fn compute_stats(blocks: &[Block], alive: &[bool]) -> Stats {
             if clear(b, IVec3::Z) { s.engines.push(i) } else { s.eng_blocked.push(i) }
         } else if b.ty.weapon().is_some() {
             s.weapons.push(i);
+        } else if let Some(m) = b.ty.melee() {
+            if m.kind == Melee::Ram || !occ.has(b.pos() - IVec3::Z) { s.melee.push(i) } else { s.melee_blocked.push(i) }
+        } else if let Some(g) = b.ty.gadget() {
+            // a jump jet blows straight down: nothing of its own may be under it
+            if g.kind != Gadget::Jump || clear(b, IVec3::NEG_Y) { s.gadgets.push(i) } else { s.gadgets_blocked.push(i) }
         } else if b.ty == BlockType::Wing {
             let buried = occ.has(b.pos() + IVec3::Y) && occ.has(b.pos() - IVec3::Y);
             if buried { s.wings_buried.push(i) } else { s.wings.push(i) }
@@ -365,7 +376,7 @@ impl Analysis {
 }
 
 /// Why a block of type `t` may not go into `cell`, given the current blocks. A thruster's nozzle
-/// sticks one cell back (+z); that cell must stay empty.
+/// sticks one cell back (+z), a jump jet's one cell down; that cell must stay empty.
 pub fn place_reason(blocks: &[Block], cell: IVec3, t: BlockType) -> Option<String> {
     if !in_grid(cell) {
         return Some("超出搭建范围".into());
@@ -383,6 +394,25 @@ pub fn place_reason(blocks: &[Block], cell: IVec3, t: BlockType) -> Option<Strin
     }
     if t.thrust() > 0.0 && behind.is_some() {
         return Some(format!("{}尾喷口后方已经有方块，放不下", t.info().name));
+    }
+    // saws and flippers work into the cell ahead of them
+    let works_ahead = |t: BlockType| t.melee().is_some_and(|m| m.kind != Melee::Ram);
+    if let Some(b) = behind
+        && works_ahead(b.ty)
+    {
+        return Some(format!("这一格是{}干活的地方，不能放方块", b.ty.info().name));
+    }
+    if works_ahead(t) && ahead.is_some() {
+        return Some(format!("{}正前方已经有方块，放不下", t.info().name));
+    }
+    let jet = |t: BlockType| t == BlockType::JumpJet;
+    if let Some(a) = at(cell + IVec3::Y)
+        && jet(a.ty)
+    {
+        return Some(format!("这一格是{}喷口的位置，不能放方块", a.ty.info().name));
+    }
+    if jet(t) && at(cell - IVec3::Y).is_some() {
+        return Some(format!("{}正下方已经有方块，放不下", t.info().name));
     }
     None
 }
@@ -538,8 +568,19 @@ pub fn analyze(design: &Design) -> Analysis {
     if !ms.is_empty() {
         add(Level::Ok, "武器", format!("{} 门 · 都跟着准星转", ms.len()), vec![]);
     }
+    if !s.melee_blocked.is_empty() {
+        add(Level::Warn, "近战", format!("{} 个电锯或翻板正前方被挡住，不起作用。它们正前方那一格必须空着", s.melee_blocked.len()), s.melee_blocked.clone());
+    }
+    if !s.gadgets_blocked.is_empty() {
+        add(Level::Warn, "装置", format!("{} 个跳跃喷口正下方被挡住，不起作用。喷口正下方必须空着", s.gadgets_blocked.len()), s.gadgets_blocked.clone());
+    }
+    let kinds: Vec<Gadget> = Gadget::ALL.into_iter().filter(|&g| s.gadgets.iter().any(|&i| blocks[i].ty.gadget().is_some_and(|x| x.kind == g))).collect();
+    if !kinds.is_empty() {
+        add(Level::Ok, "装置", kinds.iter().map(|g| format!("{} {}", g.key(), g.label())).collect::<Vec<_>>().join(" · "), vec![]);
+    }
     if s.weapons.is_empty() {
-        add(Level::Warn, "武器", "没有能开火的武器，只能靠撞".into(), vec![]);
+        let msg = if s.melee.is_empty() { "没有能开火的武器，只能靠撞" } else { "没有能开火的武器，只能贴上去用近战部件" };
+        add(Level::Warn, "武器", msg.into(), vec![]);
     }
     if let Some(t) = s.fire_endurance
         && s.dps_sustained < s.dps * 0.6
