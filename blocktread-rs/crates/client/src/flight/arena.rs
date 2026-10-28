@@ -2,11 +2,11 @@
 //! with a hazard band along their tops, concrete cover, steel ramps with chevrons up them,
 //! crates, the hill with a band of light round its top, and the floor: concrete slabs, painted
 //! lines, and hazard stripes round the pits. And its traps: saw blades running in their slots,
-//! and vent grates that glow, then breathe fire, on the server's clock. And its pick-up pads: a
-//! ring on the floor in the pick-up's colour and its sign turning over it, gone while it is
-//! taken.
+//! and the grates of the vents that breathe fire on the server's clock (the fire itself is
+//! `fire`'s). And its pick-up pads: a ring on the floor in the pick-up's colour and its sign
+//! turning over it, gone while it is taken.
 
-use super::fx::{self, Fx, Kind};
+use super::fire;
 use super::ground::Ground;
 use super::hud::team_color;
 use super::Session;
@@ -16,7 +16,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use blocktread_shared::arena::{Arena, CAGE_HALF, PAD_R, PIT_DEPTH, PadKind, Rect, SAW_HALF_T, SAW_R, VENT_CYCLE, VENT_WARN};
+use blocktread_shared::arena::{Arena, CAGE_HALF, PAD_R, PIT_DEPTH, PadKind, Rect, SAW_HALF_T, SAW_R};
 use blocktread_shared::rng::hash01;
 use blocktread_shared::solid::{Shape, Solid, Style};
 use blocktread_shared::terrain::{CELL, Terrain};
@@ -28,10 +28,6 @@ pub struct HillLight(pub Handle<StandardMaterial>);
 /// An arena saw's blade, by its index in the arena's saws.
 #[derive(Component)]
 pub struct SawBlade(usize);
-
-/// A vent's glowing grate: its index in the arena's vents, and its material.
-#[derive(Component)]
-pub struct VentGlow(usize, Handle<StandardMaterial>);
 
 /// A pick-up pad's ring: its index in the arena's pads, and the ring's material.
 #[derive(Component)]
@@ -355,8 +351,8 @@ pub fn spawn_arena(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &mu
     }
 }
 
-/// The saws' slots (striped either side) and their blades, and the vents' grates with the glow
-/// under their bars.
+/// The saws' slots (striped either side) and their blades, the vents' grates, and the light each
+/// vent throws while it burns.
 fn traps(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMaterial>, b: &mut Build, arena: &Arena) {
     let steel = mats.add(StandardMaterial { base_color: srgb(0xc4c9cf), metallic: 0.9, perceptual_roughness: 0.25, ..default() });
     let hub = mats.add(StandardMaterial { base_color: srgb(0x2a2d33), metallic: 0.7, perceptual_roughness: 0.4, ..default() });
@@ -383,11 +379,10 @@ fn traps(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &mut Assets<S
             commands.spawn((Mesh3d(tooth.clone()), MeshMaterial3d(steel.clone()), Transform::from_translation(at).with_rotation(Quat::from_rotation_x(ang + 0.6)), ChildOf(blade)));
         }
     }
-    let plate = meshes.add(Plane3d::default().mesh().size(1.0, 1.0));
     for (k, v) in arena.vents.iter().enumerate() {
         let r = v.area;
-        // the grate: a dark frame, the glow plate under it, and bars across
-        let lift = 0.016;
+        // the grate: a dark frame, and bars across over the glowing plate
+        let lift = fire::GRATE_Y;
         let corners = |r: Rect, y: f32| [Vec3::new(r.x0, y, r.z0), Vec3::new(r.x1, y, r.z0), Vec3::new(r.x1, y, r.z1), Vec3::new(r.x0, y, r.z1)];
         b.face(&corners(Rect { x0: r.x0 - 0.4, x1: r.x1 + 0.4, z0: r.z0 - 0.4, z1: r.z1 + 0.4 }, 0.012), Vec3::Y, linear(BLACK) * 0.8);
         let long_x = r.x1 - r.x0 > r.z1 - r.z0;
@@ -403,15 +398,8 @@ fn traps(commands: &mut Commands, meshes: &mut Assets<Mesh>, mats: &mut Assets<S
             };
             b.face(&corners(bar, lift + 0.01), Vec3::Y, linear(STEEL) * 0.7);
         }
-        let mat = mats.add(StandardMaterial { base_color: srgb(0x1a1210), emissive: LinearRgba::BLACK, perceptual_roughness: 0.9, ..default() });
-        let c = r.centre();
-        commands.spawn((
-            Mesh3d(plate.clone()),
-            MeshMaterial3d(mat.clone()),
-            Transform::from_translation(c.with_y(lift)).with_scale(Vec3::new(r.x1 - r.x0, 1.0, r.z1 - r.z0)),
-            VentGlow(k, mat),
-            DespawnOnExit(Screen::Flight),
-        ));
+        // the hot plate under the bars, and the flames over it, are the fire's to draw
+        fire::vent_lights(commands, k, r);
     }
 }
 
@@ -503,40 +491,16 @@ pub fn update_hill_light(session: Res<Session>, light: Option<Res<HillLight>>, m
     }
 }
 
-/// The traps on the clock the own vehicle is predicted at, so that it meets a blade or a flame
-/// where it sees one: blades run along their slots spinning; grates glow up to a burn and pour
-/// fire while it lasts.
-pub fn update_traps(mut commands: Commands, session: Res<Session>, mut blades: Query<(&SawBlade, &mut Transform)>, vents: Query<&VentGlow>, mut mats: ResMut<Assets<StandardMaterial>>, mut fx: ResMut<Fx>, time: Res<Time>) {
+/// The saws on the clock the own vehicle is predicted at, so that it meets a blade where it sees
+/// one: they run along their slots spinning. (The vents' fire is `fire::update_fire`'s.)
+pub fn update_traps(session: Res<Session>, mut blades: Query<(&SawBlade, &mut Transform)>) {
     let Some(arena) = &session.core.terrain.arena else { return };
     let t = session.core.rock_time();
-    let dt = time.delta_secs();
     for (b, mut tf) in &mut blades {
         let saw = &arena.saws[b.0];
         tf.translation = saw.at(t);
         let spin = (t * 14.0).rem_euclid(std::f64::consts::TAU) as f32;
         tf.rotation = Quat::from_rotation_arc(Vec3::X, saw.dir.cross(Vec3::Y)) * Quat::from_rotation_x(-spin);
-    }
-    for g in &vents {
-        let v = &arena.vents[g.0];
-        let into = v.into(t);
-        let heat = if v.burning(t) {
-            0.85 + 0.15 * fx.rng.f32()
-        } else {
-            ((into - (VENT_CYCLE - VENT_WARN)) / VENT_WARN).clamp(0.0, 1.0) * 0.6
-        };
-        if let Some(mut m) = mats.get_mut(&g.1) {
-            m.emissive = glow(0xff6a1e, 9.0 * heat);
-        }
-        if v.burning(t) {
-            let r = v.area;
-            let n = ((r.x1 - r.x0) * (r.z1 - r.z0) * dt * 6.0) as usize + usize::from(fx.rng.f32() < 0.5);
-            for _ in 0..n {
-                let p = Vec3::new(r.x0 + (r.x1 - r.x0) * fx.rng.f32(), 0.1, r.z0 + (r.z1 - r.z0) * fx.rng.f32());
-                let up = Vec3::new(fx.rng.range(-0.8, 0.8), fx.rng.range(6.0, 10.0), fx.rng.range(-0.8, 0.8));
-                let life = fx.rng.range(0.25, 0.45);
-                fx::particle(&mut commands, &mut fx, p, up, life, 0.5, 1.4, Kind::Fire, 1.5);
-            }
-        }
     }
 }
 

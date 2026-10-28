@@ -3,6 +3,7 @@
 pub mod arena;
 pub mod env;
 pub mod exhaust;
+pub mod fire;
 pub mod fx;
 pub mod gadgets;
 pub mod ground;
@@ -148,7 +149,7 @@ pub struct FlightPlugin;
 
 impl Plugin for FlightPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((exhaust::ExhaustPlugin, radar::RadarPlugin))
+        app.add_plugins((exhaust::ExhaustPlugin, fire::FirePlugin, radar::RadarPlugin))
             .init_resource::<ships::ShipVisuals>()
             .init_resource::<hud::Hud>()
             .add_systems(Startup, setup_assets)
@@ -160,7 +161,7 @@ impl Plugin for FlightPlugin {
             .add_systems(Update, step_core.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Match)).run_if(resource_exists::<Session>))
             .add_systems(
                 Update,
-                (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, aim_at, exhaust::update_exhaust, fx::update_fx, env::orient_rocks, (arena::update_traps, arena::update_pads, arena::update_hill_light, gadgets::sync_mines, gadgets::sync_smoke), hud::update_hud, radar::update_radar_map, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum, grab_cursor, hud::dev_hide_hud)
+                (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, aim_at, (exhaust::update_exhaust, fire::update_fire), fx::update_fx, env::orient_rocks, (arena::update_traps, arena::update_pads, arena::update_hill_light, gadgets::sync_mines, gadgets::sync_smoke), hud::update_hud, radar::update_radar_map, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum, grab_cursor, hud::dev_hide_hud)
                     .chain()
                     .run_if(in_state(Screen::Flight))
                     .run_if(resource_exists::<Session>),
@@ -497,6 +498,10 @@ fn camera_follow(
         // dev view: the hill from the south, past the overdrive pad before it
         t.translation = Vec3::new(16.0, 13.0, 50.0);
         t.look_at(Vec3::new(0.0, 2.0, 12.0), Vec3::Y);
+    } else if dev.forced("ventcam", time.elapsed_secs()) {
+        // dev view: the flame vent before the hill's south ramp, close up
+        t.translation = Vec3::new(10.0, 4.0, 36.0);
+        t.look_at(Vec3::new(0.0, 2.2, 22.5), Vec3::Y);
     } else if let Some(v) = s.view().map(Rider::of) {
         // your own vehicle, or the one you are spectating: the same camera either way
         fov += ride(s, v, &mut t, dt, side);

@@ -1,9 +1,11 @@
 //! Purely visual effects. Nothing here affects the simulation: bolts are cosmetic copies of the
-//! server's projectiles, debris and wreckage only drift and fade.
+//! server's projectiles, debris and wreckage only drift and fade. Fire and smoke are `fire`'s.
 
 use super::Session;
+use super::fire::{self, Fires};
 use crate::Screen;
 use crate::art::{BlockArt, glow, srgb};
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use std::collections::HashMap;
 use blocktread_shared::blocks::BlockType;
@@ -13,7 +15,6 @@ use blocktread_shared::rng::Rng;
 pub enum Kind {
     Fire,
     Flash,
-    Smoke,
     Spark,
     Shield,
 }
@@ -39,7 +40,6 @@ impl Fx {
         kinds.insert(Kind::Flash, add(mats, LinearRgba::rgb(30.0, 22.0, 14.0)));
         kinds.insert(Kind::Spark, add(mats, LinearRgba::rgb(18.0, 12.0, 5.0)));
         kinds.insert(Kind::Shield, add(mats, LinearRgba::rgb(2.0, 6.0, 16.0)));
-        kinds.insert(Kind::Smoke, mats.add(StandardMaterial { base_color: Color::srgba(0.12, 0.12, 0.13, 0.35), alpha_mode: AlphaMode::Blend, unlit: true, ..default() }));
         let mut bolt_mats = HashMap::new();
         for t in BlockType::ALL.into_iter().filter(|t| t.weapon().is_some()) {
             let w = t.weapon().unwrap();
@@ -105,6 +105,7 @@ pub fn particle(commands: &mut Commands, fx: &mut Fx, pos: Vec3, vel: Vec3, life
         MeshMaterial3d(fx.mats[&kind].clone()),
         Transform::from_translation(pos).with_scale(Vec3::splat(s0)),
         Particle { vel, life, max: life, s0, s1, drag },
+        NotShadowCaster,
         DespawnOnExit(Screen::Flight),
     ));
 }
@@ -117,18 +118,9 @@ pub fn sparks(commands: &mut Commands, fx: &mut Fx, pos: Vec3, base: Vec3, n: us
     }
 }
 
-pub fn explode(commands: &mut Commands, fx: &mut Fx, pos: Vec3, size: f32, base: Vec3) {
-    particle(commands, fx, pos, base, 0.28, size * 3.5, size * 7.0, Kind::Flash, 0.0);
-    for _ in 0..(8.0 + size * 8.0) as usize {
-        let v = fx.rng.unit() * fx.rng.range(2.0, 10.0) * size + base;
-        let life = fx.rng.range(0.5, 1.1);
-        particle(commands, fx, pos, v, life, size * 1.4, size * 3.2, Kind::Fire, 2.2);
-    }
-    for _ in 0..(4.0 + size * 3.0) as usize {
-        let v = fx.rng.unit() * fx.rng.range(1.0, 5.0) * size + base;
-        let life = fx.rng.range(1.2, 2.2);
-        particle(commands, fx, pos, v, life, size * 1.8, size * 4.5, Kind::Smoke, 1.5);
-    }
+/// A blast: its fireball rolling up into smoke, and sparks flying out of it.
+pub fn explode(commands: &mut Commands, fx: &mut Fx, fires: &mut Fires, pos: Vec3, size: f32, base: Vec3) {
+    fire::blast(commands, fires, pos, size, base);
     sparks(commands, fx, pos, base, (8.0 + size * 6.0) as usize, 45.0 * size.sqrt(), Kind::Spark);
 }
 
@@ -185,6 +177,7 @@ pub fn update_fx(
     mut commands: Commands,
     time: Res<Time>,
     mut fx: ResMut<Fx>,
+    mut fires: ResMut<Fires>,
     session: Option<Res<Session>>,
     mut q: ParamSet<(
         Query<(Entity, &mut Transform, &mut Particle)>,
@@ -257,7 +250,7 @@ pub fn update_fx(
     }
     for (p, splash) in hits {
         if splash {
-            explode(&mut commands, &mut fx, p, 0.7, Vec3::ZERO);
+            explode(&mut commands, &mut fx, &mut fires, p, 0.7, Vec3::ZERO);
         } else {
             sparks(&mut commands, &mut fx, p, Vec3::ZERO, 4, 16.0, Kind::Spark);
         }
@@ -304,17 +297,15 @@ pub fn update_fx(
             commands.entity(e).despawn();
         }
     }
+    // a falling piece trails burning smoke
     for (p, v) in puffs {
-        if fx.rng.f32() < dt * 12.0 {
-            let life = fx.rng.range(0.6, 1.2);
-            particle(&mut commands, &mut fx, p, v, life, 0.8, 2.6, Kind::Smoke, 1.0);
-        }
-        if fx.rng.f32() < dt * 5.0 {
-            particle(&mut commands, &mut fx, p, v, 0.3, 0.7, 1.5, Kind::Fire, 1.0);
+        if fx.rng.f32() < dt * 10.0 {
+            let life = fx.rng.range(0.8, 1.2);
+            fire::fireball(&mut fires, p, v * 0.2, fx.rng.range(0.8, 1.2), 0.55, life);
         }
     }
     for (pos, vel, n, blocks) in blasts {
-        explode(&mut commands, &mut fx, pos, (0.6 + n as f32 / 12.0).min(2.0), vel);
+        explode(&mut commands, &mut fx, &mut fires, pos, (0.6 + n as f32 / 12.0).min(2.0), vel);
         let _ = blocks;
     }
 }

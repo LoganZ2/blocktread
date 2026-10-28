@@ -1,5 +1,6 @@
 //! Turns the client core's ship state and events into entities, effects and sounds.
 
+use super::fire::{self, Fires};
 use super::fx::{self, Fx, Kind};
 use super::hud::{HitKind, Hud};
 use super::{Session, env, ground};
@@ -156,6 +157,7 @@ pub fn apply_events(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut fx: ResMut<Fx>,
+    mut fires: ResMut<Fires>,
     mut sounds: ResMut<Sounds>,
     mut hud: ResMut<Hud>,
     time: Res<Time>,
@@ -200,7 +202,7 @@ pub fn apply_events(
                     commands.entity(v.root).despawn();
                 }
                 let size = (blocks.len() as f32 / 25.0).clamp(1.2, 3.5);
-                fx::explode(&mut commands, &mut fx, pos, size, vel * 0.5);
+                fx::explode(&mut commands, &mut fx, &mut fires, pos, size, vel * 0.5);
                 for (p, c) in blocks.iter().take(160) {
                     let v = (*p - pos).normalize_or(Vec3::Y) * fx.rng.range(6.0, 22.0) + vel * 0.6 + fx.rng.unit() * 4.0;
                     fx::debris(&mut commands, &mut fx, &mut mats, *p, v, *c);
@@ -254,7 +256,7 @@ pub fn apply_events(
                     let dv = fx.rng.unit() * fx.rng.range(4.0, 12.0) + s.vel;
                     fx::debris(&mut commands, &mut fx, &mut mats, p, dv, s.body.design.blocks[i].color);
                     fx::sparks(&mut commands, &mut fx, p, s.vel, 6, 16.0, Kind::Fire);
-                    fx::particle(&mut commands, &mut fx, p, s.vel, 0.35, 1.0, 2.2, Kind::Fire, 0.0);
+                    fire::fireball(&mut fires, p, s.vel * 0.8, 1.1, 0.8, 0.8);
                 }
                 for piece in pieces {
                     let mut cubes = Vec::new();
@@ -322,7 +324,7 @@ pub fn apply_events(
                 }
             }
             CoreEvent::Explosion { pos, size } => {
-                fx::explode(&mut commands, &mut fx, pos, size, Vec3::ZERO);
+                fx::explode(&mut commands, &mut fx, &mut fires, pos, size, Vec3::ZERO);
                 sounds.play(&mut commands, now, Sfx::Pop, falloff(ear, pos), 0.03);
             }
             CoreEvent::Crash { pos } => {
