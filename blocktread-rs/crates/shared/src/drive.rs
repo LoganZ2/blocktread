@@ -22,8 +22,9 @@ pub const REST_DROP: f32 = 0.2;
 const SUBSTEPS: u32 = 2;
 /// Blocks touch the ground as spheres of this radius.
 const BLOCK_R: f32 = 0.5;
-/// Inertia on top of the blocks' own: steadier over bumps.
-const INERTIA_SCALE: f32 = 1.6;
+/// Inertia on top of the blocks' own, about the pitch, yaw and roll axes: steadier over bumps,
+/// quick to swing into a turn.
+const INERTIA_SCALE: Vec3 = Vec3::new(1.6, 1.0, 1.6);
 /// Acceleration per unit of drive power over mass, and per unit of thrust over mass (boost).
 const DRIVE: f32 = 14.5;
 const THRUST: f32 = 11.5;
@@ -37,11 +38,19 @@ const AIR_DRAG: f32 = 0.0025;
 const HOVER_SLIDE: f32 = 3.0;
 /// Reverse on hover pads drops their skirts onto the ground, which brakes at this share of g.
 const SKIRT_BRAKE: f32 = 0.5;
+/// Held once stopped, it eases the vehicle backwards: this fast at most (m/s), picking up at this
+/// rate (m/s²).
+const HOVER_BACK: f32 = 6.0;
+const HOVER_BACK_ACCEL: f32 = 4.0;
+/// The speed (m/s) at which the steering lock, and the rate of turning by the sides, is halved.
+const STEER_FADE: f32 = 28.0;
+/// How much harder a tyre grips across its tread than along it: corners hard without sliding out.
+const CORNER: f32 = 1.8;
 /// Turning by the sides: how much of the throttle swaps from the inner side to the outer one at
 /// full lock, and the turn rate (rad/s) the tyres then scrub round at from a standstill (less at
 /// speed).
 const SKID: f32 = 1.4;
-const SKID_RATE: f32 = 1.1;
+const SKID_RATE: f32 = 1.7;
 /// Energy a boost burns per second: a base, and more for every unit of thrust.
 const BOOST_DRAIN: f32 = 25.0;
 const BOOST_DRAIN_PER_THRUST: f32 = 0.2;
@@ -101,12 +110,40 @@ pub fn thrust_push(inp: &InputCmd, boosting: bool) -> f32 {
 /// How far a wheel with steering lock `lock` turns (rad, positive right) for a steering input at
 /// a forward speed.
 pub fn steer_angle(lock: f32, steer: f32, speed: f32) -> f32 {
-    steer * lock / (1.0 + speed.abs() / 18.0)
+    steer * lock / (1.0 + speed.abs() / STEER_FADE)
 }
 
 /// Whether a wheel `local` from the centre of mass steers: a steering one ahead of it.
 pub fn steers(spec: &DriveSpec, local: Vec3) -> bool {
     spec.steer > 0.0 && !spec.hover && local.z < -0.5
+}
+
+/// Where a vehicle's wheels turn about, along it: the wheels that hold straight (the centre of
+/// mass without any), and how far ahead of them the foremost steering wheel is.
+pub fn steer_pivot(body: &ShipBody) -> (f32, f32) {
+    let (mut sum, mut n, mut front) = (0.0, 0, 0.0f32);
+    for &i in &body.movers {
+        let (spec, local) = (body.design.blocks[i].ty.drive().unwrap(), body.local(i));
+        if steers(spec, local) {
+            front = front.min(local.z);
+        } else if !spec.hover {
+            sum += local.z;
+            n += 1;
+        }
+    }
+    let pivot = if n > 0 { sum / n as f32 } else { 0.0 };
+    (pivot, (pivot - front).max(0.5))
+}
+
+/// How far a wheel turns (rad, positive right): the foremost steering ones by their lock, those
+/// further back less, the nearer they are to the `pivot`, so that every axle rounds the same point
+/// instead of scrubbing against the others.
+pub fn wheel_steer(spec: &DriveSpec, local: Vec3, pivot: (f32, f32), steer: f32, speed: f32) -> f32 {
+    if !steers(spec, local) {
+        return 0.0;
+    }
+    let reach = ((pivot.0 - local.z) / pivot.1).clamp(0.0, 1.0);
+    (steer_angle(spec.steer, steer, speed).tan() * reach).atan()
 }
 
 /// How far down a wheel looks for something to stand on (beyond its longest reach).
@@ -226,8 +263,21 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
     // no steering wheel left ahead of the centre of mass: turn by the sides, the outer one
     // driving and the inner one braking
     let skid = !body.movers.iter().any(|&i| steers(blocks[i].ty.drive().unwrap(), body.local(i)));
-    let swap = if skid { SKID * inp.steer_f() } else { 0.0 };
-    let yaw = if skid { -inp.steer_f() * SKID_RATE / (1.0 + speed.abs() / 18.0) } else { 0.0 };
+    let pivot = steer_pivot(body);
+    // backing up on wheels, it turns as a car does, its nose away from the side steered to: the
+    // steering wheels do that by themselves, and turning by the sides (and hover pads helping
+    // wheels round) follows the way it goes. On hover pads alone it turns the same way either way.
+    let wheeled = body.movers.iter().any(|&i| !blocks[i].ty.drive().unwrap().hover);
+    let way = if !wheeled {
+        1.0
+    } else if drive < -0.01 {
+        speed.clamp(-1.0, 1.0)
+    } else {
+        (speed + 1.0).clamp(-1.0, 1.0)
+    };
+    let turn = inp.steer_f() * way;
+    let swap = if skid { SKID * turn } else { 0.0 };
+    let yaw = if skid { -turn * SKID_RATE / (1.0 + speed.abs() / STEER_FADE) } else { 0.0 };
     let push = thrust_push(inp, k.boosting);
     let h = dt / SUBSTEPS as f32;
     let mut knock: Option<Impact> = None;
@@ -263,9 +313,13 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
                 let side = n.cross(f);
                 let (vf, vs) = (vp.dot(f), vp.dot(side));
                 let settle = drive.abs() < 0.01 && push <= 0.0 && vf.hypot(vs) < 1.0;
-                let long = if drive < -0.01 {
-                    // reverse: the skirt drops onto the ground and brakes, never past a stop
-                    -vf.signum() * (share * GRAVITY * SKIRT_BRAKE).min(vf.abs() * share / h * 0.5)
+                let long = if drive < -0.01 && vf > 0.0 {
+                    // reverse while still going ahead: the skirt drops onto the ground and brakes,
+                    // never past a stop
+                    -(share * GRAVITY * SKIRT_BRAKE).min(vf * share / h * 0.5)
+                } else if drive < -0.01 {
+                    // stopped, or going back already: the cushion tips aft and eases it back, slowly
+                    share * ((drive * HOVER_BACK - vf) * 2.0).clamp(-HOVER_BACK_ACCEL, HOVER_BACK_ACCEL)
                 } else if settle {
                     // hands off and nearly stopped: the skirt settles and holds it, even on a slope
                     -vf * share / h * 0.25
@@ -281,7 +335,7 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
                 continue;
             }
             // steering wheels ahead of the centre of mass turn; the rest hold straight
-            let wf = if steers(spec, local) { Quat::from_axis_angle(up, -steer_angle(spec.steer, inp.steer_f(), speed)) * fwd } else { fwd };
+            let wf = if steers(spec, local) { Quat::from_axis_angle(up, -wheel_steer(spec, local, pivot, inp.steer_f(), speed)) * fwd } else { fwd };
             let f = (wf - n * wf.dot(n)).normalize_or_zero();
             let side = n.cross(f);
             let (vf, vs) = (vp.dot(f), vp.dot(side));
@@ -306,12 +360,10 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
                 // coasting
                 -vf * share * 0.7 * grip
             };
-            // the tyre holds what its grip allows
-            let cap = spec.grip * load;
-            let mut t = f * long + side * lat;
-            if t.length() > cap {
-                t = t.normalize() * cap;
-            }
+            // the tyre holds what its grip allows, more of it across than along
+            let cap = (spec.grip * load).max(1e-6);
+            let over = (long / cap).hypot(lat / (cap * CORNER));
+            let t = (f * long + side * lat) / over.max(1.0);
             let fw = up * load + t;
             force += fw;
             torque += r.cross(fw);
@@ -327,7 +379,7 @@ pub fn step_drive(k: &mut Kin, body: &ShipBody, inp: &InputCmd, ground: &Terrain
         if hovering > 0 {
             // hover pads swing the vehicle round to the commanded turn rate: fast, a little less
             // so at speed
-            let want = -inp.steer_f() * spin / hovering as f32 / (1.0 + speed.abs() / 30.0);
+            let want = -turn * spin / hovering as f32 / (1.0 + speed.abs() / 45.0);
             let now = k.ang.dot(up);
             let rate = (h * 14.0 * hovering as f32 / body.movers.len() as f32).min(1.0);
             k.ang += up * (want - now) * rate;

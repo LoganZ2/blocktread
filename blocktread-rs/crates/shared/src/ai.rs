@@ -4,7 +4,6 @@ use crate::blocks::{BlockType, Gadget};
 use crate::flight::{BTN_BOOST, BTN_FIRE, BTN_FLIP, BTN_FLIPPER, BTN_JUMP, BTN_MINE, BTN_MISSILE, BTN_SMOKE, InputCmd, Kin, NO_LOCK, q_axis, quantize_aim};
 use crate::arena::{Arena, Rect};
 use crate::rng::Rng;
-use crate::drive::steers;
 use crate::nav::Nav;
 use crate::ship::ShipBody;
 use crate::solid::Solid;
@@ -358,8 +357,6 @@ impl AiPilot {
         let k = self.skill;
         let fwd = me.fwd();
         let hover_only = !body.movers.is_empty() && body.movers.iter().all(|&i| body.design.blocks[i].ty.drive().is_some_and(|d| d.hover));
-        // turning by the sides, it turns the same way backing up as going forward
-        let skid = !body.movers.iter().any(|&i| body.design.blocks[i].ty.drive().is_some_and(|d| steers(d, body.local(i))));
         let mut des = fwd;
         let mut drive = 1.0;
         self.t -= dt;
@@ -523,7 +520,7 @@ impl AiPilot {
                 }
             }
             State::Reverse => {
-                // on hover pads reverse only brakes: turn on the spot instead
+                // on hover pads reverse only creeps back: turn on the spot instead
                 drive = if hover_only { 0.0 } else { -1.0 };
                 if self.t <= 0.0 {
                     self.state = State::Attack;
@@ -643,8 +640,9 @@ impl AiPilot {
             let r = (ahead / me.ang.y.abs()).min(40.0) / (1.0 + ahead / 18.0);
             self.turn_r += (r - self.turn_r) * (dt * 2.0).min(1.0);
         }
-        // backing up (not braking) the wheel turns the other way
-        if drive < 0.0 && !skid && (self.state == State::Reverse || me.vel.dot(fwd) < 0.0) {
+        // backing up (not braking) on wheels the steering turns the other way; on hover pads it
+        // doesn't
+        if drive < 0.0 && !hover_only && (self.state == State::Reverse || me.vel.dot(fwd) < 0.0) {
             steer = -steer;
         }
         self.steer += (steer - self.steer) * (dt * k.react).min(1.0);

@@ -63,7 +63,7 @@ fn it_drives_steers_and_brakes() {
     }
     let turned = heading.angle_between(k.fwd()).to_degrees();
     println!("3 s of full right lock: turned {turned:.0}°, most lean {:.1}°", min_up.acos().to_degrees());
-    assert!(turned > 60.0, "should turn");
+    assert!(turned > 120.0, "should turn, and briskly");
     assert!(heading.cross(k.fwd()).y < 0.0, "to the right");
     assert!(min_up > 0.85, "shouldn't roll over in a turn");
     // brakes: reverse until stopped
@@ -216,7 +216,7 @@ fn an_empty_battery_locks_the_boost_until_shift_is_pressed_again() {
 fn hover_pads_only_lift_and_the_thrusters_push() {
     use blocktread_shared::analysis::analyze;
     let ground = Terrain::flat();
-    // five seconds on the throttle, one gliding hands off, then reverse until it stops
+    // five seconds on the throttle, one gliding hands off, then reverse until it stops, and on
     let go = |d: &blocktread_shared::blocks::Design| {
         let body = ShipBody::new(Arc::new(d.clone()));
         let mut k = set_down(&body, &ground, 0.0, 0.0);
@@ -230,13 +230,15 @@ fn hover_pads_only_lift_and_the_thrusters_push() {
             step_drive(&mut k, &body, &InputCmd { drive: -127, ..Default::default() }, &ground, DT);
             stop += DT;
         }
-        (v, glide, stop)
+        run(&mut k, &body, &ground, 4.0, InputCmd { drive: -127, ..Default::default() });
+        (v, glide, stop, -k.vel.dot(k.fwd()))
     };
-    let (v, glide, stop) = go(&preset("wasp"));
-    println!("hover vehicle: {:.0} km/h after 5 s, {:.0} after a second's glide, stopped in {stop:.1} s", v * 3.6, glide * 3.6);
+    let (v, glide, stop, back) = go(&preset("wasp"));
+    println!("hover vehicle: {:.0} km/h after 5 s, {:.0} after a second's glide, stopped in {stop:.1} s, then backing at {:.0} km/h", v * 3.6, glide * 3.6, back * 3.6);
     assert!(v > 25.0, "the thrusters push it");
     assert!(glide > v * 0.75, "it glides on");
     assert!(stop < 7.0, "the skirts brake it");
+    assert!(back > 4.0 && back < 7.0, "held on, reverse eases it back, slowly");
     // without its thrusters, the throttle does nothing, and the checks say why
     let mut bare = preset("wasp");
     bare.blocks.retain(|b| b.ty.thrust() == 0.0);
@@ -256,10 +258,10 @@ fn without_steering_wheels_it_turns_by_its_sides() {
     let mut k = set_down(&body, &ground, 0.0, 0.0);
     run(&mut k, &body, &ground, 1.0, InputCmd::default());
     let (h0, p0) = (k.fwd(), k.pos);
-    run(&mut k, &body, &ground, 2.0, InputCmd { steer: 127, ..Default::default() });
+    run(&mut k, &body, &ground, 1.0, InputCmd { steer: 127, ..Default::default() });
     let spot = h0.angle_between(k.fwd()).to_degrees();
     let moved = (k.pos - p0).with_y(0.0).length();
-    println!("on the spot: {spot:.0}° in 2 s, moved {moved:.1} m");
+    println!("on the spot: {spot:.0}° in 1 s, moved {moved:.1} m");
     assert!(spot > 60.0 && h0.cross(k.fwd()).y < 0.0, "turns right on the spot");
     assert!(moved < 2.0);
     run(&mut k, &body, &ground, 5.0, InputCmd { drive: 127, ..Default::default() });
@@ -270,4 +272,47 @@ fn without_steering_wheels_it_turns_by_its_sides() {
     println!("at speed: {turned:.0}° in 2 s, sliding {slip:.0}° off the nose, {:.0} km/h", k.vel.length() * 3.6);
     assert!(turned > 30.0 && h1.cross(k.fwd()).y > 0.0, "turns left at speed");
     assert!(slip < 15.0, "without spinning out");
+}
+
+#[test]
+fn six_wheelers_round_a_tight_turn_without_bogging_down() {
+    // the scorpion steers its front two axles: the middle one turns less, about the same point,
+    // so that on a light throttle at full lock the tyres don't scrub it to a stop
+    let ground = Terrain::flat();
+    let body = ShipBody::new(Arc::new(preset("scorpion")));
+    let mut k = set_down(&body, &ground, 0.0, 0.0);
+    run(&mut k, &body, &ground, 1.0, InputCmd::default());
+    let light = InputCmd { drive: q_axis(0.25), ..Default::default() };
+    run(&mut k, &body, &ground, 4.0, light);
+    let v0 = k.vel.dot(k.fwd());
+    run(&mut k, &body, &ground, 2.5, InputCmd { steer: 127, ..light });
+    let v = k.vel.dot(k.fwd());
+    println!("a light throttle at full lock: {v0:.1} m/s, after 2.5 s {v:.1}");
+    assert!(v > v0 * 0.5, "bogged down");
+}
+
+#[test]
+fn backing_up_on_wheels_every_vehicle_turns_the_same_way() {
+    // reverse from a standstill with the wheel to the right: on wheels the nose swings left, as a
+    // car's does, whether its wheels steer or it turns by its sides; on hover pads alone it turns
+    // right, as it does going ahead
+    let ground = Terrain::flat();
+    for key in ["rover", "bison", "scorpion", "rhino", "wasp"] {
+        let body = ShipBody::new(Arc::new(preset(key)));
+        let mut k = set_down(&body, &ground, 0.0, 0.0);
+        run(&mut k, &body, &ground, 1.0, InputCmd::default());
+        let mut right = 0.0;
+        for t in 0..(1.5 / DT) as u32 {
+            step_drive(&mut k, &body, &InputCmd { tick: t, drive: -127, steer: 127, ..Default::default() }, &ground, DT);
+            right -= k.ang.dot(k.up()) * DT;
+        }
+        let (deg, v) = (right.to_degrees(), k.vel.dot(k.fwd()));
+        println!("{key}: 1.5 s backing up with the wheel right: nose {deg:+.0}° (+ right), {v:+.1} m/s");
+        assert!(v < -1.0, "{key} should be backing up");
+        if key == "wasp" {
+            assert!(deg > 20.0, "on hover pads it turns right");
+        } else {
+            assert!(deg < -10.0, "{key} should swing its nose left");
+        }
+    }
 }

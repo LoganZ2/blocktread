@@ -2039,33 +2039,36 @@ mod tests {
 
     #[test]
     fn bots_fight_over_the_hill() {
-        let mut g = hill_cage();
-        let (out, _rx) = unbounded_channel();
-        g.join(1, "观众".into(), None, None, out);
-        for (i, ship) in ["bison", "scorpion", "rover", "bison"].iter().enumerate() {
-            g.add_seat(format!("AI{i}"), preset(ship), Some(1 + i as u16 % 2));
-        }
+        // three matches of a minute and a half: one alone can go either way
         let (mut held, mut contested) = (0.0, 0.0);
         // seconds of vehicles up there, by side
         let mut up: BTreeMap<u16, f32> = BTreeMap::new();
-        for _ in 0..secs(90.0) {
-            g.tick();
-            for s in g.ships.values().filter(|s| g.terrain.arena.as_ref().is_some_and(|a| a.on_hill(s.kin.pos))) {
-                *up.entry(s.team).or_insert(0.0) += DT;
+        for seed in 1..=3 {
+            let mut g = Game::with_map(GameConfig { mode: Mode::Teams, bots: 0, budget: None, verbose: false }, seed, Map::Cage);
+            let (out, _rx) = unbounded_channel();
+            g.join(1, "观众".into(), None, None, out);
+            for (i, ship) in ["bison", "scorpion", "rover", "bison"].iter().enumerate() {
+                g.add_seat(format!("AI{i}"), preset(ship), Some(1 + i as u16 % 2));
             }
-            let h = g.hill.as_ref().unwrap();
-            if h.holder.is_some() {
-                held += DT;
+            for _ in 0..secs(90.0) {
+                g.tick();
+                for s in g.ships.values().filter(|s| g.terrain.arena.as_ref().is_some_and(|a| a.on_hill(s.kin.pos))) {
+                    *up.entry(s.team).or_insert(0.0) += DT;
+                }
+                let h = g.hill.as_ref().unwrap();
+                if h.holder.is_some() {
+                    held += DT;
+                }
+                if h.contested {
+                    contested += DT;
+                }
             }
-            if h.contested {
-                contested += DT;
-            }
+            println!("seed {seed}: points {:?}", g.points());
         }
-        let p = g.points();
-        println!("points {p:?}; held {held:.0} s, contested {contested:.0} s; time up there by team {up:?}");
-        assert!(held + contested > 30.0, "they should get up there");
-        assert!(up.len() == 2 && up.values().all(|&t| t > 10.0), "both sides should");
-        assert!(contested > 5.0, "and fight over it");
+        println!("held {held:.0} s, contested {contested:.0} s; time up there by team {up:?}");
+        assert!(held + contested > 90.0, "they should get up there");
+        assert!(up.len() == 2 && up.values().all(|&t| t > 30.0), "both sides should");
+        assert!(contested > 15.0, "and fight over it");
     }
 
     #[test]

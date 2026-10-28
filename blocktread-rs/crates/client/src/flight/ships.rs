@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 use blocktread_client_core::{CoreEvent, CoreShip};
 use blocktread_shared::blocks::{BlockType, WeaponSfx};
-use blocktread_shared::drive::{steer_angle, steers, wheel_drop, wheel_ray};
+use blocktread_shared::drive::{steer_pivot, wheel_drop, wheel_ray, wheel_steer};
 
 pub struct ShipVis {
     pub root: Entity,
@@ -399,13 +399,14 @@ pub fn sync_ships(
         v.roll += fwd_speed * dt;
         let steer = if Some(*id) == me { core.pred.as_ref().and_then(|p| p.last_cmd()).map_or(0.0, |c| c.steer_f()) } else { 0.0 };
         let up = s.rot * Vec3::Y;
+        let pivot = steer_pivot(&s.body);
         for w in &v.wheels {
             let local = s.body.local(w.block);
             let dist = wheel_ray(&core.terrain, s.pos + s.rot * local, up).map(|(d, _)| d);
             if let Ok(mut t) = tf.get_mut(w.pivot) {
                 t.translation = local + Vec3::X * w.hold.side * KINGPIN - Vec3::Y * wheel_drop(dist, w.radius);
                 let spec = s.body.design.blocks[w.block].ty.drive().unwrap();
-                t.rotation = if steers(spec, local) { Quat::from_rotation_y(-steer_angle(spec.steer, steer, fwd_speed)) } else { Quat::IDENTITY };
+                t.rotation = Quat::from_rotation_y(-wheel_steer(spec, local, pivot, steer, fwd_speed));
             }
             if let Ok(mut t) = tf.get_mut(w.spin) {
                 t.translation = Vec3::X * -w.hold.side * w.reach;
