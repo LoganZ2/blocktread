@@ -11,18 +11,23 @@ const NAMES: &[&str] = &[
     "Mudflap", "Diesel", "Scrapyard", "NoBrakes", "Kaboom", "Wrench", "Tread", "Pistonhead", "Ramjet",
 ];
 
-/// A fresh name none of `taken` uses: one from the list, sometimes with a number after it, or
-/// now and then the default a player who never named themselves gets (`车长` and their id).
-pub fn pick(rng: &mut Rng, pid: u16, taken: &[&str]) -> String {
-    for _ in 0..20 {
+/// A fresh name `taken` turns down for none: one from the list, sometimes with a number after it,
+/// or now and then the default a player who never named themselves gets (`车长` and their id).
+pub fn pick(rng: &mut Rng, pid: u16, taken: &dyn Fn(&str) -> bool) -> String {
+    for _ in 0..40 {
         let name = match rng.below(10) {
             0 => format!("车长{pid}"),
             1 | 2 => format!("{}{}", NAMES[rng.below(NAMES.len())], rng.below(99) + 1),
             _ => NAMES[rng.below(NAMES.len())].to_string(),
         };
-        if !taken.contains(&name.as_str()) {
+        if !taken(&name) {
             return name;
         }
     }
-    format!("车长{pid}")
+    fallback(pid, taken)
+}
+
+/// `车长` and the id, numbered on if even that is taken: the name of last resort.
+pub fn fallback(pid: u16, taken: &dyn Fn(&str) -> bool) -> String {
+    (0..).map(|k| if k == 0 { format!("车长{pid}") } else { format!("车长{pid}-{k}") }).find(|n| !taken(n)).unwrap()
 }

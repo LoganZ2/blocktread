@@ -271,7 +271,13 @@ impl Hub {
                         Ok(s) => {
                             c.account = Some((s.id, s.profile));
                             c.name = s.user.clone();
+                            let user = s.user.to_lowercase();
                             send(&c.out, &ServerMsg::Account { user: s.user, token: s.token, profile: s.profile });
+                            // a guest already going by the name (just signed up for) gives it up
+                            let guests: Vec<u16> = self.conns.iter().filter(|(_, c)| c.account.is_none() && c.name.to_lowercase() == user).map(|(&p, _)| p).collect();
+                            for g in guests {
+                                self.unclaim(g);
+                            }
                         }
                         Err(reason) => {
                             c.auth_fails += 1;
@@ -316,6 +322,7 @@ impl Hub {
     }
 
     fn queue(&mut self, pid: u16, mode: Mode, tier: Option<String>) {
+        self.unclaim(pid);
         let now = self.tick;
         let ranked = self.ranked();
         let Some(c) = self.conns.get_mut(&pid) else { return };
@@ -334,8 +341,8 @@ impl Hub {
             } else {
                 None
             };
-            if let Some(text) = refuse {
-                send(&c.out, &ServerMsg::Notice { text });
+            if let Some(reason) = refuse {
+                send(&c.out, &ServerMsg::QueueRefused { reason });
                 return;
             }
         }
@@ -419,10 +426,31 @@ impl Hub {
         }
     }
 
-    /// A name for an AI driver no one in sight of it has.
+    /// A name for an AI driver no one in sight of it has, and no account goes by.
     fn bot_name(&mut self, pid: u16, slots: &[Slot]) -> String {
         let taken: Vec<&str> = slots.iter().map(|s| s.name.as_str()).chain(self.conns.values().map(|c| c.name.as_str())).collect();
-        crate::names::pick(&mut self.rng, pid, &taken)
+        let registered = self.store.as_ref().map(|s| s.names.clone());
+        crate::names::pick(&mut self.rng, pid, &|n| taken.contains(&n) || registered.as_ref().is_some_and(|r| r.has(n)))
+    }
+
+    /// Whether an account goes by `name`: then nobody but its owner may.
+    fn claimed(&self, name: &str) -> bool {
+        self.store.as_ref().is_some_and(|s| s.names.has(name))
+    }
+
+    /// A guest whose name an account goes by is renamed (and told why): nobody passes for a
+    /// registered player. Checked when the name is about to be seen (queueing, watching), by
+    /// when the owner's own client has logged in.
+    fn unclaim(&mut self, pid: u16) {
+        let Some(c) = self.conns.get(&pid) else { return };
+        if c.account.is_some() || !self.claimed(&c.name) {
+            return;
+        }
+        let was = c.name.clone();
+        let name = crate::names::fallback(pid, &|n| self.claimed(n) || self.conns.values().any(|c| c.name == n));
+        let c = self.conns.get_mut(&pid).unwrap();
+        c.name = name.clone();
+        send(&c.out, &ServerMsg::Notice { text: format!("「{was}」是别人注册的用户名，你现在显示为「{name}」。登录自己的账号，或者换个呼号") });
     }
 
     /// When an AI seat shows its pick and locks it in: a player's pace (at once in local play).
@@ -560,6 +588,7 @@ impl Hub {
     /// Watch the free-for-all room while anyone drives there, else a 2v2 being played, else the
     /// room (opened empty if need be: players who come in later show up).
     fn watch(&mut self, pid: u16) {
+        self.unclaim(pid);
         let playing = |mode: Mode, m: &Match| m.mode == mode && matches!(m.phase, Phase::Play(_)) && !m.slots.is_empty();
         let found = self.matches.iter().find(|(_, m)| playing(Mode::Ffa, m)).or_else(|| self.matches.iter().find(|(_, m)| playing(Mode::Teams, m))).map(|(&id, _)| id);
         let id = found.unwrap_or_else(|| self.room());

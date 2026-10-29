@@ -24,7 +24,8 @@
 - **账号和进度**（规则在 [`crates/shared/economy.ron`](crates/shared/economy.ron)）：在大区服务器上注册，不登录就是游客，能玩但没有收益。
   - **金币**解锁部件，每种买一次就能随便用。新玩家有 14 种初始部件（够开越野车），另外 14 种 600–1500 金币，全部买齐大约要一百局。
   - **经验**（和金币一起发）升等级：2 级开放 2v2，3 级开放中型档，6 级开放重型档；自由混战按等级能开的最大档限制造价。每升一级送 100 金币。
-  - **每局收益**：在场每分钟 10、每次击毁 10，2v2 获胜 40，混战一局前三名 40 / 25 / 15，每天第一次获胜（或混战前三）再加 150。打 AI 和打玩家一样。
+  - **每局收益**：在场每分钟 10、每次击毁 10，2v2 获胜 40，混战一局前三名 40 / 25 / 15，每天第一次获胜（或混战前三）再加 150，「每天」按服务器所在时区的日期算。打 AI 和打玩家一样。
+  - **防冒名**：注册过的用户名（不分大小写）只有账号本人能用。游客的呼号和别人的用户名重复时，排队或观战那一刻会被改成「车长+编号」并收到提示；有人刚注册了某个名字，正在用这个名字的游客也会被改名。AI 也不会取到注册过的名字。
   - 试车场没有任何限制，没解锁的部件也能开进去试。
 
 ## 下载
@@ -108,6 +109,8 @@ cargo run -p blocktread-server --release
 **GitHub 上只有一个 secret**：Settings → Secrets and variables → Actions 里的 `DEPLOY_SSH_KEY`，所有服务器都接受的那把私钥的完整内容。没设置时部署会跳过并给出警告，发版本身不受影响。想每次部署前手动确认，在 Settings → Environments → production 里加上审批人。
 
 服务器的额外参数（比如 `ARGS=--queue-wait 30 --match-secs 600`）写在服务器上的 `~/blocktread-server/args.env`。服务器每 5 秒把版本、证书指纹和在线人数写进 `~/blocktread-server/status.json`。
+
+**时区**：每日首胜按服务器的本地日期算，也就是那台机器的系统时区。云主机默认多半是 UTC，改成玩家所在的时区：`sudo timedatectl set-timezone Asia/Shanghai`（北美服可以用 `America/New_York` 等），或者只给游戏服务器设置，在 `~/blocktread-server/args.env` 里加一行 `TZ=Asia/Shanghai`。改完重启服务器生效。
 
 **账号和进度**：每台服务器各管各的账号（就像游戏分大区），存在 `~/blocktread-server/data/accounts.sqlite`（SQLite）。密码用 argon2 存哈希，登录后发一个会话令牌，客户端记住令牌而不是密码。这个文件就是玩家的全部进度，记得定期备份（服务器开着时用 `sqlite3 accounts.sqlite ".backup 备份文件"`）。
 

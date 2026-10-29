@@ -16,3 +16,4 @@ blocktread_shared = { version = "0.1.0", path = "../shared" }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 argon2 = "0.6.0"
 ring = "0.17.14"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }

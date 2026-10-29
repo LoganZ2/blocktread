@@ -174,6 +174,8 @@ pub struct ClientCore {
     pub queued_for: Option<(Mode, Option<String>)>,
     /// A message from the server to show (a pick refused, say); the screen takes it.
     pub notice: Option<String>,
+    /// The queue was turned down, and why (the phase is back to idle); the screen takes it.
+    pub refused: Option<String>,
     /// Logged in: the account's name and progress (None: a guest).
     pub account: Option<(String, Profile)>,
     /// A login came through with this token: the screen saves it (and takes it).
@@ -233,6 +235,7 @@ impl ClientCore {
             phase: Phase::Idle,
             queued_for: None,
             notice: None,
+            refused: None,
             account: None,
             new_token: None,
             auth_error: None,
@@ -563,6 +566,12 @@ impl ClientCore {
                 }
             }
             ServerMsg::Rewarded { coins, xp, level_up } => self.reward = Some((coins, xp, level_up)),
+            ServerMsg::QueueRefused { reason } => {
+                if matches!(self.phase, Phase::Queued { .. }) {
+                    self.phase = Phase::Idle;
+                }
+                self.refused = Some(reason);
+            }
             ServerMsg::Welcome { pid, tick, mode, seed, map } => {
                 self.reset_world();
                 self.pid = Some(pid);

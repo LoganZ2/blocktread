@@ -337,14 +337,15 @@ fn queue_line(session: Option<Res<Session>>, settings: Res<Settings>, mut line: 
 /// The session on this screen: queue once connected, and go to the vehicle pick when a match is found.
 fn menu_flow(mut commands: Commands, session: Option<ResMut<Session>>, mut next: ResMut<NextState<Screen>>, mut toasts: ResMut<Toasts>) {
     let Some(mut s) = session else { return };
-    // the server turned the queue down (a level or tier not reached): say why, and stop waiting
     if let Some(text) = s.core.notice.take() {
         toasts.push(text, ToastKind::Warn);
-        if matches!(s.core.phase, Phase::Queued { .. }) {
-            s.core.leave();
-            commands.remove_resource::<Session>();
-            return;
-        }
+    }
+    // the server turned the queue down (a level or tier not reached): say why, and stop waiting
+    if let Some(why) = s.core.refused.take() {
+        toasts.push(why, ToastKind::Warn);
+        s.core.leave();
+        commands.remove_resource::<Session>();
+        return;
     }
     // queue once logged in: the server holds a guest to a newcomer's rules
     if s.core.state != ConnState::Lobby || s.core.authing {

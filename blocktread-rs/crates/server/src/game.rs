@@ -656,7 +656,7 @@ impl Game {
         let design = Arc::new(repaint(&preset(PRESETS[k].key), &mut self.rng));
         let pid = crate::new_pid();
         let taken: Vec<&str> = self.players.values().map(|p| p.name.as_str()).chain(self.seats.iter().map(|s| s.name.as_str())).collect();
-        let name = crate::names::pick(&mut self.rng, pid, &taken);
+        let name = crate::names::pick(&mut self.rng, pid, &|n| taken.contains(&n));
         self.seats.push(BotSeat { pid, name, design, team: None, ship: None, kills: 0, deaths: 0, score: 0 });
         self.seats.len() - 1
     }

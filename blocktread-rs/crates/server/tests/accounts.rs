@@ -104,7 +104,11 @@ fn a_newcomer_waits_for_2v2_and_cant_drive_parts_not_bought() {
     let mut a = connect(&mut h, 1, "游客");
     // guest or new account alike: level 1
     msg(&mut h, 1, ClientMsg::Queue { mode: Mode::Teams, tier: None });
-    assert!(notice(&mut h, &mut a).contains("2v2"));
+    let why = until(&mut h, &mut a, |m| match m {
+        ServerMsg::QueueRefused { reason } => Some(reason.clone()),
+        _ => None,
+    });
+    assert!(why.contains("2v2"), "{why}");
     // the room takes them, but not in a vehicle with parts they haven't bought
     msg(&mut h, 1, ClientMsg::Queue { mode: Mode::Ffa, tier: None });
     for _ in 0..15 {
@@ -167,4 +171,42 @@ fn a_round_in_the_room_pays_accounts_and_coins_buy_parts() {
     // a guest can't buy
     msg(&mut h, 2, ClientMsg::Unlock { block: BlockType::Ram });
     assert!(notice(&mut h, &mut b).contains("登录"));
+}
+
+#[test]
+fn nobody_but_the_owner_goes_by_an_accounts_name() {
+    let mut h = hub(60.0);
+    let mut a = connect(&mut h, 1, "x");
+    sign_up(&mut h, &mut a, 1, "TankGirl");
+    // a guest calling themselves that (case aside) is renamed as they queue, and told why
+    let mut b = connect(&mut h, 2, "tankgirl");
+    msg(&mut h, 2, ClientMsg::Queue { mode: Mode::Ffa, tier: None });
+    assert!(notice(&mut h, &mut b).contains("别人注册"));
+    for _ in 0..15 {
+        h.tick();
+    }
+    let slots = until(&mut h, &mut b, |m| match m {
+        ServerMsg::MatchFound { slots, .. } => Some(slots.clone()),
+        _ => None,
+    });
+    assert!(!slots[0].name.eq_ignore_ascii_case("tankgirl"), "{slots:?}");
+    // the owner, logged in on another connection under any callsign, keeps it
+    let mut c = connect(&mut h, 3, "随便");
+    msg(&mut h, 3, ClientMsg::Auth(AuthReq::Login { user: "TankGirl".into(), pass: "secret1".into() }));
+    until(&mut h, &mut c, |m| matches!(m, ServerMsg::Account { .. }).then_some(()));
+    msg(&mut h, 3, ClientMsg::Queue { mode: Mode::Ffa, tier: None });
+    let slots = until(&mut h, &mut c, |m| match m {
+        ServerMsg::MatchFound { slots, .. } => Some(slots.clone()),
+        _ => None,
+    });
+    assert_eq!(slots[0].name, "TankGirl");
+}
+
+#[test]
+fn a_guest_already_using_a_name_gives_it_up_when_it_is_registered() {
+    let mut h = hub(60.0);
+    let mut g = connect(&mut h, 1, "老王");
+    let mut a = connect(&mut h, 2, "x");
+    sign_up(&mut h, &mut a, 2, "老王");
+    assert!(notice(&mut h, &mut g).contains("别人注册"));
 }

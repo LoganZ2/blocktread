@@ -4,6 +4,11 @@
 //! Passwords are kept as argon2 hashes. Logging in hands out a session token (kept only as its
 //! SHA-256), so a client remembers that rather than the password. Hashing is slow on purpose, so
 //! the store runs on a thread of its own (`StoreThread`) and the 60 Hz loop never waits on it.
+//!
+//! The names taken by accounts are also kept in memory (`Registered`), so the hub can check a
+//! guest's or an AI's name at once: nobody but an account's owner goes by its name.
+//!
+//! "Today" (the day's first win) is the server's local date: its time zone, or `TZ`.
 
 use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use blocktread_shared::blocks::BlockType;
@@ -12,7 +17,30 @@ use blocktread_shared::protocol::{AuthReq, Profile};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// Account names in use, folded to lower case: shared between the store and the hub.
+#[derive(Clone, Default)]
+pub struct Registered(Arc<Mutex<HashSet<String>>>);
+
+impl Registered {
+    /// Whether an account goes by `name` (case aside).
+    pub fn has(&self, name: &str) -> bool {
+        self.0.lock().unwrap().contains(&name.trim().to_lowercase())
+    }
+
+    fn add(&self, name: &str) {
+        self.0.lock().unwrap().insert(name.trim().to_lowercase());
+    }
+}
+
+/// Today in the server's time zone, as days since 1 January 1970.
+pub fn local_day() -> i64 {
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    (chrono::Local::now().date_naive() - epoch).num_days()
+}
 
 /// Where a server keeps its accounts.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -38,6 +66,7 @@ pub struct Session {
 pub struct Store {
     db: Connection,
     rng: SystemRandom,
+    names: Registered,
 }
 
 pub const USER_MIN: usize = 2;
@@ -98,7 +127,14 @@ impl Store {
                  PRIMARY KEY (account, game)
              );",
         )?;
-        Ok(Store { db, rng: SystemRandom::new() })
+        let names = Registered::default();
+        {
+            let mut q = db.prepare("SELECT user FROM accounts")?;
+            for user in q.query_map([], |r| r.get::<_, String>(0))? {
+                names.add(&user?);
+            }
+        }
+        Ok(Store { db, rng: SystemRandom::new(), names })
     }
 
     fn token(&self) -> String {
@@ -131,6 +167,7 @@ impl Store {
             Err(e) => return Err(e.to_string()),
         }
         let id = self.db.last_insert_rowid();
+        self.names.add(&user);
         self.new_session(id, user).map_err(|e| e.to_string())
     }
 
@@ -189,8 +226,12 @@ impl Store {
     /// Pay `id` for a showing in game `game` (once: paying the same game again pays nothing).
     /// Returns what it paid, the profile after, and the level reached if it went up.
     pub fn reward(&mut self, id: i64, game: &str, s: &Showing) -> rusqlite::Result<(Reward, Profile, Option<u32>)> {
+        self.reward_on(id, game, s, local_day())
+    }
+
+    /// `reward` on a given day (`local_day`'s count).
+    pub fn reward_on(&mut self, id: i64, game: &str, s: &Showing, day: i64) -> rusqlite::Result<(Reward, Profile, Option<u32>)> {
         let e = economy();
-        let day = now() / 86_400;
         let tx = self.db.transaction()?;
         let (xp, last_win_day): (i64, i64) = tx.query_row("SELECT xp, last_win_day FROM accounts WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let first_today = last_win_day != day;
@@ -231,6 +272,7 @@ pub enum Done {
 pub struct StoreThread {
     jobs: Sender<Job>,
     done: Receiver<Done>,
+    pub names: Registered,
 }
 
 impl StoreThread {
@@ -247,6 +289,7 @@ impl StoreThread {
         };
         // opened here so a bad file stops the server at start, not later
         let mut store = Store::open(path.as_deref())?;
+        let names = store.names.clone();
         let (jobs, job_rx) = unbounded::<Job>();
         let (done_tx, done) = unbounded::<Done>();
         std::thread::Builder::new().name("blocktread-store".into()).spawn(move || {
@@ -273,7 +316,7 @@ impl StoreThread {
                 }
             }
         })?;
-        Ok(Some(StoreThread { jobs, done }))
+        Ok(Some(StoreThread { jobs, done, names }))
     }
 
     pub fn send(&self, job: Job) {
@@ -331,6 +374,33 @@ mod tests {
         assert!(Unlocks(after.unlocks).has(BlockType::Hover));
         assert_eq!(after.coins, before.coins - 1000);
         assert_eq!(s.unlock(a.id, BlockType::Hover).unwrap().coins, after.coins, "buying it twice costs nothing");
+    }
+
+    #[test]
+    fn the_first_win_bonus_comes_once_a_day() {
+        let mut s = Store::open(None).unwrap();
+        let a = s.register("车手", "secret1").unwrap();
+        let win = Showing { secs: 60.0, kills: 0, won: true, place: None };
+        // XP: what the match paid, without the coins a new level adds
+        assert_eq!(s.reward_on(a.id, "g1", &win, 100).unwrap().0.xp, 10 + 40 + 150);
+        assert_eq!(s.reward_on(a.id, "g2", &win, 100).unwrap().0.xp, 10 + 40, "once that day");
+        assert_eq!(s.reward_on(a.id, "g3", &win, 101).unwrap().0.xp, 10 + 40 + 150, "and again the next");
+    }
+
+    #[test]
+    fn names_taken_by_accounts_are_known_case_aside() {
+        let mut s = Store::open(None).unwrap();
+        s.register("TankGirl", "secret1").unwrap();
+        assert!(s.names.has("tankgirl") && s.names.has(" TANKGIRL "));
+        assert!(!s.names.has("TankBoy"));
+        // and known again after a restart, from the file
+        let dir = std::env::temp_dir().join(format!("blocktread-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("accounts.sqlite");
+        Store::open(Some(&path)).unwrap().register("老兵", "secret1").unwrap();
+        assert!(Store::open(Some(&path)).unwrap().names.has("老兵"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

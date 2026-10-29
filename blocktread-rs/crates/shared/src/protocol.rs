@@ -182,6 +182,8 @@ pub enum ServerMsg {
     Profile(Profile),
     /// What the last match (or free-for-all round) paid, and the level reached if it went up.
     Rewarded { coins: u32, xp: u32, level_up: Option<u32> },
+    /// The queue asked for is closed to this player (a level or tier not reached), and why.
+    QueueRefused { reason: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
