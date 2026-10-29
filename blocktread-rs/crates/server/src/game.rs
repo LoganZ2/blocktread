@@ -10,7 +10,7 @@ use blocktread_shared::blocks::{BlockType, DamageKind, Design, Melee, MeleeSpec}
 use blocktread_shared::drive::{saw_bites, spawn_height, step_drive};
 use blocktread_shared::flight::{InputCmd, Kin, NO_LOCK, collide_rocks, look_rotation};
 use blocktread_shared::gadgets::{Cloud, MINE_ARM, hidden};
-use blocktread_shared::presets::{PRESETS, enemy_colors, preset};
+use blocktread_shared::presets::{PRESETS, preset, repaint};
 use blocktread_shared::protocol::*;
 use blocktread_shared::rng::Rng;
 use blocktread_shared::ship::ShipBody;
@@ -102,7 +102,9 @@ struct Ship {
 }
 
 /// A bot identity. Each respawn flies the same ship for the same seat, so its score carries over.
+/// To everyone else it is a player like any other: an id of the same kind, a name like theirs.
 struct BotSeat {
+    pid: u16,
     name: String,
     design: Arc<Design>,
     /// A match's team for it; otherwise each life gets a team of its own.
@@ -293,6 +295,8 @@ const PIT_HANG: f32 = 2.0;
 /// vents burn in chunks too.
 const CUT_EVERY: f32 = 0.1;
 const BURN_EVERY: f32 = 0.25;
+/// Seconds before anyone wrecked is back, player or AI alike.
+const RESPAWN_SECS: f32 = 4.0;
 /// A crash bounces vehicles apart this hard (1 + restitution).
 const CRASH_BOUNCE: f32 = 1.8;
 
@@ -583,16 +587,39 @@ impl Game {
         id
     }
 
-    /// A bot that flies `design` for a match, on `team`; it takes off at once and respawns.
-    pub fn add_seat(&mut self, name: String, design: Design, team: Option<u16>) {
-        self.seats.push(BotSeat { name, design: Arc::new(enemy_colors(&design)), team, ship: None, kills: 0, deaths: 0, score: 0 });
+    /// A bot that drives `design` for a match, on `team`; it rolls out at once and respawns. It
+    /// comes in the way a player does.
+    pub fn add_seat(&mut self, pid: u16, name: String, design: Design, team: Option<u16>) {
+        let design = Arc::new(repaint(&design, &mut self.rng));
+        self.seats.push(BotSeat { pid, name: name.clone(), design, team, ship: None, kills: 0, deaths: 0, score: 0 });
         self.cfg.bots += 1;
+        self.feed(format!("{name} 加入了战场"), false);
         self.spawn_seat(self.seats.len() - 1);
+    }
+
+    /// A player leaves a match that goes on without them: AI takes over their vehicle where it
+    /// is, under their name and with their score, and nobody is told.
+    pub fn hand_over(&mut self, pid: u16) {
+        let Some(p) = self.players.remove(&pid) else { return };
+        let Some(design) = p.design else { return };
+        let seat = self.seats.len();
+        self.seats.push(BotSeat { pid, name: p.name, design, team: p.team, ship: p.ship, kills: p.kills, deaths: p.deaths, score: p.score });
+        self.cfg.bots += 1;
+        let skill = Skill::ffa_bot();
+        let ai = AiPilot::new(skill, self.rng.next_u64());
+        if let Some(s) = p.ship.and_then(|id| self.ships.get_mut(&id)) {
+            s.owner = None;
+            s.is_bot = true;
+            s.seat = Some(seat);
+            s.ai = Some(ai);
+            s.dmg_mul = skill.dmg_mul;
+        }
+        self.scores_dirty = true;
     }
 
     fn spawn_seat(&mut self, seat: usize) {
         let s = &self.seats[seat];
-        let team = s.team.unwrap_or(2000 + self.next_ship);
+        let team = s.team.unwrap_or(1000 + s.pid);
         let (design, name) = (s.design.clone(), s.name.clone());
         let (pos, rot) = self.spawn_point(team);
         let id = self.add_ship(design, name, team, None, pos, rot, Some(Skill::ffa_bot()));
@@ -614,8 +641,11 @@ impl Game {
         let pool = if fits.is_empty() { (0..PRESETS.len()).collect() } else { fits };
         let free: Vec<usize> = pool.iter().copied().filter(|&p| !self.seats.iter().any(|s| s.design.name == PRESETS[p].name)).collect();
         let k = if free.is_empty() { pool[self.rng.below(pool.len())] } else { free[self.rng.below(free.len())] };
-        let design = Arc::new(enemy_colors(&preset(PRESETS[k].key)));
-        self.seats.push(BotSeat { name: format!("AI·{}", PRESETS[k].name), design, team: None, ship: None, kills: 0, deaths: 0, score: 0 });
+        let design = Arc::new(repaint(&preset(PRESETS[k].key), &mut self.rng));
+        let pid = crate::new_pid();
+        let taken: Vec<&str> = self.players.values().map(|p| p.name.as_str()).chain(self.seats.iter().map(|s| s.name.as_str())).collect();
+        let name = crate::names::pick(&mut self.rng, pid, &taken);
+        self.seats.push(BotSeat { pid, name, design, team: None, ship: None, kills: 0, deaths: 0, score: 0 });
         self.seats.len() - 1
     }
 
@@ -1260,7 +1290,7 @@ impl Game {
             p.deaths += counts as u32;
             p.ship = None;
             p.send(&ServerMsg::YourShip { id: None });
-            p.respawn_at = Some(self.tick + secs(4.0));
+            p.respawn_at = Some(self.tick + secs(RESPAWN_SECS));
         }
         let text = match (killer_name, fate) {
             (Some(k), Fate::Wrecked) => format!("{k} 击毁了 {}", victim.name),
@@ -1363,7 +1393,7 @@ impl Game {
         let bots = self.ships.values().filter(|s| s.is_bot).count() as u32;
         if bots + self.pending_bots < self.cfg.bots {
             self.pending_bots += 1;
-            let delay = if self.tick < secs(5.0) || bots == 0 { 1.5 } else { 5.0 };
+            let delay = if self.tick < secs(5.0) { 1.5 } else { RESPAWN_SECS };
             self.after(delay, Timer::SpawnBot);
         }
     }
@@ -1452,14 +1482,14 @@ impl Game {
                 let team = p.team.unwrap_or(1000 + pid);
                 ScoreRow { pid, name: p.name.clone(), kills: p.kills, deaths: p.deaths, score: p.score, alive: p.ship.is_some(), team }
             })
-            .chain(self.seats.iter().enumerate().map(|(i, s)| ScoreRow {
-                pid: BOT_PID_BASE + i as u16,
+            .chain(self.seats.iter().map(|s| ScoreRow {
+                pid: s.pid,
                 name: s.name.clone(),
                 kills: s.kills,
                 deaths: s.deaths,
                 score: s.score,
                 alive: s.ship.is_some(),
-                team: s.team.unwrap_or(BOT_PID_BASE + i as u16),
+                team: s.team.unwrap_or(1000 + s.pid),
             }))
             .collect();
         // by kills, then fewer deaths
@@ -1586,7 +1616,7 @@ pub fn duel(a: &Design, b: &Design, seed: u64, max_secs: f32) -> Duel {
 }
 
 fn spawn_msg(s: &Ship) -> ServerMsg {
-    ServerMsg::ShipSpawn { id: s.id, team: s.team, name: s.name.clone(), owner: s.owner, design: (*s.body.design).clone(), kin: s.kin }
+    ServerMsg::ShipSpawn { id: s.id, team: s.team, name: s.name.clone(), design: (*s.body.design).clone(), kin: s.kin }
 }
 
 
@@ -1890,7 +1920,7 @@ mod tests {
             let (out, _rx) = unbounded_channel();
             g.join(1, "观众".into(), None, None, out);
             for (i, ship) in ["bison", "scorpion", "rover", "bison"].iter().enumerate() {
-                g.add_seat(format!("AI{i}"), preset(ship), Some(1 + i as u16 % 2));
+                g.add_seat(crate::new_pid(), format!("AI{i}"), preset(ship), Some(1 + i as u16 % 2));
             }
             for _ in 0..secs(90.0) {
                 g.tick();

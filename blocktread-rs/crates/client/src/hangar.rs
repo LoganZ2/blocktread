@@ -45,9 +45,6 @@ pub enum Tool {
     Paint,
 }
 
-/// Paints: field olive and sand, greys, then markings (signal amber, rust, red, navy) and
-/// a light and a dark.
-const SWATCHES: [u32; 12] = [0x77805a, 0x3b4030, 0xa39a6b, 0xc9c1a0, 0x8d96a3, 0x4d5662, 0xd9822b, 0x9a5432, 0xb5432f, 0x4b6b8a, 0xe8e4d6, 0x22241e];
 const KEYS: [&str; 12] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="];
 
 /// The parts on the keys, in key order; the garage lists the rest after them in their sections.
@@ -502,7 +499,7 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
     commands.spawn((text(f, "悬停看名称 · 按住 Shift 看详情", 12.0, MUTED), ChildOf(left)));
     let paint = spawn_section(commands, f, left, "涂装|PAINT");
     let sw = commands.spawn((Node { display: Display::Grid, grid_template_columns: RepeatedGridTrack::flex(6, 1.0), column_gap: px(GAP_S), row_gap: px(GAP_S), ..default() }, ChildOf(paint))).id();
-    for c in SWATCHES {
+    for c in blocktread_shared::presets::PAINTS {
         commands.spawn((
             Button,
             Hovered::default(),

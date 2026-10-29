@@ -65,7 +65,6 @@ pub struct HillState {
 pub struct SlotInfo {
     pub name: String,
     pub team: u16,
-    pub bot: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,15 +100,6 @@ pub struct ScoreRow {
     pub team: u16,
 }
 
-/// Score rows for free-for-all bots use pids from here up (player pids are small).
-pub const BOT_PID_BASE: u16 = 0xF000;
-
-impl ScoreRow {
-    pub fn is_bot(&self) -> bool {
-        self.pid >= BOT_PID_BASE
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMsg {
     /// The game starts (or a spectator is let in): the client's simulation begins here.
@@ -117,8 +107,8 @@ pub enum ServerMsg {
     Reject { reason: String },
     /// The connection is accepted; this is the player's id.
     Connected { pid: u16 },
-    /// In the queue: how many are waiting for this mode, and seconds until AI fills the rest.
-    Queued { players: u32, fill_in: f32 },
+    /// In the queue: how many are waiting for this mode.
+    Queued { players: u32 },
     /// A match is made: its seats (`you` is this player's) and how long the ship pick lasts.
     MatchFound { mode: Mode, tier: Option<String>, you: u8, slots: Vec<SlotInfo>, pick_secs: f32 },
     /// A seat's ship during the pick, and whether it's locked in.
@@ -127,7 +117,7 @@ pub enum ServerMsg {
     MatchOver { winner: String, rows: Vec<ScoreRow> },
     /// Something to tell the player (a pick refused, say).
     Notice { text: String },
-    ShipSpawn { id: u16, team: u16, name: String, owner: Option<u16>, design: Design, kin: Kin },
+    ShipSpawn { id: u16, team: u16, name: String, design: Design, kin: Kin },
     /// Which ship this client controls (None while dead or spectating).
     YourShip { id: Option<u16> },
     ShipKilled { id: u16, killer: Option<u16> },

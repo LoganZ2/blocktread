@@ -268,19 +268,13 @@ fn spawn_seat(commands: &mut Commands, f: &UiFont, parent: Entity, p: &Pick, k: 
     commands.entity(card).insert((Node { padding: UiRect::new(px(16), px(12), px(10), px(10)), row_gap: px(2), ..btn_node(Kind::Card) }, Selected(viewing)));
     let stripe = if p.mode == Mode::Teams { team_color(slot.team) } else if you { ACCENT } else { LINE_HI };
     commands.spawn((Node { position_type: PositionType::Absolute, left: px(0), top: px(8), bottom: px(8), width: px(3), ..default() }, BackgroundColor(stripe), Pickable::IGNORE, ChildOf(card)));
-    let (label, c) = match (slot.bot, p.ready[k]) {
-        (true, _) => ("AI", MUTED),
-        (false, true) => ("已确认", OK),
-        (false, false) => ("选择中", WARN),
-    };
+    let (label, c) = if p.ready[k] { ("已确认", OK) } else { ("选择中", WARN) };
     let tag = commands.spawn((chip(f, label, c), Pickable::IGNORE, ChildOf(card))).id();
     commands.entity(tag).insert(Node { position_type: PositionType::Absolute, right: px(12), top: px(10), height: px(22), padding: UiRect::horizontal(px(8)), align_items: AlignItems::Center, ..default() });
     let line = match &p.ships[k] {
         Some(d) => {
             let a = blocktread_shared::analysis::analyze(d);
-            // an AI seat is already named after its vehicle
-            let ride = if slot.bot { String::new() } else { format!("{} · ", d.name) };
-            format!("{ride}造价 {} · {:.0} km/h · {:.0} DPS", cost_label(a.stats.cost), a.stats.max_speed * 3.6, a.stats.dps)
+            format!("{} · 造价 {} · {:.0} km/h · {:.0} DPS", d.name, cost_label(a.stats.cost), a.stats.max_speed * 3.6, a.stats.dps)
         }
         None => "还没选".into(),
     };
@@ -422,7 +416,7 @@ fn match_keys(keys: Res<ButtonInput<KeyCode>>, overlays: Res<Overlays>, mut moda
         }
         Stage::Picking => {
             if esc {
-                modal.show("退出对局？", "你的席位会交给 AI 驾驶。", vec![("取消", UiAction::CloseModal, Kind::Normal), ("退出", UiAction::LeaveFlight, Kind::Danger)], None);
+                modal.show("退出对局？", "退出后不能再回到这一局。", vec![("取消", UiAction::CloseModal, Kind::Normal), ("退出", UiAction::LeaveFlight, Kind::Danger)], None);
             }
             if enter {
                 w.write(UiAction::ConfirmPick);

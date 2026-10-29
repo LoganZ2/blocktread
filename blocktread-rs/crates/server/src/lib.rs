@@ -7,6 +7,7 @@
 mod conn;
 pub mod game;
 pub mod hub;
+mod names;
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -21,6 +22,19 @@ use blocktread_shared::protocol::{ClientMsg, InputPacket};
 
 pub use game::GameConfig;
 pub use hub::HubConfig;
+
+/// Ids for everyone in a game, players and AI alike, so an AI's id doesn't give it away. (They
+/// start at 100: tests make up small ones for their players.)
+static NEXT_PID: AtomicU16 = AtomicU16::new(100);
+
+pub(crate) fn new_pid() -> u16 {
+    loop {
+        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        if pid != 0 {
+            return pid;
+        }
+    }
+}
 
 pub enum NetEvent {
     /// A connection passed the handshake. `watch`: it came to spectate.
@@ -91,12 +105,11 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
                 }
             };
             let _ = ready_tx.send(ep.local_addr().map_err(Into::into));
-            let next_pid = Arc::new(AtomicU16::new(1));
             let mut poll = tokio::time::interval(Duration::from_millis(200));
             loop {
                 tokio::select! {
                     inc = ep.accept() => match inc {
-                        Some(inc) => { tokio::spawn(conn::handle(inc, net_tx.clone(), next_pid.clone())); }
+                        Some(inc) => { tokio::spawn(conn::handle(inc, net_tx.clone())); }
                         None => break,
                     },
                     _ = poll.tick() => if stop_net.load(Ordering::Relaxed) { break },

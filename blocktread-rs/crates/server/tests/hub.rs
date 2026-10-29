@@ -87,7 +87,9 @@ fn two_players_get_a_2v2_filled_with_ai_and_play_once_both_lock_in() {
     let (ya, slots) = found(&drain(&mut a)).expect("a match for the first player");
     let (yb, _) = found(&drain(&mut b)).expect("the same match for the second");
     assert_eq!(slots.len(), 4);
-    assert_eq!(slots.iter().filter(|s| s.bot).count(), 2, "AI takes the two empty seats");
+    let ai: Vec<&SlotInfo> = slots.iter().filter(|s| s.name != "甲" && s.name != "乙").collect();
+    assert_eq!(ai.len(), 2, "AI takes the two empty seats");
+    assert!(ai.iter().all(|s| !s.name.contains("AI")), "and they go by names like a player's: {ai:?}");
     // the two players are on opposite teams, two seats a side
     assert_ne!(slots[ya as usize].team, slots[yb as usize].team);
     for t in [1, 2] {
@@ -135,6 +137,7 @@ fn a_player_who_leaves_during_the_pick_is_replaced_by_ai() {
     let (_, slots) = found(&drain(&mut a)).unwrap();
     let k = slots.iter().position(|s| s.name == "乙").unwrap();
     h.handle(NetEvent::Leave { pid: 2 });
+    ticks(&mut h, 1);
     let m = drain(&mut a);
     assert!(m.iter().any(|m| matches!(m, ServerMsg::SlotPick { slot, design: Some(_), ready: true } if *slot as usize == k)), "{m:?}");
     // with everyone else set, a's lock-in starts the match
@@ -238,10 +241,10 @@ fn free_for_all_is_one_room_everyone_drives_into_without_ai() {
     assert_eq!(h.census().1, 1, "one room");
     ticks(&mut h, 15);
     let m = drain(&mut a);
-    assert_eq!(m.iter().filter(|m| matches!(m, ServerMsg::ShipSpawn { owner: Some(_), .. })).count(), 8, "everyone who came in");
+    assert_eq!(m.iter().filter(|m| matches!(m, ServerMsg::ShipSpawn { .. })).count(), 8, "everyone who came in");
     let (_, _, rows) = board(&m).unwrap();
     assert_eq!(rows.len(), 9);
-    assert!(!rows.iter().any(|r| r.is_bot()), "no AI: {rows:?}");
+    assert!(rows.iter().all(|r| (1..=9).contains(&r.pid)), "no AI: {rows:?}");
     assert!(board(&drain(&mut others[7])).is_some_and(|(_, _, rows)| rows.len() == 9), "the last one in sees the same room");
 
     // leaving leaves a gap (no AI takes over); the room closes with its last player
@@ -249,7 +252,7 @@ fn free_for_all_is_one_room_everyone_drives_into_without_ai() {
     ticks(&mut h, 15);
     let (_, _, rows) = board(&drain(&mut others[0])).unwrap();
     assert_eq!(rows.len(), 8);
-    assert!(!rows.iter().any(|r| r.is_bot()));
+    assert!(rows.iter().all(|r| (2..=9).contains(&r.pid)));
     for pid in 2..=9 {
         h.handle(NetEvent::Leave { pid });
     }
@@ -352,4 +355,73 @@ fn spectators_watch_the_room() {
     assert_eq!(m.iter().filter(|m| matches!(m, ServerMsg::ShipSpawn { .. })).count(), 1);
     assert_eq!(board(&m).map(|b| b.0), Some(Round::Waiting), "spectators don't start the clock");
     assert_eq!(h.census().1, 1);
+}
+
+#[test]
+fn ai_joins_the_queue_one_by_one_like_players_do() {
+    let mut h = hub(2.0, 60.0);
+    let mut a = connect(&mut h, 1, "甲");
+    msg(&mut h, 1, ClientMsg::Queue { mode: Mode::Teams, tier: None });
+    // the count goes up a driver at a time, a second or more apart, until the match is made
+    let mut counts = Vec::new();
+    let mut made = None;
+    for _ in 0..30 * 60 {
+        ticks(&mut h, 1);
+        let m = drain(&mut a);
+        counts.extend(m.iter().filter_map(|m| match m {
+            ServerMsg::Queued { players } => Some(*players),
+            _ => None,
+        }));
+        if let Some(f) = found(&m) {
+            made = Some(f);
+            break;
+        }
+    }
+    let (_, slots) = made.expect("a match once AI has filled the queue");
+    counts.dedup();
+    assert_eq!(counts, [1, 2, 3], "one more at a time: {counts:?}");
+    assert_eq!(slots.len(), 4);
+}
+
+#[test]
+fn ai_picks_at_a_players_pace() {
+    let mut h = hub(2.0, 60.0);
+    let mut a = connect(&mut h, 1, "甲");
+    msg(&mut h, 1, ClientMsg::Queue { mode: Mode::Teams, tier: None });
+    let mut t = 0;
+    while found(&drain(&mut a)).is_none() {
+        ticks(&mut h, 1);
+        t += 1;
+        assert!(t < 30 * 60);
+    }
+    ticks(&mut h, 1);
+    let m = drain(&mut a);
+    assert!(!m.iter().any(|m| matches!(m, ServerMsg::SlotPick { ready: true, .. })), "nobody locked in the moment the match was made: {m:?}");
+    // a few seconds on, every AI seat has shown its vehicle and locked it in
+    ticks(&mut h, 15 * 60);
+    let m = drain(&mut a);
+    assert_eq!(m.iter().filter(|m| matches!(m, ServerMsg::SlotPick { ready: true, .. })).count(), 3, "{m:?}");
+}
+
+#[test]
+fn a_player_who_leaves_mid_match_drives_on_under_their_name() {
+    let mut h = hub(0.0, 60.0);
+    let mut a = connect(&mut h, 1, "甲");
+    let _b = connect(&mut h, 2, "乙");
+    msg(&mut h, 1, ClientMsg::Queue { mode: Mode::Teams, tier: None });
+    msg(&mut h, 2, ClientMsg::Queue { mode: Mode::Teams, tier: None });
+    ticks(&mut h, 15);
+    for pid in [1, 2] {
+        msg(&mut h, pid, ClientMsg::Pick { design: preset("bison") });
+        msg(&mut h, pid, ClientMsg::Ready);
+    }
+    ticks(&mut h, 30);
+    drain(&mut a);
+    h.handle(NetEvent::Leave { pid: 2 });
+    ticks(&mut h, 30);
+    let m = drain(&mut a);
+    assert!(!m.iter().any(|m| matches!(m, ServerMsg::ShipRemoved { .. } | ServerMsg::ShipSpawn { .. })), "the same vehicle drives on: {m:?}");
+    assert!(!m.iter().any(|m| matches!(m, ServerMsg::Feed { text, .. } if text.contains("乙"))), "nobody is told: {m:?}");
+    let (_, _, rows) = board(&m).expect("scores");
+    assert!(rows.iter().any(|r| r.pid == 2 && r.name == "乙" && r.alive), "{rows:?}");
 }

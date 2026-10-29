@@ -28,7 +28,6 @@ pub struct CoreShip {
     pub id: u16,
     pub team: u16,
     pub name: String,
-    pub owner: Option<u16>,
     pub body: ShipBody,
     interp: Interp,
     pub shield_frac: f32,
@@ -135,9 +134,8 @@ pub enum ConnState {
 #[derive(Clone, Debug)]
 pub enum Phase {
     Idle,
-    /// `waited`: seconds in the queue; `players`: how many wait for this mode; `fill_in`: seconds
-    /// until AI fills the match.
-    Queued { mode: Mode, tier: Option<String>, waited: f32, players: u32, fill_in: f32 },
+    /// `waited`: seconds in the queue; `players`: how many wait for this mode.
+    Queued { mode: Mode, tier: Option<String>, waited: f32, players: u32 },
     Picking(Pick),
     Playing,
     /// The match ended: who won, and the final scoreboard.
@@ -263,7 +261,7 @@ impl ClientCore {
         }
         self.net.send(ClientMsg::Queue { mode, tier: tier.clone() });
         self.queued_for = Some((mode, tier.clone()));
-        self.phase = Phase::Queued { mode, tier, waited: 0.0, players: 1, fill_in: 0.0 };
+        self.phase = Phase::Queued { mode, tier, waited: 0.0, players: 1 };
     }
 
     pub fn unqueue(&mut self) {
@@ -368,10 +366,7 @@ impl ClientCore {
             }
         }
         match &mut self.phase {
-            Phase::Queued { waited, fill_in, .. } => {
-                *waited += dt;
-                *fill_in = (*fill_in - dt).max(0.0);
-            }
+            Phase::Queued { waited, .. } => *waited += dt,
             Phase::Picking(p) => p.left = (p.left - dt).max(0.0),
             _ => {}
         }
@@ -535,10 +530,9 @@ impl ClientCore {
                 self.pid = Some(pid);
                 self.state = ConnState::Lobby;
             }
-            ServerMsg::Queued { players, fill_in: f } => {
-                if let Phase::Queued { players: p, fill_in, .. } = &mut self.phase {
+            ServerMsg::Queued { players } => {
+                if let Phase::Queued { players: p, .. } = &mut self.phase {
                     *p = players;
-                    *fill_in = f;
                 }
             }
             ServerMsg::MatchFound { mode, tier, you, slots, pick_secs } => {
@@ -560,14 +554,14 @@ impl ClientCore {
                 self.phase = Phase::Over { winner, rows };
             }
             ServerMsg::Notice { text } => self.notice = Some(text),
-            ServerMsg::ShipSpawn { id, team, name, owner, design, kin } => {
+            ServerMsg::ShipSpawn { id, team, name, design, kin } => {
                 let body = ShipBody::new(Arc::new(design));
                 let mut interp = Interp::default();
                 interp.push(Sample { tick: self.clock.latest, pos: kin.pos, rot: kin.rot, vel: kin.vel, flags: 0, throttle: 0, aim: blocktread_shared::flight::quantize_aim(kin.pos + kin.fwd() * 100.0) });
                 let ws = WeaponState::new(&body);
                 self.ships.insert(
                     id,
-                    CoreShip { id, team, name, owner, body, interp, shield_frac: 1.0, firing: false, boosting: false, thrusting: false, cutting: false, flipping: false, jumping: false, overdrive_until: 0, throttle: 0.7, ws, cos_tick: 0, pos: kin.pos, rot: kin.rot, vel: kin.vel },
+                    CoreShip { id, team, name, body, interp, shield_frac: 1.0, firing: false, boosting: false, thrusting: false, cutting: false, flipping: false, jumping: false, overdrive_until: 0, throttle: 0.7, ws, cos_tick: 0, pos: kin.pos, rot: kin.rot, vel: kin.vel },
                 );
                 self.events.push(CoreEvent::ShipSpawned(id));
             }

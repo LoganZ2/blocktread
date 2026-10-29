@@ -31,7 +31,7 @@ fn every_type_has_a_name_and_round_trips() {
     }
     // the wire format carries the new types
     let d = with(preset("rover"), &[(0, -1, 1, BlockType::Capacitor), (0, 2, 3, BlockType::Lamp)]);
-    let msg = ServerMsg::ShipSpawn { id: 1, team: 0, name: "x".into(), owner: None, design: d.clone(), kin: Kin::new(Vec3::ZERO, Quat::IDENTITY, &stats(&d)) };
+    let msg = ServerMsg::ShipSpawn { id: 1, team: 0, name: "x".into(), design: d.clone(), kin: Kin::new(Vec3::ZERO, Quat::IDENTITY, &stats(&d)) };
     match decode::<ServerMsg>(&encode(&msg)).unwrap() {
         ServerMsg::ShipSpawn { design, .. } => assert_eq!(design, d),
         _ => panic!(),

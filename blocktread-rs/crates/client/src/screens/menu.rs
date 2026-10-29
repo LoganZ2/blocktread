@@ -237,9 +237,9 @@ fn refresh_play(
         set_enabled(&mut commands, b, !busy);
     }
     let desc = match mode {
-        Mode::Teams => "蓝红两队各 2 人，抢竞技场中央的高台：只有一方在台上时每秒得 1 分，击毁对手得 5 分，先到 100 分的队获胜。空位由 AI 补齐。",
+        Mode::Teams => "蓝红两队各 2 人，抢竞技场中央的高台：只有一方在台上时每秒得 1 分，击毁对手得 5 分，先到 100 分的队获胜。",
         Mode::Solo => "只有你自己：没有对手，不限时间，每次都是同一张沙漠地图。在本机运行，不连服务器。",
-        _ => "服务器上的混战房间，在封闭竞技场里打，随时进出，没有 AI，开着当前这辆车直接进场。场上有 2 人以上才开始计时，每局按击毁数排名。",
+        _ => "服务器上的混战房间，在封闭竞技场里打，随时进出，开着当前这辆车直接进场。场上有 2 人以上才开始计时，每局按击毁数排名。",
     };
     commands.spawn((para(f, desc, 12.0, MUTED), ChildOf(modes)));
 
@@ -275,7 +275,7 @@ fn refresh_play(
     let wb = spawn_btn(&mut commands, f, go, Kind::Normal, "观战", UiAction::Watch, Some("V"));
     commands.entity(wb).insert((
         Node { height: px(H_LG), padding: UiRect::horizontal(px(16)), ..btn_node(Kind::Normal) },
-        Tip("不驾驶，附身到其他玩家（或 AI）身上看他们打".into()),
+        Tip("不驾驶，附身到其他玩家身上看他们打".into()),
         TipDetail("混战房间里有人时看混战，没人时看正在打的 2v2；都没有的话在空房间里等人进来。\n← → 换一辆车，C 切换驾驶室视角。".into()),
     ));
     set_enabled(&mut commands, wb, !busy);
@@ -303,9 +303,9 @@ fn queue_line(session: Option<Res<Session>>, settings: Res<Settings>, mut line: 
     let want = match &s.core.phase {
         _ if mode_of(&settings.host_mode) == Mode::Solo => "正在启动试车场…".to_string(),
         _ if mode_of(&settings.host_mode) == Mode::Ffa => format!("正在进入自由混战 {}…", s.addr),
-        Phase::Queued { waited, players, fill_in, .. } => {
+        Phase::Queued { waited, players, .. } => {
             let t = format!("{}:{:02}", *waited as u32 / 60, *waited as u32 % 60);
-            if *fill_in > 0.5 { format!("正在匹配 {t} · 队列中 {players} 人 · {} 秒后 AI 补位", fill_in.ceil() as u32) } else { format!("正在匹配 {t} · 队列中 {players} 人 · 正在组建对局…") }
+            format!("正在匹配 {t} · 队列中 {players} 人")
         }
         _ => format!("正在连接 {}…", s.addr),
     };

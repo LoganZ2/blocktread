@@ -197,25 +197,26 @@ pub fn rover() -> Design {
     preset("rover")
 }
 
-/// Recolour a design in the red enemy scheme, keeping light/dark structure.
-pub fn enemy_colors(d: &Design) -> Design {
+/// The garage's paints: field olive and sand, greys, then markings (signal amber, rust, red,
+/// navy) and a light and a dark.
+pub const PAINTS: [u32; 12] = [0x77805a, 0x3b4030, 0xa39a6b, 0xc9c1a0, 0x8d96a3, 0x4d5662, 0xd9822b, 0x9a5432, 0xb5432f, 0x4b6b8a, 0xe8e4d6, 0x22241e];
+
+/// A design repainted the way a player might have: each colour on its paintable blocks swapped
+/// for a different garage paint.
+pub fn repaint(d: &Design, rng: &mut crate::rng::Rng) -> Design {
     let mut out = d.clone();
-    for b in &mut out.blocks {
-        let [r, g, bl] = crate::blocks::rgb_u8(b.color);
-        let (r, g, bl) = (r as f32 / 255.0, g as f32 / 255.0, bl as f32 / 255.0);
-        let mx = r.max(g).max(bl);
-        let mn = r.min(g).min(bl);
-        let l = (mx + mn) / 2.0;
-        let s = if mx == mn { 0.0 } else if l > 0.5 { (mx - mn) / (2.0 - mx - mn) } else { (mx - mn) / (mx + mn) };
-        b.color = if s > 0.45 && l > 0.3 {
-            0xff5a2e
-        } else if l > 0.62 {
-            0x9a2f38
-        } else if l > 0.38 {
-            0x5a3036
-        } else {
-            0x2a2c33
+    let mut map: Vec<(u32, u32)> = Vec::new();
+    let mut free: Vec<u32> = PAINTS.to_vec();
+    for b in out.blocks.iter_mut().filter(|b| b.ty.paintable()) {
+        let to = match map.iter().find(|m| m.0 == b.color) {
+            Some(m) => m.1,
+            None => {
+                let c = if free.is_empty() { PAINTS[rng.below(PAINTS.len())] } else { free.swap_remove(rng.below(free.len())) };
+                map.push((b.color, c));
+                c
+            }
         };
+        b.color = to;
     }
     out
 }

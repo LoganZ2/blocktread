@@ -126,11 +126,9 @@ impl Session {
     }
 }
 
-/// Ships a spectator can ride with, AI first (that is what spectating is for), then by id.
+/// Ships a spectator can ride with, by id.
 fn watch_order(core: &ClientCore) -> Vec<u16> {
-    let mut ids: Vec<(bool, u16)> = core.ships.values().map(|s| (s.owner.is_some(), s.id)).collect();
-    ids.sort();
-    ids.into_iter().map(|(_, id)| id).collect()
+    core.ships.keys().copied().collect()
 }
 
 /// Seconds the camera lingers on a watched ship's wreck.

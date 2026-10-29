@@ -560,21 +560,20 @@ pub fn update_hud(
                 let line = match (view, session.wreck) {
                     (Some(v), _) => {
                         let hull = v.body.hp_total() / v.body.max_hp * 100.0;
-                        let who = if v.owner.is_some() { "玩家" } else { "AI" };
                         match core.scores.iter().find(|r| r.name == v.name) {
-                            Some(r) => format!("{who} · 击毁 {} · 阵亡 {} · 车体 {hull:.0}%", r.kills, r.deaths),
-                            None => format!("{who} · 车体 {hull:.0}%"),
+                            Some(r) => format!("击毁 {} · 阵亡 {} · 车体 {hull:.0}%", r.kills, r.deaths),
+                            None => format!("车体 {hull:.0}%"),
                         }
                     }
                     (None, Some(_)) => "镜头马上切到击毁它的战车".into(),
-                    (None, None) => "场上还没有战车。AI 数量为 0 的服务器只能看玩家".into(),
+                    (None, None) => "场上还没有战车，等有人进来".into(),
                 };
                 set_text(kids, ent, line, None);
             }
             El::Info => {
                 let line = match core.mode {
                     Some(Mode::Solo) => "本机运行".into(),
-                    _ => format!("在线 {} 人 · 延迟 {:.0} ms", core.scores.iter().filter(|r| !r.is_bot()).count(), core.rtt() * 1000.0),
+                    _ => format!("在线 {} 人 · 延迟 {:.0} ms", core.scores.len(), core.rtt() * 1000.0),
                 };
                 set_text(kids, ent, line, None);
             }
@@ -1055,7 +1054,7 @@ pub fn spawn_score_table(commands: &mut Commands, f: &UiFont, parent: Entity, ro
         }
         for (i, r) in list.into_iter().enumerate() {
             let mine = Some(r.pid) == me;
-            let c = if mine { ACCENT } else if r.is_bot() { MUTED.mix(&INK, 0.45) } else { INK };
+            let c = if mine { ACCENT } else { INK };
             commands.spawn((tech(f, format!("{:02}", i + 1), 15.0, MUTED), ChildOf(grid)));
             commands.spawn((text(f, format!("{}{}", r.name, if r.alive { "" } else { "  · 阵亡中" }), 15.0, c), ChildOf(grid)));
             commands.spawn((tech(f, r.kills.to_string(), 16.0, c), num(), ChildOf(grid)));
