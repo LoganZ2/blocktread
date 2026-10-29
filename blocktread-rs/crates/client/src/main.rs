@@ -1,6 +1,7 @@
 // release builds on Windows open no console window behind the game
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod account;
 mod art;
 mod audio;
 mod display;
@@ -88,7 +89,7 @@ impl DevOpts {
 
 const USAGE: &str = "用法: blocktread-client [--name 名字] [--server 地址:端口|local]
 开发用: [--launch ffa|2v2|solo|watch] [--local] [--autopilot] [--latency 毫秒] [--screen lobby|error|hangar|settings]
-       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|overview|hillcam|ventcam|boom|gadgets|tip|revert|next|hover|hit|shieldhit|kill|nohud|serverlist:秒] [--frame-stats] [--port 端口] [--mute]";
+       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|overview|hillcam|ventcam|boom|gadgets|tip|revert|next|hover|hit|shieldhit|kill|nohud|serverlist|account:秒] [--frame-stats] [--port 端口] [--mute]";
 
 fn main() {
     let mut s = settings::load_settings();
@@ -151,7 +152,7 @@ fn main() {
         .add_systems(Update, boot.run_if(in_state(Screen::Boot)))
         .add_systems(Update, dev_shot)
         .add_systems(Last, exit_watchdog)
-        .add_plugins((ui::UiPlugin, hangar::HangarPlugin, flight::FlightPlugin, screens::ScreensPlugin, thumbs::ThumbsPlugin, display::DisplayPlugin, pacing::PacingPlugin, audio::MusicPlugin))
+        .add_plugins((ui::UiPlugin, account::AccountPlugin, hangar::HangarPlugin, flight::FlightPlugin, screens::ScreensPlugin, thumbs::ThumbsPlugin, display::DisplayPlugin, pacing::PacingPlugin, audio::MusicPlugin))
         .run();
 }
 

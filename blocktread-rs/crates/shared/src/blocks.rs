@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 #[repr(u8)]
 pub enum BlockType {
     Cockpit,
-    Wing,
     Engine,
     Hull,
     Armor,
@@ -15,14 +14,9 @@ pub enum BlockType {
     Missile,
     Reactor,
     Shield,
-    Gyro,
-    // added after the web version: new types only ever go at the end, the index is the wire and
-    // share-code format
     Frame,
     Lamp,
-    Fin,
     Thruster,
-    Rcs,
     Railgun,
     Flak,
     Capacitor,
@@ -85,15 +79,6 @@ pub struct TypeInfo {
     /// Engine thrust; engines need the cell behind them clear.
     #[serde(default)]
     pub thrust: f32,
-    /// Mass one (unburied) wing holds up.
-    #[serde(default)]
-    pub lift: f32,
-    /// Control torque on every axis, wherever the block sits (a gyro).
-    #[serde(default)]
-    pub gyro: f32,
-    /// Control torque per metre of lever arm from each axis (an attitude thruster).
-    #[serde(default)]
-    pub rcs: f32,
     #[serde(default)]
     pub energy_cap: f32,
     #[serde(default)]
@@ -296,9 +281,8 @@ fn one() -> u8 {
 }
 
 impl BlockType {
-    pub const ALL: [BlockType; 32] = [
+    pub const ALL: [BlockType; 28] = [
         BlockType::Cockpit,
-        BlockType::Wing,
         BlockType::Engine,
         BlockType::Hull,
         BlockType::Armor,
@@ -308,12 +292,9 @@ impl BlockType {
         BlockType::Missile,
         BlockType::Reactor,
         BlockType::Shield,
-        BlockType::Gyro,
         BlockType::Frame,
         BlockType::Lamp,
-        BlockType::Fin,
         BlockType::Thruster,
-        BlockType::Rcs,
         BlockType::Railgun,
         BlockType::Flak,
         BlockType::Capacitor,
@@ -338,6 +319,21 @@ impl BlockType {
     pub fn from_index(i: usize) -> Option<Self> {
         Self::ALL.get(i).copied()
     }
+
+    /// Its number in saved vehicles and share codes. It never changes, even when other types are
+    /// taken out (the gaps are the flying version's wing, gyro, fin and attitude thruster), so
+    /// codes from earlier builds still read the same.
+    pub fn code(self) -> u8 {
+        Self::CODES[self as usize]
+    }
+
+    /// The type saved under `code`; None for one taken out of the game.
+    pub fn from_code(code: usize) -> Option<Self> {
+        Self::CODES.iter().position(|&c| c as usize == code).map(|i| Self::ALL[i])
+    }
+
+    /// `code` of each type in `ALL`, in the same order.
+    const CODES: [u8; 28] = [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
 
     pub fn info(self) -> &'static TypeInfo {
         &crate::balance::balance().types[self as usize]
@@ -378,7 +374,7 @@ impl BlockType {
 
     /// New blocks of these types take the selected paint color instead of their default color.
     pub fn paintable(self) -> bool {
-        matches!(self, BlockType::Hull | BlockType::Armor | BlockType::Wing | BlockType::Frame | BlockType::Lamp | BlockType::Fin)
+        matches!(self, BlockType::Hull | BlockType::Armor | BlockType::Frame | BlockType::Lamp)
     }
 }
 

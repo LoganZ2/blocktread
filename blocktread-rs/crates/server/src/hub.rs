@@ -1,8 +1,10 @@
 //! The server's lobby: connections, a queue per mode (and budget tier), the matches they turn
 //! into, and the free-for-all room.
 //!
-//! 2v2: a player connects and queues. When a queue holds a full match, or its first player has
-//! waited `queue_wait`, a match is made: players get seats and AI takes the rest. Everyone picks
+//! 2v2: a player connects and queues. When a queue holds a full match, a match is made. Once its
+//! first player has waited `queue_wait`, AI drivers join the queue one by one, a few seconds
+//! apart, until it is full: players get seats and AI takes the rest. Nothing a client is told sets
+//! an AI apart from a player: its name, id, pick and its join are all a player's kind. Everyone picks
 //! a ship and sees the others' picks; once all have locked in, or the pick time is up, the match
 //! plays out in a `Game` of its own, the two sides fighting over the arena's hill, until one has
 //! the points to win or time runs out. Then everyone gets the results and is back in the lobby.
@@ -13,8 +15,14 @@
 //! room's `Game` runs its rounds (see `Game::rounds`).
 //!
 //! The test range is the same one-seat pick, into a game of its own with nobody else.
+//!
+//! Accounts (when the server keeps them, `HubConfig::accounts`): a connection may log in, and is
+//! a guest until it does. Matches pay coins and XP to the accounts in them; coins unlock parts,
+//! levels open the bigger budget tiers and 2v2. A guest is held to a newcomer's rules and earns
+//! nothing. The test range has no rules at all: anything can be tried there.
 
 use crate::game::{Game, GameConfig, SOLO_SEED};
+use crate::store::{Accounts, Done, Job, StoreThread};
 use crate::{NetEvent, Outgoing};
 use bytes::Bytes;
 use std::collections::{BTreeMap, HashMap};
@@ -22,6 +30,7 @@ use blocktread_shared::analysis::analyze;
 use blocktread_shared::arena::HILL_WIN;
 use blocktread_shared::balance::balance;
 use blocktread_shared::blocks::Design;
+use blocktread_shared::economy::{Showing, Unlocks, economy};
 use blocktread_shared::presets::{PRESETS, preset, rover};
 use blocktread_shared::protocol::*;
 use blocktread_shared::rng::Rng;
@@ -43,27 +52,27 @@ pub struct HubConfig {
     /// A 2v2 match's length (and a free-for-all round's), and the points that win a 2v2.
     pub match_secs: f32,
     pub win_points: u32,
+    /// Where accounts are kept; `Off` for a server with none (and no progression rules).
+    pub accounts: Accounts,
 }
 
 impl Default for HubConfig {
     fn default() -> Self {
-        HubConfig { queue_wait: 15.0, match_secs: 480.0, win_points: HILL_WIN }
+        HubConfig { queue_wait: 15.0, match_secs: 480.0, win_points: HILL_WIN, accounts: Accounts::Off }
     }
 }
+
+/// Failed logins a connection gets before it can't try again.
+const MAX_AUTH_FAILS: u8 = 5;
 
 type Out = tokio::sync::mpsc::UnboundedSender<Outgoing>;
 /// Who waits for what: (mode, tier) → (queued since, pid), oldest first.
 type Queues = HashMap<(Mode, Option<String>), Vec<(u32, u16)>>;
+/// AI drivers that have joined a queue so far, and the tick the next one joins.
+type Fills = HashMap<(Mode, Option<String>), (usize, u32)>;
 
 fn send(out: &Out, msg: &ServerMsg) {
     let _ = out.send(Outgoing::Reliable(Bytes::from(encode(msg))));
-}
-
-/// An AI seat's name, numbered when another seat already flies the same ship.
-fn ai_name(slots: &[Slot], ship: &str) -> String {
-    let base = format!("AI·{ship}");
-    let taken = |n: &str| slots.iter().any(|s| s.name == n);
-    (1..).map(|i| if i == 1 { base.clone() } else { format!("{base} {i}") }).find(|n| !taken(n)).unwrap()
 }
 
 fn secs(s: f32) -> u32 {
@@ -87,6 +96,22 @@ struct Conn {
     name: String,
     out: Out,
     at: Where,
+    /// The account it is logged in as: id and progress.
+    account: Option<(i64, Profile)>,
+    /// A login is being checked.
+    authing: bool,
+    auth_fails: u8,
+}
+
+impl Conn {
+    /// Progress to hold it to: the account's, or a newcomer's for a guest.
+    fn profile(&self) -> Profile {
+        self.account.map_or_else(Profile::default, |a| a.1)
+    }
+
+    fn level(&self) -> u32 {
+        economy().level(self.profile().xp).0
+    }
 }
 
 struct Slot {
@@ -94,8 +119,18 @@ struct Slot {
     team: u16,
     /// The player in this seat; None for AI (or a player who left before the start).
     pid: Option<u16>,
+    /// The AI in this seat, if it is one.
+    bot: Option<Bot>,
     design: Option<Design>,
     ready: bool,
+}
+
+/// An AI seat's pick, timed the way a player's goes: it shows its vehicle a few seconds in, and
+/// locks it in a few seconds later.
+struct Bot {
+    pid: u16,
+    shows_at: u32,
+    ready_at: u32,
 }
 
 enum Phase {
@@ -124,18 +159,32 @@ pub struct Hub {
     conns: BTreeMap<u16, Conn>,
     matches: BTreeMap<u32, Match>,
     next_match: u32,
+    fills: Fills,
     rng: Rng,
+    store: Option<StoreThread>,
+    /// When this hub started (seconds): with a match's id, a name for it no other run reuses.
+    boot: u64,
 }
 
 impl Hub {
-    pub fn new(cfg: HubConfig) -> Self {
+    /// Fails only if the accounts can't be opened.
+    pub fn new(cfg: HubConfig) -> anyhow::Result<Self> {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7);
-        Hub { cfg, tick: 0, conns: BTreeMap::new(), matches: BTreeMap::new(), next_match: 1, rng: Rng::new(seed) }
+        let store = StoreThread::start(&cfg.accounts)?;
+        Ok(Hub { cfg, tick: 0, conns: BTreeMap::new(), matches: BTreeMap::new(), next_match: 1, fills: Fills::new(), rng: Rng::new(seed), store, boot: seed / 1_000_000_000 })
     }
 
-    /// For the server log: connections, matches, players waiting.
-    pub fn census(&self) -> (usize, usize, usize) {
-        (self.conns.len(), self.matches.len(), self.conns.values().filter(|c| matches!(c.at, Where::Queued { .. })).count())
+    /// Whether progression rules apply here (a server that keeps accounts).
+    fn ranked(&self) -> bool {
+        self.store.is_some()
+    }
+
+    /// For the server log and status: connections busy (queued, in a match, watching), matches,
+    /// players waiting, and connections idle in the lobby (an account's quiet link, which a
+    /// restart only makes reconnect).
+    pub fn census(&self) -> (usize, usize, usize, usize) {
+        let idle = self.conns.values().filter(|c| c.at == Where::Idle).count();
+        (self.conns.len() - idle, self.matches.len(), self.conns.values().filter(|c| matches!(c.at, Where::Queued { .. })).count(), idle)
     }
 
     pub fn handle(&mut self, ev: NetEvent) {
@@ -146,7 +195,7 @@ impl Hub {
                     name = format!("车长{pid}");
                 }
                 send(&out, &ServerMsg::Connected { pid });
-                self.conns.insert(pid, Conn { name, out, at: Where::Idle });
+                self.conns.insert(pid, Conn { name, out, at: Where::Idle, account: None, authing: false, auth_fails: 0 });
                 if watch {
                     self.watch(pid);
                 }
@@ -162,6 +211,22 @@ impl Hub {
                 }
                 ClientMsg::Pick { design } => self.pick(pid, design),
                 ClientMsg::Ready => self.ready(pid),
+                ClientMsg::Auth(req) => self.auth(pid, req),
+                ClientMsg::Logout { token } => {
+                    if let Some(c) = self.conns.get_mut(&pid) {
+                        c.account = None;
+                    }
+                    if let Some(s) = &self.store {
+                        s.send(Job::Logout { token });
+                    }
+                }
+                ClientMsg::Unlock { block } => {
+                    let Some(c) = self.conns.get(&pid) else { return };
+                    match (&self.store, c.account) {
+                        (Some(s), Some((account, _))) => s.send(Job::Unlock { pid, account, block }),
+                        _ => send(&c.out, &ServerMsg::Notice { text: "登录以后才能解锁部件".into() }),
+                    }
+                }
                 // a spectator whose match ended watches the next one
                 ClientMsg::Watch { .. } if self.conns.get(&pid).is_some_and(|c| c.at == Where::Idle) => self.watch(pid),
                 _ => {}
@@ -177,22 +242,117 @@ impl Hub {
         }
     }
 
+    fn auth(&mut self, pid: u16, req: AuthReq) {
+        let Some(c) = self.conns.get_mut(&pid) else { return };
+        let Some(store) = &self.store else {
+            send(&c.out, &ServerMsg::AuthFailed { reason: "这台服务器不开放账号".into() });
+            return;
+        };
+        if c.authing {
+            return;
+        }
+        if c.auth_fails >= MAX_AUTH_FAILS {
+            send(&c.out, &ServerMsg::AuthFailed { reason: "失败次数太多，请重新连接后再试".into() });
+            return;
+        }
+        c.authing = true;
+        store.send(Job::Auth { pid, req });
+    }
+
+    /// What the store has finished: logins, purchases, rewards.
+    fn store_results(&mut self) {
+        let Some(store) = &self.store else { return };
+        for done in store.ready() {
+            match done {
+                Done::Auth { pid, result } => {
+                    let Some(c) = self.conns.get_mut(&pid) else { continue };
+                    c.authing = false;
+                    match result {
+                        Ok(s) => {
+                            c.account = Some((s.id, s.profile));
+                            c.name = s.user.clone();
+                            let user = s.user.to_lowercase();
+                            send(&c.out, &ServerMsg::Account { user: s.user, token: s.token, profile: s.profile });
+                            // a guest already going by the name (just signed up for) gives it up
+                            let guests: Vec<u16> = self.conns.iter().filter(|(_, c)| c.account.is_none() && c.name.to_lowercase() == user).map(|(&p, _)| p).collect();
+                            for g in guests {
+                                self.unclaim(g);
+                            }
+                        }
+                        Err(reason) => {
+                            c.auth_fails += 1;
+                            send(&c.out, &ServerMsg::AuthFailed { reason });
+                        }
+                    }
+                }
+                Done::Unlock { pid, account, result } => match result {
+                    Ok(p) => self.tell_account(account, p, None),
+                    Err(text) => {
+                        if let Some(c) = self.conns.get(&pid) {
+                            send(&c.out, &ServerMsg::Notice { text });
+                        }
+                    }
+                },
+                Done::Reward { account, reward, profile, level_up } => {
+                    self.tell_account(account, profile, Some(ServerMsg::Rewarded { coins: reward.coins, xp: reward.xp, level_up }));
+                }
+            }
+        }
+    }
+
+    /// An account's new progress, to every connection logged in as it (and `also` with it).
+    fn tell_account(&mut self, account: i64, p: Profile, also: Option<ServerMsg>) {
+        for c in self.conns.values_mut().filter(|c| c.account.is_some_and(|a| a.0 == account)) {
+            c.account = Some((account, p));
+            if let Some(m) = &also {
+                send(&c.out, m);
+            }
+            send(&c.out, &ServerMsg::Profile(p));
+        }
+    }
+
+    /// Pay the accounts among `showings` for game `game`.
+    fn pay(&self, game: String, showings: Vec<(u16, Showing)>) {
+        let Some(store) = &self.store else { return };
+        for (pid, showing) in showings {
+            if let Some((account, _)) = self.conns.get(&pid).and_then(|c| c.account) {
+                store.send(Job::Reward { account, game: game.clone(), showing });
+            }
+        }
+    }
+
     fn queue(&mut self, pid: u16, mode: Mode, tier: Option<String>) {
+        self.unclaim(pid);
         let now = self.tick;
+        let ranked = self.ranked();
         let Some(c) = self.conns.get_mut(&pid) else { return };
         if c.at != Where::Idle {
             return;
         }
-        // co-op waves aren't matched (yet): queue for free-for-all instead
-        let mode = if mode == Mode::Coop { Mode::Ffa } else { mode };
         // only 2v2 is matched by budget: the room and the test range take any vehicle
         let tier = tier.filter(|k| mode == Mode::Teams && balance().tier(k).is_some());
+        if ranked && mode == Mode::Teams {
+            let (e, level) = (economy(), c.level());
+            let refuse = if level < e.teams_level {
+                Some(format!("2v2 {} 级开放，你现在 {level} 级。先在自由混战里升级吧", e.teams_level))
+            } else if !e.tier_open(tier.as_deref(), level) {
+                let t = tier.as_deref().and_then(|k| balance().tier(k)).map_or("", |t| t.name.as_str());
+                Some(format!("{t}档 {} 级开放，你现在 {level} 级", e.tier_levels.get(tier.as_deref().unwrap_or("")).copied().unwrap_or(1)))
+            } else {
+                None
+            };
+            if let Some(reason) = refuse {
+                send(&c.out, &ServerMsg::QueueRefused { reason });
+                return;
+            }
+        }
         c.at = Where::Queued { mode, tier, since: now };
         self.queue_status();
     }
 
     pub fn tick(&mut self) {
         self.tick += 1;
+        self.store_results();
         if self.tick % 15 == 0 {
             self.matchmake();
         }
@@ -219,31 +379,87 @@ impl Hub {
         q
     }
 
+    /// Everyone queued hears how many wait with them, the AI drivers that joined counted in.
     fn queue_status(&self) {
-        for ((_, _), waiting) in self.queues() {
-            let fill_in = (self.cfg.queue_wait - (self.tick - waiting[0].0) as f32 / TICK_RATE as f32).max(0.0);
+        for (key, waiting) in self.queues() {
+            let bots = self.fills.get(&key).map_or(0, |f| f.0);
             for &(_, pid) in &waiting {
-                send(&self.conns[&pid].out, &ServerMsg::Queued { players: waiting.len() as u32, fill_in });
+                send(&self.conns[&pid].out, &ServerMsg::Queued { players: (waiting.len() + bots) as u32 });
             }
         }
     }
 
     fn matchmake(&mut self) {
         let wait = secs(self.cfg.queue_wait);
-        for ((mode, tier), mut waiting) in self.queues() {
+        let queues = self.queues();
+        // an emptied queue's AI drivers go with it
+        self.fills.retain(|k, _| queues.contains_key(k));
+        for ((mode, tier), mut waiting) in queues {
             let full = mode.slots();
+            let key = (mode, tier.clone());
             while waiting.len() >= full {
                 let rest = waiting.split_off(full);
                 self.make_match(mode, tier.clone(), waiting.iter().map(|w| w.1).collect());
                 waiting = rest;
             }
-            // nobody else came in time: AI fills the seats
-            if let Some(first) = waiting.first()
-                && self.tick - first.0 >= wait
-            {
-                self.make_match(mode, tier.clone(), waiting.iter().map(|w| w.1).collect());
+            let Some(first) = waiting.first() else {
+                self.fills.remove(&key);
+                continue;
+            };
+            if self.tick - first.0 < wait {
+                continue;
+            }
+            // nobody else came in time: AI drivers join one by one (all at once in local play)
+            let now = self.tick;
+            let gap = secs(self.rng.range(1.5, 4.5));
+            let fill = self.fills.entry(key.clone()).or_insert((0, now));
+            if now >= fill.1 {
+                fill.0 = if wait == 0 { full } else { fill.0 + 1 };
+                fill.1 = now + gap;
+                if waiting.len() + fill.0 >= full {
+                    self.fills.remove(&key);
+                    self.make_match(mode, tier.clone(), waiting.iter().map(|w| w.1).collect());
+                } else {
+                    self.queue_status();
+                }
             }
         }
+    }
+
+    /// A name for an AI driver no one in sight of it has, and no account goes by.
+    fn bot_name(&mut self, pid: u16, slots: &[Slot]) -> String {
+        let taken: Vec<&str> = slots.iter().map(|s| s.name.as_str()).chain(self.conns.values().map(|c| c.name.as_str())).collect();
+        let registered = self.store.as_ref().map(|s| s.names.clone());
+        crate::names::pick(&mut self.rng, pid, &|n| taken.contains(&n) || registered.as_ref().is_some_and(|r| r.has(n)))
+    }
+
+    /// Whether an account goes by `name`: then nobody but its owner may.
+    fn claimed(&self, name: &str) -> bool {
+        self.store.as_ref().is_some_and(|s| s.names.has(name))
+    }
+
+    /// A guest whose name an account goes by is renamed (and told why): nobody passes for a
+    /// registered player. Checked when the name is about to be seen (queueing, watching), by
+    /// when the owner's own client has logged in.
+    fn unclaim(&mut self, pid: u16) {
+        let Some(c) = self.conns.get(&pid) else { return };
+        if c.account.is_some() || !self.claimed(&c.name) {
+            return;
+        }
+        let was = c.name.clone();
+        let name = crate::names::fallback(pid, &|n| self.claimed(n) || self.conns.values().any(|c| c.name == n));
+        let c = self.conns.get_mut(&pid).unwrap();
+        c.name = name.clone();
+        send(&c.out, &ServerMsg::Notice { text: format!("「{was}」是别人注册的用户名，你现在显示为「{name}」。登录自己的账号，或者换个呼号") });
+    }
+
+    /// When an AI seat shows its pick and locks it in: a player's pace (at once in local play).
+    fn bot_pick(&mut self, pid: u16) -> Bot {
+        if self.cfg.queue_wait <= 0.0 {
+            return Bot { pid, shows_at: self.tick, ready_at: self.tick };
+        }
+        let shows_at = self.tick + secs(self.rng.range(1.5, 6.0));
+        Bot { pid, shows_at, ready_at: shows_at + secs(self.rng.range(1.5, 7.0)) }
     }
 
     /// A preset that fits the budget for an AI seat, a different one for each seat while they last.
@@ -264,15 +480,18 @@ impl Hub {
         let team_of = |i: usize| if mode == Mode::Teams { TEAMS[i % 2] } else { 100 + i as u16 };
         let mut slots: Vec<Slot> = Vec::with_capacity(n);
         for (i, &pid) in pids.iter().enumerate() {
-            slots.push(Slot { name: self.conns[&pid].name.clone(), team: team_of(i), pid: Some(pid), design: None, ready: false });
+            slots.push(Slot { name: self.conns[&pid].name.clone(), team: team_of(i), pid: Some(pid), bot: None, design: None, ready: false });
         }
         for i in pids.len()..n {
             let design = self.ai_ship(budget, &slots);
-            slots.push(Slot { name: ai_name(&slots, &design.name), team: team_of(i), pid: None, design: Some(design), ready: true });
+            let pid = crate::new_pid();
+            let name = self.bot_name(pid, &slots);
+            let bot = self.bot_pick(pid);
+            slots.push(Slot { name, team: team_of(i), pid: None, bot: Some(bot), design: Some(design), ready: false });
         }
-        // list each team together
+        // list each team together, players and AI mixed as they came
         slots.sort_by_key(|s| s.team);
-        let infos: Vec<SlotInfo> = slots.iter().map(|s| SlotInfo { name: s.name.clone(), team: s.team, bot: s.pid.is_none() }).collect();
+        let infos: Vec<SlotInfo> = slots.iter().map(|s| SlotInfo { name: s.name.clone(), team: s.team }).collect();
         for (k, s) in slots.iter().enumerate() {
             let Some(pid) = s.pid else { continue };
             let c = self.conns.get_mut(&pid).unwrap();
@@ -280,11 +499,29 @@ impl Hub {
             send(&c.out, &ServerMsg::MatchFound { mode, tier: tier.clone(), you: k as u8, slots: infos.clone(), pick_secs: PICK_SECS });
         }
         let m = Match { mode, tier, slots, watchers: Vec::new(), phase: Phase::Pick { until: self.tick + secs(PICK_SECS) } };
-        // the AI seats' ships are known from the start
-        for (k, s) in m.slots.iter().enumerate().filter(|(_, s)| s.pid.is_none()) {
-            self.tell(&m, &ServerMsg::SlotPick { slot: k as u8, design: s.design.clone(), ready: true });
-        }
         self.matches.insert(id, m);
+        self.bot_picks(id);
+    }
+
+    /// The AI seats of a match in its pick: each shows its vehicle, then locks it in, when its
+    /// time comes.
+    fn bot_picks(&mut self, id: u32) {
+        let now = self.tick;
+        let Some(m) = self.matches.get_mut(&id) else { return };
+        let mut said = Vec::new();
+        for (k, s) in m.slots.iter_mut().enumerate() {
+            let Some(b) = &s.bot else { continue };
+            if !s.ready && now >= b.ready_at {
+                s.ready = true;
+                said.push(ServerMsg::SlotPick { slot: k as u8, design: s.design.clone(), ready: true });
+            } else if now == b.shows_at {
+                said.push(ServerMsg::SlotPick { slot: k as u8, design: s.design.clone(), ready: false });
+            }
+        }
+        let m = &self.matches[&id];
+        for msg in said {
+            self.tell(m, &msg);
+        }
     }
 
     /// Send to everyone in a match during the pick (players and spectators).
@@ -312,8 +549,16 @@ impl Hub {
             return;
         }
         let a = analyze(&design);
-        let refuse = match (a.first_error(), m.budget()) {
+        // the progression rules (never on the test range): parts bought, and in the room a cost
+        // the player's level allows
+        let c = &self.conns[&pid];
+        let ranked = self.ranked() && m.mode != Mode::Solo;
+        let locked = if ranked { economy().locked(&design, Unlocks(c.profile().unlocks)) } else { Vec::new() };
+        let level_cap = if ranked && m.mode == Mode::Ffa { economy().budget_at(c.level()) } else { None };
+        let refuse = match (a.first_error(), m.budget().or(level_cap)) {
             (Some(e), _) => Some(format!("这辆没有通过出车检查：{}", e.msg)),
+            _ if !locked.is_empty() => Some(format!("这辆用了还没解锁的部件：{}", locked.iter().map(|t| t.info().name.as_str()).collect::<Vec<_>>().join("、"))),
+            (None, Some(b)) if a.stats.cost > b + 1e-3 && m.budget().is_none() => Some(format!("这辆造价 {:.0}，你的等级最多开造价 {b:.0} 的车", a.stats.cost)),
             (None, Some(b)) if a.stats.cost > b + 1e-3 => Some(format!("这辆造价 {:.0}，超出本局上限 {b:.0}", a.stats.cost)),
             _ => None,
         };
@@ -343,6 +588,7 @@ impl Hub {
     /// Watch the free-for-all room while anyone drives there, else a 2v2 being played, else the
     /// room (opened empty if need be: players who come in later show up).
     fn watch(&mut self, pid: u16) {
+        self.unclaim(pid);
         let playing = |mode: Mode, m: &Match| m.mode == mode && matches!(m.phase, Phase::Play(_)) && !m.slots.is_empty();
         let found = self.matches.iter().find(|(_, m)| playing(Mode::Ffa, m)).or_else(|| self.matches.iter().find(|(_, m)| playing(Mode::Teams, m))).map(|(&id, _)| id);
         let id = found.unwrap_or_else(|| self.room());
@@ -368,6 +614,12 @@ impl Hub {
             return;
         };
         match (m.mode, &mut m.phase) {
+            // a match goes on without them: AI drives on in their place, as them
+            (Mode::Teams, Phase::Play(g)) => {
+                g.hand_over(pid);
+                m.slots[k].pid = None;
+                return;
+            }
             // the test range is that one player's, and so is a way into the room: they go with them
             (Mode::Solo, _) | (Mode::Ffa, Phase::Pick { .. }) => {
                 self.matches.remove(&id);
@@ -381,25 +633,22 @@ impl Hub {
             }
             _ => {}
         }
-        // the seat stays filled: AI flies the ship that was picked (or would have been)
+        // during the pick: the seat stays filled, under their name, by AI that goes on with the
+        // pick (theirs, or one of its own)
         let budget = m.budget();
-        let slot = &mut m.slots[k];
+        let needs_ship = m.slots[k].design.is_none();
+        let bot = self.bot_pick(pid);
+        let design = if needs_ship { Some(self.ai_ship(budget, &[])) } else { None };
+        let slot = &mut self.matches.get_mut(&id).unwrap().slots[k];
         slot.pid = None;
-        slot.name = format!("AI·{}", slot.name);
-        slot.ready = true;
-        if let Phase::Play(g) = &mut m.phase {
-            g.leave(pid);
-            let design = slot.design.clone().unwrap_or_else(rover);
-            g.add_seat(slot.name.clone(), design, Some(slot.team));
-            return;
+        if !slot.ready {
+            slot.bot = Some(bot);
+        } else {
+            slot.bot = Some(Bot { pid, shows_at: 0, ready_at: 0 });
         }
-        if slot.design.is_none() {
-            let d = self.ai_ship(budget, &[]);
-            self.matches.get_mut(&id).unwrap().slots[k].design = Some(d);
+        if let Some(d) = design {
+            slot.design = Some(d);
         }
-        let m = &self.matches[&id];
-        let s = &m.slots[k];
-        self.tell(m, &ServerMsg::SlotPick { slot: k as u8, design: s.design.clone(), ready: true });
     }
 
     fn step_match(&mut self, id: u32) {
@@ -412,11 +661,20 @@ impl Hub {
         let now = self.tick;
         let Some(m) = self.matches.get_mut(&id) else { return };
         let all_in = m.slots.iter().all(|s| s.ready);
+        let mut paid = None;
         let next = match &mut m.phase {
             Phase::Pick { until } if all_in || now >= *until => Next::Start,
-            Phase::Pick { .. } => Next::Wait,
+            Phase::Pick { .. } => {
+                self.bot_picks(id);
+                Next::Wait
+            }
             Phase::Play(g) => {
                 g.tick();
+                // the room's rounds pay as each one ends
+                let (round, done) = g.take_results();
+                if !done.is_empty() {
+                    paid = Some((format!("{}-{id}-{round}", self.boot), done));
+                }
                 let best = g.points().values().copied().max().unwrap_or(0);
                 if !g.has_players() {
                     // everyone left: nobody to finish it for
@@ -428,6 +686,9 @@ impl Hub {
                 }
             }
         };
+        if let Some((game, showings)) = paid {
+            self.pay(game, showings);
+        }
         match next {
             Next::Wait => {}
             Next::Start => self.start(id),
@@ -457,7 +718,7 @@ impl Hub {
             let design = s.design.clone().unwrap_or_else(|| fallback(budget));
             match s.pid.and_then(|p| self.conns.get(&p).map(|c| (p, c))) {
                 Some((pid, c)) => game.join(pid, s.name.clone(), Some(design), Some(s.team), c.out.clone()),
-                None => game.add_seat(s.name.clone(), design, Some(s.team)),
+                None => game.add_seat(s.bot.as_ref().map_or_else(crate::new_pid, |b| b.pid), s.name.clone(), design, Some(s.team)),
             }
         }
         for pid in watchers {
@@ -494,7 +755,7 @@ impl Hub {
             let Some(c) = s.pid.and_then(|p| self.conns.get_mut(&p)) else { continue };
             c.at = Where::Match(room);
             g.join(s.pid.unwrap(), s.name.clone(), Some(s.design.unwrap_or_else(|| fallback(None))), None, c.out.clone());
-            m.slots.push(Slot { name: s.name, team: 0, pid: s.pid, design: None, ready: true });
+            m.slots.push(Slot { name: s.name, team: 0, pid: s.pid, bot: None, design: None, ready: true });
         }
     }
 
@@ -511,6 +772,14 @@ impl Hub {
             (_, [t]) => m.slots.iter().find(|s| s.team == *t).map_or("平局".to_string(), |s| format!("{} 获胜", s.name)),
         };
         g.broadcast(&ServerMsg::MatchOver { winner, rows: g.scores() });
+        // a 2v2 pays the players still in it at the end (one who left handed their seat to AI)
+        if m.mode == Mode::Teams {
+            let won = match leaders.as_slice() {
+                [t] => Some(*t),
+                _ => None,
+            };
+            self.pay(format!("{}-{id}", self.boot), g.showings(won));
+        }
         for pid in m.slots.iter().filter_map(|s| s.pid).chain(m.watchers.iter().copied()) {
             if let Some(c) = self.conns.get_mut(&pid) {
                 c.at = Where::Idle;

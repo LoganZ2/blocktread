@@ -126,11 +126,9 @@ impl Session {
     }
 }
 
-/// Ships a spectator can ride with, AI first (that is what spectating is for), then by id.
+/// Ships a spectator can ride with, by id.
 fn watch_order(core: &ClientCore) -> Vec<u16> {
-    let mut ids: Vec<(bool, u16)> = core.ships.values().map(|s| (s.owner.is_some(), s.id)).collect();
-    ids.sort();
-    ids.into_iter().map(|(_, id)| id).collect()
+    core.ships.keys().copied().collect()
 }
 
 /// Seconds the camera lingers on a watched ship's wreck.
@@ -161,7 +159,7 @@ impl Plugin for FlightPlugin {
             .add_systems(Update, step_core.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Menu | Screen::Match)).run_if(resource_exists::<Session>))
             .add_systems(
                 Update,
-                (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, aim_at, (exhaust::update_exhaust, fire::update_fire), fx::update_fx, env::orient_rocks, (arena::update_traps, arena::update_pads, arena::update_hill_light, gadgets::sync_mines, gadgets::sync_smoke), hud::update_hud, radar::update_radar_map, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum, grab_cursor, hud::dev_hide_hud)
+                (read_pilot, step_core, ships::apply_events, ships::sync_ships, targeting, spectate, camera_follow, aim_at, (exhaust::update_exhaust, fire::update_fire), fx::update_fx, (arena::update_traps, arena::update_pads, arena::update_hill_light, gadgets::sync_mines, gadgets::sync_smoke), hud::update_hud, radar::update_radar_map, hud::update_vignettes, hud::flight_overlays, flight_actions, engine_hum, grab_cursor, hud::dev_hide_hud)
                     .chain()
                     .run_if(in_state(Screen::Flight))
                     .run_if(resource_exists::<Session>),

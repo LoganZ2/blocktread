@@ -7,6 +7,8 @@
 mod conn;
 pub mod game;
 pub mod hub;
+mod names;
+pub mod store;
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -21,6 +23,19 @@ use blocktread_shared::protocol::{ClientMsg, InputPacket};
 
 pub use game::GameConfig;
 pub use hub::HubConfig;
+
+/// Ids for everyone in a game, players and AI alike, so an AI's id doesn't give it away. (They
+/// start at 100: tests make up small ones for their players.)
+static NEXT_PID: AtomicU16 = AtomicU16::new(100);
+
+pub(crate) fn new_pid() -> u16 {
+    loop {
+        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        if pid != 0 {
+            return pid;
+        }
+    }
+}
 
 pub enum NetEvent {
     /// A connection passed the handshake. `watch`: it came to spectate.
@@ -43,6 +58,9 @@ pub struct ServerConfig {
     pub verbose: bool,
     /// A JSON file kept up to date with who is online (for deploys: restart only when empty).
     pub status: Option<PathBuf>,
+    /// Where the server keeps what outlives a restart: its certificate (whose fingerprint clients
+    /// pin). None: a fresh certificate each run, kept nowhere (local play, tests).
+    pub data: Option<PathBuf>,
 }
 
 /// This build: the release tag CI builds it for (`BLOCKTREAD_BUILD`), else the crate version.
@@ -53,6 +71,8 @@ pub const BUILD: &str = match option_env!("BLOCKTREAD_BUILD") {
 
 pub struct ServerHandle {
     pub addr: SocketAddr,
+    /// Its certificate's fingerprint, for clients to pin.
+    pub fingerprint: String,
     stop: Arc<AtomicBool>,
 }
 
@@ -74,6 +94,11 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<SocketAddr>>();
     let stop_net = stop.clone();
     let bind = cfg.bind;
+    let identity = match &cfg.data {
+        Some(dir) => blocktread_net::Identity::load_or_create(dir)?,
+        None => blocktread_net::Identity::generate()?,
+    };
+    let fingerprint = identity.fingerprint();
     std::thread::Builder::new().name("blocktread-net".into()).spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
             Ok(rt) => rt,
@@ -83,7 +108,7 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
             }
         };
         rt.block_on(async move {
-            let ep = match blocktread_net::server_endpoint(bind) {
+            let ep = match blocktread_net::server_endpoint(bind, identity) {
                 Ok(ep) => ep,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
@@ -91,12 +116,11 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
                 }
             };
             let _ = ready_tx.send(ep.local_addr().map_err(Into::into));
-            let next_pid = Arc::new(AtomicU16::new(1));
             let mut poll = tokio::time::interval(Duration::from_millis(200));
             loop {
                 tokio::select! {
                     inc = ep.accept() => match inc {
-                        Some(inc) => { tokio::spawn(conn::handle(inc, net_tx.clone(), next_pid.clone())); }
+                        Some(inc) => { tokio::spawn(conn::handle(inc, net_tx.clone())); }
                         None => break,
                     },
                     _ = poll.tick() => if stop_net.load(Ordering::Relaxed) { break },
@@ -108,19 +132,22 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
     })?;
     let addr = ready_rx.recv()??;
     let stop_sim = stop.clone();
-    let hub_cfg = cfg.hub.clone();
+    // the hub first: if its accounts can't be opened, the server doesn't start
+    let hub = hub::Hub::new(cfg.hub.clone())?;
     let (verbose, status) = (cfg.verbose, cfg.status.clone());
-    std::thread::Builder::new().name("blocktread-sim".into()).spawn(move || run(hub_cfg, net_rx, stop_sim, verbose, status))?;
-    Ok(ServerHandle { addr, stop })
+    let fp = fingerprint.clone();
+    std::thread::Builder::new().name("blocktread-sim".into()).spawn(move || run(hub, net_rx, stop_sim, verbose, status, fp))?;
+    Ok(ServerHandle { addr, fingerprint, stop })
 }
 
-/// Write the status file: build, protocol, who is online. Written whole and renamed into place,
-/// so a reader never sees half of it.
-fn write_status(path: &std::path::Path, hub: &hub::Hub) {
-    let (conns, matches, queued) = hub.census();
+/// Write the status file: build, protocol, certificate fingerprint, who is online. Written whole
+/// and renamed into place, so a reader never sees half of it. `connections` counts those playing,
+/// queued or watching (deploys wait for it to be 0); `lobby` those idle between matches.
+fn write_status(path: &std::path::Path, hub: &hub::Hub, fingerprint: &str) {
+    let (conns, matches, queued, lobby) = hub.census();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let json = format!(
-        "{{\"build\":\"{BUILD}\",\"protocol\":{},\"connections\":{conns},\"matches\":{matches},\"queued\":{queued},\"updated\":{now}}}\n",
+        "{{\"build\":\"{BUILD}\",\"protocol\":{},\"fingerprint\":\"{fingerprint}\",\"connections\":{conns},\"matches\":{matches},\"queued\":{queued},\"lobby\":{lobby},\"updated\":{now}}}\n",
         blocktread_shared::PROTOCOL_VERSION
     );
     let tmp = path.with_extension("tmp");
@@ -130,8 +157,7 @@ fn write_status(path: &std::path::Path, hub: &hub::Hub) {
 }
 
 /// The 60 Hz loop: network events in, one hub tick (every match steps), sleep to the next tick.
-fn run(cfg: HubConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: bool, status: Option<PathBuf>) {
-    let mut hub = hub::Hub::new(cfg);
+fn run(mut hub: hub::Hub, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: bool, status: Option<PathBuf>, fingerprint: String) {
     let step = Duration::from_secs_f64(1.0 / TICK_RATE as f64);
     let mut next = Instant::now();
     let (mut worst, mut total, mut n) = (Duration::ZERO, Duration::ZERO, 0u32);
@@ -142,7 +168,7 @@ fn run(cfg: HubConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: b
         if let Some(p) = &status
             && status_at.elapsed() >= Duration::from_secs(5)
         {
-            write_status(p, &hub);
+            write_status(p, &hub, &fingerprint);
             status_at = Instant::now();
         }
         while let Ok(ev) = rx.try_recv() {
@@ -155,9 +181,9 @@ fn run(cfg: HubConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: b
         total += el;
         n += 1;
         if verbose && report.elapsed() > Duration::from_secs(10) {
-            let (conns, matches, queued) = hub.census();
+            let (conns, matches, queued, lobby) = hub.census();
             println!(
-                "[server] connections {conns} · matches {matches} · queued {queued} · tick avg {:.2} ms, worst {:.2} ms",
+                "[server] connections {conns} (+{lobby} in the lobby) · matches {matches} · queued {queued} · tick avg {:.2} ms, worst {:.2} ms",
                 total.as_secs_f64() * 1000.0 / n as f64,
                 worst.as_secs_f64() * 1000.0
             );

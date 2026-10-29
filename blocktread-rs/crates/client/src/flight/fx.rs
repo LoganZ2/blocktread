@@ -209,7 +209,6 @@ pub fn update_fx(
     let mut hits: Vec<(Vec3, bool)> = Vec::new();
     if let Some(s) = session.as_ref() {
         let core = &s.core;
-        let rock_t = core.rock_time();
         for (e, mut t, mut b) in q.p1().iter_mut() {
             b.life -= dt;
             let a = t.translation;
@@ -234,7 +233,7 @@ pub fn update_fx(
             }
             if !dead {
                 for r in &core.rocks {
-                    if r.hit_segment(a, nb, r.rotation(rock_t)).is_some() {
+                    if r.hit_segment(a, nb).is_some() {
                         hits.push((nb, b.splash));
                         dead = true;
                         break;

@@ -4,6 +4,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
+use blocktread_client_core::Target;
+use blocktread_net::{Pin, parse_pin};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use blocktread_shared::blocks::{Block, BlockType, Design};
 use blocktread_shared::presets::{PRESETS, preset};
@@ -13,6 +16,8 @@ use blocktread_shared::grid::in_grid;
 #[serde(default)]
 pub struct Settings {
     pub name: String,
+    /// The account logged in on each server (by its `Regions` key, or the `--server` address).
+    pub accounts: BTreeMap<String, SavedLogin>,
     /// The mode to queue for: "ffa" or "2v2".
     pub host_mode: String,
     /// Budget tier to queue in (`balance.ron` key); empty = no limit.
@@ -44,23 +49,23 @@ pub struct Settings {
     pub show_help: bool,
 }
 
+/// An account to log back in as: its name and session token (never the password).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SavedLogin {
+    pub user: String,
+    pub token: String,
+}
+
 impl Default for Settings {
     fn default() -> Self {
-        Settings { name: "车长".into(), host_mode: "ffa".into(), host_budget: String::new(), region: String::new(), invert_y: false, sound: true, volume: 0.8, music: 0.6, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true }
+        Settings { name: "车长".into(), accounts: BTreeMap::new(), host_mode: "ffa".into(), host_budget: String::new(), region: String::new(), invert_y: false, sound: true, volume: 0.8, music: 0.6, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true }
     }
 }
 
-/// The first time, it starts as a copy of what the game kept under its old name in ~/.voxwing
-/// (left in place for the flying version, which still reads it).
 fn dir() -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?);
     let d = home.join(".blocktread");
-    if !d.is_dir() {
-        std::fs::create_dir_all(&d).ok()?;
-        for f in ["settings.json", FLEET_FILE, "servers.json"] {
-            let _ = std::fs::copy(home.join(".voxwing").join(f), d.join(f));
-        }
-    }
+    std::fs::create_dir_all(&d).ok()?;
     Some(d)
 }
 
@@ -85,11 +90,20 @@ pub struct Region {
     pub name: String,
     pub code: String,
     pub addr: String,
+    /// The fingerprint of its certificate: with one, only that server is accepted at `addr`.
+    pub pin: Option<Pin>,
+}
+
+impl Region {
+    pub fn target(&self) -> Target {
+        Target { addr: self.addr.clone(), pin: self.pin }
+    }
 }
 
 /// The built-in servers (`deploy/servers.json` lists the same machines for CI): key, name, code,
-/// address.
-const BUILT_IN: &[(&str, &str, &str, &str)] = &[("na", "北美", "NA", "99.246.198.62:4433"), ("asia", "亚洲", "ASIA", "38.92.8.110:4433")];
+/// address, and certificate fingerprint (`blocktread-server --data ~/blocktread-server/data
+/// --fingerprint` on that machine, or the deploy log; empty until the server keeps a certificate).
+const BUILT_IN: &[(&str, &str, &str, &str, &str)] = &[("na", "北美", "NA", "99.246.198.62:4433", ""), ("asia", "亚洲", "ASIA", "38.92.8.110:4433", "")];
 
 /// The servers on offer: the built-in ones, as changed or added to by `~/.blocktread/servers.json`.
 #[derive(Resource, Clone, Debug)]
@@ -103,10 +117,11 @@ struct RegionFile {
     addr: Option<String>,
     name: Option<String>,
     code: Option<String>,
+    fingerprint: Option<String>,
 }
 
 fn built_in() -> Vec<Region> {
-    BUILT_IN.iter().map(|&(key, name, code, addr)| Region { key: key.into(), name: name.into(), code: code.into(), addr: addr.into() }).collect()
+    BUILT_IN.iter().map(|&(key, name, code, addr, fp)| Region { key: key.into(), name: name.into(), code: code.into(), addr: addr.into(), pin: parse_pin(fp) }).collect()
 }
 
 pub fn load_regions() -> Regions {
@@ -126,8 +141,19 @@ fn regions_from(text: &str) -> Result<Vec<Region>, String> {
     let entries: Vec<RegionFile> = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let mut list = built_in();
     for e in entries {
+        let pin = match e.fingerprint.as_deref() {
+            Some(fp) => Some(parse_pin(fp).ok_or_else(|| format!("「{}」的 fingerprint 不是 64 位十六进制", e.key))?),
+            None => None,
+        };
         match list.iter_mut().find(|r| r.key == e.key) {
             Some(r) => {
+                // a new address is another machine: the built-in fingerprint is not its
+                if e.addr.is_some() {
+                    r.pin = None;
+                }
+                if pin.is_some() {
+                    r.pin = pin;
+                }
                 if let Some(a) = e.addr {
                     r.addr = a;
                 }
@@ -139,7 +165,7 @@ fn regions_from(text: &str) -> Result<Vec<Region>, String> {
                 }
             }
             None => match e.addr {
-                Some(addr) => list.push(Region { name: e.name.unwrap_or_else(|| e.key.clone()), code: e.code.unwrap_or_else(|| e.key.to_uppercase()), key: e.key, addr }),
+                Some(addr) => list.push(Region { name: e.name.unwrap_or_else(|| e.key.clone()), code: e.code.unwrap_or_else(|| e.key.to_uppercase()), key: e.key, addr, pin }),
                 None => eprintln!("servers.json：新服务器「{}」没有 addr，跳过", e.key),
             },
         }
@@ -169,7 +195,7 @@ struct Packed {
 }
 
 fn pack(d: &Design) -> Packed {
-    Packed { n: d.name.clone(), b: d.blocks.iter().map(|b| (b.x as i32, b.y as i32, b.z as i32, b.ty.index(), b.color)).collect() }
+    Packed { n: d.name.clone(), b: d.blocks.iter().map(|b| (b.x as i32, b.y as i32, b.z as i32, b.ty.code() as usize, b.color)).collect() }
 }
 
 fn unpack(p: Packed) -> Design {
@@ -177,7 +203,7 @@ fn unpack(p: Packed) -> Design {
         .b
         .into_iter()
         .filter_map(|(x, y, z, t, c)| {
-            let ty = BlockType::from_index(t)?;
+            let ty = BlockType::from_code(t)?;
             in_grid(blocktread_shared::glam::IVec3::new(x, y, z)).then(|| Block::new(x, y, z, ty, Some(c)))
         })
         .collect();
@@ -185,7 +211,6 @@ fn unpack(p: Packed) -> Design {
 }
 
 /// Your vehicles in the order the garage shows them, and which one is selected (`vehicles.json`).
-/// The flight version's planes stay in `ships.json`, untouched.
 #[derive(Clone, Debug)]
 pub struct Fleet {
     pub ships: Vec<Design>,
@@ -216,8 +241,7 @@ pub fn save_fleet(f: &Fleet) {
     write(FLEET_FILE, &FleetFile { current: f.current, ships: f.ships.iter().map(pack).collect() });
 }
 
-/// Share codes: `BT1.` and the design as base64 JSON. (The flight version's `VW1.` codes hold
-/// planes, which can't drive.)
+/// Share codes: `BT1.` and the design as base64 JSON.
 const SHARE: &str = "BT1.";
 
 pub fn encode_share(d: &Design) -> String {
@@ -226,9 +250,6 @@ pub fn encode_share(d: &Design) -> String {
 
 pub fn decode_share(code: &str) -> Result<Design, String> {
     let s: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    if s.starts_with("VW1.") {
-        return Err("这是飞机版的分享码，飞机开不了".into());
-    }
     let body = s.strip_prefix(SHARE).ok_or(format!("分享码应该以 {SHARE} 开头"))?;
     let bytes = B64.decode(body).map_err(|_| "分享码不完整")?;
     let p: Packed = serde_json::from_slice(&bytes).map_err(|_| "分享码内容无法识别")?;
@@ -255,5 +276,13 @@ mod tests {
         // a new server without an address is left out; a broken file is an error
         assert_eq!(regions_from(r#"[{"key": "x"}]"#).unwrap().len(), BUILT_IN.len());
         assert!(regions_from("{ not json").is_err());
+    }
+
+    #[test]
+    fn servers_json_can_pin_a_certificate() {
+        let fp = "ab".repeat(32);
+        let list = regions_from(&format!(r#"[{{"key": "lab", "addr": "127.0.0.1:4499", "fingerprint": "{fp}"}}]"#)).unwrap();
+        assert_eq!(list.iter().find(|r| r.key == "lab").unwrap().pin, Some([0xab; 32]));
+        assert!(regions_from(r#"[{"key": "lab", "addr": "127.0.0.1:4499", "fingerprint": "nope"}]"#).is_err(), "a broken fingerprint is an error, not no pin");
     }
 }

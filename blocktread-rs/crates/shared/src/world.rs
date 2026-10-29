@@ -1,17 +1,17 @@
 use crate::TICK_RATE;
 use crate::rng::Rng;
 use crate::terrain::{self, Terrain};
-use glam::{EulerRot, Quat, Vec3};
+use glam::Vec3;
 
-/// Where co-op players enter (the ground under it decides the height).
-pub const PLAYER_SPAWN: Vec3 = Vec3::new(0.0, 0.0, 300.0);
+/// Where the test range starts, and where a vehicle enters when nowhere else is clear (the ground
+/// under it decides the height). No boulder lies near it.
+pub const SPAWN: Vec3 = Vec3::new(0.0, 0.0, 300.0);
 
-/// A rock. Both sides generate the same field from the seed the server announces. Its shape is
+/// A boulder. Both sides generate the same field from the seed the server announces. Its shape is
 /// the rendered mesh itself (`rock_radius` stretched by `scale`, times `size`), so collisions
-/// happen exactly where the rock is drawn. (Rocks still carry a spin from the space version;
-/// boulders on the ground keep it at zero.)
+/// happen exactly where the rock is drawn.
 #[derive(Clone, Debug)]
-pub struct Asteroid {
+pub struct Rock {
     pub pos: Vec3,
     /// Bounding radius: no part of the rock reaches further from its centre.
     pub r: f32,
@@ -19,12 +19,11 @@ pub struct Asteroid {
     pub size: f32,
     pub scale: Vec3,
     pub shape_seed: f32,
-    pub spin: Vec3,
     pub tint: u8,
 }
 
 /// Boulders sunk into the ground: a few big ones to hide behind, the rest scattered cover.
-pub fn generate_boulders(seed: u64, ground: &Terrain) -> Vec<Asteroid> {
+pub fn generate_boulders(seed: u64, ground: &Terrain) -> Vec<Rock> {
     let mut rng = Rng::new(seed);
     let mut out = Vec::new();
     for i in 0..44 {
@@ -33,12 +32,12 @@ pub fn generate_boulders(seed: u64, ground: &Terrain) -> Vec<Asteroid> {
             let lim = terrain::HALF * 0.82;
             let (x, z) = (rng.range(-lim, lim), rng.range(-lim, lim));
             let p = Vec3::new(x, 0.0, z);
-            if p.distance(PLAYER_SPAWN) >= 40.0 && out.iter().all(|a: &Asteroid| a.pos.with_y(0.0).distance(p) > a.r + size * 1.5) {
+            if p.distance(SPAWN) >= 40.0 && out.iter().all(|a: &Rock| a.pos.with_y(0.0).distance(p) > a.r + size * 1.5) {
                 break p.with_y(ground.height(x, z) - size * 0.25);
             }
         };
         let scale = Vec3::new(rng.range(0.85, 1.35), rng.range(0.55, 0.9), rng.range(0.85, 1.35));
-        out.push(Asteroid { pos, r: size * scale.max_element() * ROCK_RADIUS_MAX, size, scale, shape_seed: i as f32 * 7.31, spin: Vec3::ZERO, tint: (i % 3) as u8 });
+        out.push(Rock { pos, r: size * scale.max_element() * ROCK_RADIUS_MAX, size, scale, shape_seed: i as f32 * 7.31, tint: (i % 3) as u8 });
     }
     out
 }
@@ -74,7 +73,7 @@ pub fn fbm3(mut p: Vec3, octaves: u32) -> f32 {
     v
 }
 
-/// Radial displacement for asteroid vertex direction `d` (unit vector).
+/// Radial displacement for rock vertex direction `d` (unit vector).
 pub fn rock_radius(d: Vec3, seed: f32) -> f32 {
     0.68 + fbm3(d * 1.8 + Vec3::new(seed, 0.0, 0.0), 4) * 0.6 + fbm3(d * 5.0 + Vec3::new(seed, 0.0, 0.0), 4) * 0.18
 }
@@ -82,25 +81,18 @@ pub fn rock_radius(d: Vec3, seed: f32) -> f32 {
 /// Upper bound of `rock_radius` (the fbm terms stay below 15/16 of their weight).
 pub const ROCK_RADIUS_MAX: f32 = 1.42;
 
-/// Seconds of server time at `tick`, the clock asteroids turn by.
+/// Seconds of server time at `tick`, the clock the arena's saws and vents run on.
 pub fn tick_time(tick: u32) -> f64 {
     tick as f64 / TICK_RATE as f64
 }
 
-impl Asteroid {
-    /// Orientation at `t` seconds of server time.
-    pub fn rotation(&self, t: f64) -> Quat {
-        // wrap in f64 so the angle stays exact however long the server runs
-        let angle = |w: f32| ((w as f64 * t) % std::f64::consts::TAU) as f32;
-        Quat::from_euler(EulerRot::XYZ, angle(self.spin.x), angle(self.spin.y), 0.0)
-    }
-
+impl Rock {
     /// Signed distance from `p` to the surface (negative inside, roughly in metres) and the
-    /// outward normal there, for the rock turned to `rot`.
-    pub fn surface(&self, p: Vec3, rot: Quat) -> (f32, Vec3) {
+    /// outward normal there.
+    pub fn surface(&self, p: Vec3) -> (f32, Vec3) {
         // into the unit mesh's space, then undo the per-axis stretch: there the surface is
         // simply `rock_radius` along each direction
-        let local = rot.inverse() * (p - self.pos) / self.size;
+        let local = (p - self.pos) / self.size;
         let q = local / self.scale;
         let len = q.length();
         if len < 1e-4 {
@@ -111,12 +103,12 @@ impl Asteroid {
         // metres per unit of `q` along this direction
         let stretch = (d * self.scale).length() * self.size;
         // the stretched ellipsoid's normal; the fine bumps only tilt it slightly
-        let n = rot * (q / self.scale).normalize_or(d);
+        let n = (q / self.scale).normalize_or(d);
         (gap * stretch, n)
     }
 
     /// Where the segment `a`→`b` first enters the rock, as a fraction along it.
-    pub fn hit_segment(&self, a: Vec3, b: Vec3, rot: Quat) -> Option<f32> {
+    pub fn hit_segment(&self, a: Vec3, b: Vec3) -> Option<f32> {
         let ab = b - a;
         let l2 = ab.length_squared();
         let closest = if l2 > 0.0 { ((self.pos - a).dot(ab) / l2).clamp(0.0, 1.0) } else { 0.0 };
@@ -125,6 +117,6 @@ impl Asteroid {
         }
         // march the true surface in steps of under a metre
         let steps = (l2.sqrt() / 0.75).ceil().clamp(1.0, 48.0) as u32;
-        (0..=steps).map(|i| i as f32 / steps as f32).find(|&f| self.surface(a + ab * f, rot).0 < 0.0)
+        (0..=steps).map(|i| i as f32 / steps as f32).find(|&f| self.surface(a + ab * f).0 < 0.0)
     }
 }

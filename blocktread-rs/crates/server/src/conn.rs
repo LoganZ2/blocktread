@@ -2,21 +2,19 @@ use crate::{NetEvent, Outgoing};
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use crossbeam_channel::Sender;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use blocktread_net::{read_frame, write_frame};
 use blocktread_shared::PROTOCOL_VERSION;
 use blocktread_shared::protocol::{ClientMsg, InputPacket, ServerMsg, decode, encode, hello_version};
 
-pub async fn handle(inc: quinn::Incoming, tx: Sender<NetEvent>, next_pid: Arc<AtomicU16>) {
+pub async fn handle(inc: quinn::Incoming, tx: Sender<NetEvent>) {
     let remote = inc.remote_address();
-    if let Err(e) = handle_inner(inc, tx, next_pid).await {
+    if let Err(e) = handle_inner(inc, tx).await {
         eprintln!("[server] connection {remote} ended: {e:#}");
     }
 }
 
-async fn handle_inner(inc: quinn::Incoming, tx: Sender<NetEvent>, next_pid: Arc<AtomicU16>) -> Result<()> {
+async fn handle_inner(inc: quinn::Incoming, tx: Sender<NetEvent>) -> Result<()> {
     let conn = inc.await?;
     let (mut send, mut recv) = match tokio::time::timeout(Duration::from_secs(5), conn.accept_bi()).await? {
         Ok(streams) => streams,
@@ -48,7 +46,7 @@ async fn handle_inner(inc: quinn::Incoming, tx: Sender<NetEvent>, next_pid: Arc<
         tokio::time::sleep(Duration::from_millis(300)).await;
         return Ok(());
     }
-    let pid = next_pid.fetch_add(1, Ordering::Relaxed);
+    let pid = crate::new_pid();
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Outgoing>();
     tx.send(NetEvent::Connect { pid, name, watch, out: out_tx })?;
     println!("[server] {} {pid} joined from {}", if watch { "spectator" } else { "player" }, conn.remote_address());

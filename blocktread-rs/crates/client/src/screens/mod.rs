@@ -49,12 +49,13 @@ impl Plugin for ScreensPlugin {
 #[derive(Resource, Default)]
 pub struct Overlays {
     pub settings: bool,
+    pub account: bool,
 }
 
 impl Overlays {
     /// True when something modal covers the screen and screens should ignore their hotkeys.
     pub fn any(&self, modal: &ModalReq) -> bool {
-        self.settings || modal.open()
+        self.settings || self.account || modal.open()
     }
 }
 

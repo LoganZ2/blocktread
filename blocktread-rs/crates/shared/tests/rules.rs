@@ -123,12 +123,12 @@ fn driving_and_weapons_are_deterministic() {
 fn protocol_roundtrip() {
     let d = preset("rhino");
     let body = ShipBody::new(Arc::new(d.clone()));
-    let msg = ServerMsg::ShipSpawn { id: 3, team: 1, name: "敌方·犀牛".into(), owner: None, design: d.clone(), kin: Kin::new(Vec3::ONE, Quat::IDENTITY, &body.stats) };
+    let msg = ServerMsg::ShipSpawn { id: 3, team: 1, name: "犀牛".into(), design: d.clone(), kin: Kin::new(Vec3::ONE, Quat::IDENTITY, &body.stats) };
     let bytes = encode(&msg);
     match decode::<ServerMsg>(&bytes).unwrap() {
         ServerMsg::ShipSpawn { design, name, .. } => {
             assert_eq!(design, d);
-            assert_eq!(name, "敌方·犀牛");
+            assert_eq!(name, "犀牛");
         }
         _ => panic!(),
     }
@@ -166,7 +166,7 @@ fn spectators_join_with_their_own_message() {
 fn hit_confirms_come_last_so_older_clients_skip_them() {
     // postcard numbers enum variants in order: the messages an older client knows keep theirs,
     // and the new one carries a number it has never seen, which its decode turns down
-    let scores = ServerMsg::Scores { rows: vec![], wave: 0, enemies: 0, limit: 0, left: 0.0, round: Round::None, hill: None };
+    let scores = ServerMsg::Scores { rows: vec![], limit: 0, left: 0.0, round: Round::None, hill: None };
     assert_eq!(encode(&scores)[0], 20);
     let hit = encode(&ServerMsg::HitConfirm { target: 7, shield: true });
     assert_eq!(hit[0], 21);

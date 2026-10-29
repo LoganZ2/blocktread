@@ -9,12 +9,11 @@ use glam::{Quat, Vec3};
 use std::collections::VecDeque;
 use blocktread_shared::DT;
 use blocktread_shared::drive::step_drive;
-use blocktread_shared::flight::{InputCmd, Kin, collide_asteroids};
-use blocktread_shared::world::tick_time;
+use blocktread_shared::flight::{InputCmd, Kin, collide_rocks};
 use blocktread_shared::ship::ShipBody;
 use blocktread_shared::terrain::Terrain;
 use blocktread_shared::weapons::{Shot, WeaponState, step_weapons};
-use blocktread_shared::world::Asteroid;
+use blocktread_shared::world::Rock;
 
 /// Inputs should reach the server this many ticks before it needs them (jitter buffer).
 pub const TARGET_LEAD: f32 = 3.0;
@@ -86,10 +85,10 @@ impl Predictor {
         n
     }
 
-    pub fn step(&mut self, cmd: InputCmd, body: &ShipBody, ground: &Terrain, rocks: &[Asteroid], shots: &mut Vec<Shot>) {
+    pub fn step(&mut self, cmd: InputCmd, body: &ShipBody, ground: &Terrain, rocks: &[Rock], shots: &mut Vec<Shot>) {
         self.prev = self.kin;
         step_drive(&mut self.kin, body, &cmd, ground, DT);
-        collide_asteroids(&mut self.kin, body, rocks, tick_time(cmd.tick));
+        collide_rocks(&mut self.kin, body, rocks);
         step_weapons(&mut self.kin, body, &mut self.ws, &cmd, DT, cmd.tick, false, shots);
         self.frames.push_back(Frame { tick: cmd.tick, cmd, kin: self.kin, ws: self.ws.clone() });
         while self.frames.len() > HISTORY {
@@ -119,7 +118,7 @@ impl Predictor {
         self.lead_ema
     }
 
-    pub fn reconcile(&mut self, server_tick: u32, server: &Kin, body: &ShipBody, ground: &Terrain, rocks: &[Asteroid]) {
+    pub fn reconcile(&mut self, server_tick: u32, server: &Kin, body: &ShipBody, ground: &Terrain, rocks: &[Rock]) {
         let Some(idx) = self.frames.iter().position(|f| f.tick == server_tick) else { return };
         let f = &self.frames[idx];
         let err = f.kin.pos.distance(server.pos);
@@ -138,7 +137,7 @@ impl Predictor {
             for j in idx + 1..self.frames.len() {
                 let cmd = self.frames[j].cmd;
                 step_drive(&mut kin, body, &cmd, ground, DT);
-                collide_asteroids(&mut kin, body, rocks, tick_time(cmd.tick));
+                collide_rocks(&mut kin, body, rocks);
                 step_weapons(&mut kin, body, &mut ws, &cmd, DT, cmd.tick, false, &mut scratch);
                 self.frames[j].kin = kin;
                 self.frames[j].ws = ws.clone();

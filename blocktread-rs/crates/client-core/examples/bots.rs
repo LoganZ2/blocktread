@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
         Some(s) => s,
         None => {
             let hub = HubConfig { queue_wait: 2.0, match_secs, ..HubConfig::default() };
-            let h = start(ServerConfig { bind: "127.0.0.1:0".parse()?, hub, verbose: true, status: None })?;
+            let h = start(ServerConfig { bind: "127.0.0.1:0".parse()?, hub, verbose: true, status: None, data: None })?;
             let addr = h.addr.to_string();
             _handle = h;
             addr
@@ -129,7 +129,7 @@ fn lobby(core: &mut ClientCore, i: usize, mode: Mode, over: &mut u32) {
         Phase::Idle => core.queue(mode, None),
         Phase::Picking(p) if !p.ready[p.you] => {
             if p.ships[p.you].is_none() {
-                println!("bot{i} matched: seat {} of {} · {}", p.you, p.slots.len(), p.slots.iter().map(|s| format!("{}{}", s.name, if s.bot { "(AI)" } else { "" })).collect::<Vec<_>>().join(", "));
+                println!("bot{i} matched: seat {} of {} · {}", p.you, p.slots.len(), p.slots.iter().map(|s| s.name.clone()).collect::<Vec<_>>().join(", "));
                 core.pick(preset(PRESETS[i % PRESETS.len()].key));
             } else {
                 core.ready();

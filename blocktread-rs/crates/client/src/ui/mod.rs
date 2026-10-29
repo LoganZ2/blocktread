@@ -209,6 +209,14 @@ pub enum UiAction {
     ViewSlot(Option<usize>),
     /// After the results: queue again (or watch the next match).
     PlayAgain,
+    // accounts
+    OpenAccount,
+    CloseAccount,
+    Login,
+    Register,
+    Logout,
+    /// Spend coins on this part.
+    Unlock(BlockType),
     // flight
     Resume,
     /// Leave the match (and the server) for the lobby.

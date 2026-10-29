@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 use blocktread_shared::drive::{spawn_height, step_drive};
-use blocktread_shared::flight::{InputCmd, Kin, collide_asteroids, look_rotation};
+use blocktread_shared::flight::{InputCmd, Kin, collide_rocks, look_rotation};
 use blocktread_shared::glam::Vec3;
 use blocktread_shared::presets::rover;
 use blocktread_shared::ship::ShipBody;
 use blocktread_shared::terrain::Terrain;
-use blocktread_shared::world::{generate_boulders, rock_radius, tick_time};
+use blocktread_shared::world::{generate_boulders, rock_radius};
 use blocktread_shared::DT;
 
 /// Directions spread evenly over the sphere (golden spiral).
@@ -23,15 +23,14 @@ fn directions(n: usize) -> impl Iterator<Item = Vec3> {
 #[test]
 fn surface_matches_rendered_mesh() {
     for a in generate_boulders(42, &Terrain::generate(42)).iter().take(16) {
-        let rot = a.rotation(tick_time(123_456));
         for d in directions(300) {
             // the vertex exactly where the renderer puts it: unit direction pushed out by
-            // rock_radius, stretched by scale, then the entity's size and rotation
-            let v = a.pos + rot * (d * rock_radius(d, a.shape_seed) * a.scale * a.size);
-            let (dist, n) = a.surface(v, rot);
+            // rock_radius, stretched by scale, then the entity's size
+            let v = a.pos + (d * rock_radius(d, a.shape_seed) * a.scale * a.size);
+            let (dist, n) = a.surface(v);
             assert!(dist.abs() < 1e-3 * a.size, "vertex off the surface by {dist}");
-            assert!(a.surface(v + n, rot).0 > 0.0, "a metre out along the normal should be outside");
-            assert!(a.surface(v - n, rot).0 < 0.0, "a metre in along the normal should be inside");
+            assert!(a.surface(v + n).0 > 0.0, "a metre out along the normal should be outside");
+            assert!(a.surface(v - n).0 < 0.0, "a metre in along the normal should be inside");
             assert!(v.distance(a.pos) <= a.r, "bounding radius {} too small for {}", a.r, v.distance(a.pos));
         }
     }
@@ -55,11 +54,9 @@ fn vehicles_stop_at_the_drawn_surface() {
             for tick in start..start + 360 {
                 let cmd = InputCmd { tick, drive: 127, ..Default::default() };
                 step_drive(&mut k, &body, &cmd, &ground, DT);
-                let t = tick_time(tick);
-                collide_asteroids(&mut k, &body, std::slice::from_ref(a), t);
-                let r = a.rotation(t);
+                collide_rocks(&mut k, &body, std::slice::from_ref(a));
                 for i in 0..body.alive.len() {
-                    deepest = deepest.min(a.surface(body.world(k.pos, k.rot, i), r).0);
+                    deepest = deepest.min(a.surface(body.world(k.pos, k.rot, i)).0);
                 }
             }
             assert!(k.pos.distance(a.pos) > a.r * 0.4, "vehicle ended up inside rock {ai} from direction {di}");

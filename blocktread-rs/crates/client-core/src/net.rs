@@ -6,6 +6,7 @@
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use blocktread_net::Target;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -34,7 +35,7 @@ pub struct NetClient {
 
 impl NetClient {
     /// Start connecting in the background. Failures arrive as `NetIn::Closed`.
-    pub fn connect(addr: String, hello: ClientMsg, latency: Duration) -> NetClient {
+    pub fn connect(server: Target, hello: ClientMsg, latency: Duration) -> NetClient {
         let (in_tx, in_rx) = unbounded();
         let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
         let rtt_us = Arc::new(AtomicU32::new(0));
@@ -50,7 +51,7 @@ impl NetClient {
                         return;
                     }
                 };
-                let res = rt.block_on(run(addr, hello, in_tx, out_rx, rtt, latency));
+                let res = rt.block_on(run(server, hello, in_tx, out_rx, rtt, latency));
                 let reason = match res {
                     Ok(()) => "连接已关闭".to_string(),
                     Err(e) => friendly(&e),
@@ -97,15 +98,16 @@ struct Delay<T> {
 }
 
 async fn run(
-    addr: String,
+    server: Target,
     hello: ClientMsg,
     in_tx: Sender<NetIn>,
     mut out_rx: tokio::sync::mpsc::UnboundedReceiver<NetOut>,
     rtt: Arc<AtomicU32>,
     latency: Duration,
 ) -> Result<()> {
+    let addr = &server.addr;
     let target = tokio::net::lookup_host(addr.as_str()).await.with_context(|| format!("无法解析地址 {addr}"))?.next().ok_or_else(|| anyhow!("无法解析地址 {addr}"))?;
-    let ep = blocktread_net::client_endpoint(target)?;
+    let ep = blocktread_net::client_endpoint(target, server.pin)?;
     let conn = tokio::time::timeout(Duration::from_secs(5), ep.connect(target, "blocktread")?).await.context("timed out")??;
     let (mut send, mut recv) = conn.open_bi().await?;
     write_frame(&mut send, &encode(&hello)).await?;

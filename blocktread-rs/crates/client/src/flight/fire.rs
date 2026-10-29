@@ -268,7 +268,7 @@ pub fn update_fire(
     let mut shapes = Shapes::default();
 
     if let Some(arena) = &session.core.terrain.arena {
-        let t = session.core.rock_time();
+        let t = session.core.arena_time();
         let states: Vec<(f32, f32)> = arena.vents.iter().map(|v| vent_state(v.into(t))).collect();
         for (k, v) in arena.vents.iter().enumerate() {
             shapes.plate(v.area, GRATE_Y, [1.0, states[k].1], [0.0, k as f32 * 1.7]);

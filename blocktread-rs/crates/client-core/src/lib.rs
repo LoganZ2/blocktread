@@ -11,6 +11,7 @@ use glam::{Quat, Vec3};
 use interp::{Interp, Sample, ServerClock};
 use net::{NetClient, NetIn};
 use predict::{Predictor, TARGET_LEAD};
+pub use blocktread_net::Target;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,14 +22,13 @@ use blocktread_shared::protocol::*;
 use blocktread_shared::ship::ShipBody;
 use blocktread_shared::weapons::{MISSILE_ACCEL, MISSILE_TOP, Shot, WeaponState, missile_ahead, step_weapons};
 use blocktread_shared::terrain::{Map, Terrain};
-use blocktread_shared::world::{Asteroid, generate_boulders, tick_time};
+use blocktread_shared::world::{Rock, generate_boulders, tick_time};
 use blocktread_shared::{DT, PROTOCOL_VERSION, SNAPSHOT_INTERVAL, TICK_RATE};
 
 pub struct CoreShip {
     pub id: u16,
     pub team: u16,
     pub name: String,
-    pub owner: Option<u16>,
     pub body: ShipBody,
     interp: Interp,
     pub shield_frac: f32,
@@ -135,9 +135,8 @@ pub enum ConnState {
 #[derive(Clone, Debug)]
 pub enum Phase {
     Idle,
-    /// `waited`: seconds in the queue; `players`: how many wait for this mode; `fill_in`: seconds
-    /// until AI fills the match.
-    Queued { mode: Mode, tier: Option<String>, waited: f32, players: u32, fill_in: f32 },
+    /// `waited`: seconds in the queue; `players`: how many wait for this mode.
+    Queued { mode: Mode, tier: Option<String>, waited: f32, players: u32 },
     Picking(Pick),
     Playing,
     /// The match ended: who won, and the final scoreboard.
@@ -175,18 +174,28 @@ pub struct ClientCore {
     pub queued_for: Option<(Mode, Option<String>)>,
     /// A message from the server to show (a pick refused, say); the screen takes it.
     pub notice: Option<String>,
+    /// The queue was turned down, and why (the phase is back to idle); the screen takes it.
+    pub refused: Option<String>,
+    /// Logged in: the account's name and progress (None: a guest).
+    pub account: Option<(String, Profile)>,
+    /// A login came through with this token: the screen saves it (and takes it).
+    pub new_token: Option<String>,
+    /// A login failed, and why; the screen takes it.
+    pub auth_error: Option<String>,
+    /// A login is on its way.
+    pub authing: bool,
+    /// What the last match paid: coins, XP, and the level reached if it went up.
+    pub reward: Option<(u32, u32, Option<u32>)>,
     pub pid: Option<u16>,
     pub mode: Option<Mode>,
     pub my_ship: Option<u16>,
     pub ships: BTreeMap<u16, CoreShip>,
     pub missiles: BTreeMap<u16, MissileView>,
     pub terrain: Arc<Terrain>,
-    pub rocks: Vec<Asteroid>,
+    pub rocks: Vec<Rock>,
     pub clock: ServerClock,
     pub pred: Option<Predictor>,
     pub scores: Vec<ScoreRow>,
-    pub wave: u32,
-    pub enemies: u32,
     /// Kills that win the match (0 = none) and seconds left on its clock (0 = no clock).
     pub limit: u32,
     pub left: f32,
@@ -208,23 +217,30 @@ pub struct ClientCore {
 
 impl ClientCore {
     /// Connect to play: then `queue`, `pick` and `ready` take the player into a match.
-    pub fn connect(addr: &str, name: &str, latency: Duration) -> Self {
-        Self::start(addr, ClientMsg::Hello { version: PROTOCOL_VERSION, name: name.to_string(), balance: blocktread_shared::balance::hash() }, latency)
+    /// Join `server` (an address, or an address and the certificate it must show).
+    pub fn connect(server: impl Into<Target>, name: &str, latency: Duration) -> Self {
+        Self::start(server.into(), ClientMsg::Hello { version: PROTOCOL_VERSION, name: name.to_string(), balance: blocktread_shared::balance::hash() }, latency)
     }
 
     /// Join to watch instead of fly.
-    pub fn watch(addr: &str, name: &str, latency: Duration) -> Self {
-        Self::start(addr, ClientMsg::Watch { version: PROTOCOL_VERSION, name: name.to_string(), balance: blocktread_shared::balance::hash() }, latency)
+    pub fn watch(server: impl Into<Target>, name: &str, latency: Duration) -> Self {
+        Self::start(server.into(), ClientMsg::Watch { version: PROTOCOL_VERSION, name: name.to_string(), balance: blocktread_shared::balance::hash() }, latency)
     }
 
-    fn start(addr: &str, hello: ClientMsg, latency: Duration) -> Self {
+    fn start(server: Target, hello: ClientMsg, latency: Duration) -> Self {
         ClientCore {
             watching: matches!(hello, ClientMsg::Watch { .. }),
-            net: NetClient::connect(addr.to_string(), hello, latency),
+            net: NetClient::connect(server, hello, latency),
             state: ConnState::Connecting,
             phase: Phase::Idle,
             queued_for: None,
             notice: None,
+            refused: None,
+            account: None,
+            new_token: None,
+            auth_error: None,
+            authing: false,
+            reward: None,
             pid: None,
             mode: None,
             my_ship: None,
@@ -235,8 +251,6 @@ impl ClientCore {
             clock: ServerClock::default(),
             pred: None,
             scores: Vec::new(),
-            wave: 0,
-            enemies: 0,
             limit: 0,
             left: 0.0,
             round: Round::None,
@@ -261,13 +275,31 @@ impl ClientCore {
     }
 
     /// Look for a match. Ignored unless idle (or reading the last match's results).
+    /// Sign up, log in, or come back with a token (`account` or `auth_error` follows).
+    pub fn auth(&mut self, req: AuthReq) {
+        self.authing = true;
+        self.auth_error = None;
+        self.net.send(ClientMsg::Auth(req));
+    }
+
+    /// Log out: the token stops working, and this connection is a guest's again.
+    pub fn logout(&mut self, token: String) {
+        self.net.send(ClientMsg::Logout { token });
+        self.account = None;
+    }
+
+    /// Buy a part (the profile comes back with it, or a notice says why not).
+    pub fn unlock(&mut self, block: blocktread_shared::blocks::BlockType) {
+        self.net.send(ClientMsg::Unlock { block });
+    }
+
     pub fn queue(&mut self, mode: Mode, tier: Option<String>) {
         if !matches!(self.phase, Phase::Idle | Phase::Over { .. }) || self.watching {
             return;
         }
         self.net.send(ClientMsg::Queue { mode, tier: tier.clone() });
         self.queued_for = Some((mode, tier.clone()));
-        self.phase = Phase::Queued { mode, tier, waited: 0.0, players: 1, fill_in: 0.0 };
+        self.phase = Phase::Queued { mode, tier, waited: 0.0, players: 1 };
     }
 
     pub fn unqueue(&mut self) {
@@ -344,10 +376,10 @@ impl ClientCore {
         s.overdrive_until.saturating_sub(self.clock.latest) as f32 / TICK_RATE as f32
     }
 
-    /// Server time (seconds) to turn the asteroids to when drawing them: the predicted tick while
-    /// flying, so the rocks sit exactly where the predicted ship collides with them; the
-    /// interpolated time otherwise.
-    pub fn rock_time(&self) -> f64 {
+    /// Server time (seconds) to draw the arena's saws and vents at: the predicted tick while
+    /// driving, so they sit exactly where the predicted vehicle meets them; the interpolated time
+    /// otherwise.
+    pub fn arena_time(&self) -> f64 {
         match &self.pred {
             Some(p) => tick_time(p.tick),
             None => self.clock.render_tick() / TICK_RATE as f64,
@@ -372,10 +404,7 @@ impl ClientCore {
             }
         }
         match &mut self.phase {
-            Phase::Queued { waited, fill_in, .. } => {
-                *waited += dt;
-                *fill_in = (*fill_in - dt).max(0.0);
-            }
+            Phase::Queued { waited, .. } => *waited += dt,
             Phase::Picking(p) => p.left = (p.left - dt).max(0.0),
             _ => {}
         }
@@ -522,13 +551,34 @@ impl ClientCore {
 
     fn on_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::Welcome { pid, tick, mode, asteroid_seed, map } => {
+            ServerMsg::Account { user, token, profile } => {
+                self.account = Some((user, profile));
+                self.new_token = Some(token);
+                self.authing = false;
+            }
+            ServerMsg::AuthFailed { reason } => {
+                self.auth_error = Some(reason);
+                self.authing = false;
+            }
+            ServerMsg::Profile(p) => {
+                if let Some(a) = &mut self.account {
+                    a.1 = p;
+                }
+            }
+            ServerMsg::Rewarded { coins, xp, level_up } => self.reward = Some((coins, xp, level_up)),
+            ServerMsg::QueueRefused { reason } => {
+                if matches!(self.phase, Phase::Queued { .. }) {
+                    self.phase = Phase::Idle;
+                }
+                self.refused = Some(reason);
+            }
+            ServerMsg::Welcome { pid, tick, mode, seed, map } => {
                 self.reset_world();
                 self.pid = Some(pid);
                 self.mode = Some(mode);
-                self.terrain = Arc::new(Terrain::for_map(map, asteroid_seed));
+                self.terrain = Arc::new(Terrain::for_map(map, seed));
                 self.pads = vec![0; self.terrain.arena.as_ref().map_or(0, |a| a.pads.len())];
-                self.rocks = if map == Map::Desert { generate_boulders(asteroid_seed, &self.terrain) } else { Vec::new() };
+                self.rocks = if map == Map::Desert { generate_boulders(seed, &self.terrain) } else { Vec::new() };
                 self.clock.sync(tick);
                 self.state = ConnState::InGame;
                 self.phase = Phase::Playing;
@@ -539,10 +589,9 @@ impl ClientCore {
                 self.pid = Some(pid);
                 self.state = ConnState::Lobby;
             }
-            ServerMsg::Queued { players, fill_in: f } => {
-                if let Phase::Queued { players: p, fill_in, .. } = &mut self.phase {
+            ServerMsg::Queued { players } => {
+                if let Phase::Queued { players: p, .. } = &mut self.phase {
                     *p = players;
-                    *fill_in = f;
                 }
             }
             ServerMsg::MatchFound { mode, tier, you, slots, pick_secs } => {
@@ -564,14 +613,14 @@ impl ClientCore {
                 self.phase = Phase::Over { winner, rows };
             }
             ServerMsg::Notice { text } => self.notice = Some(text),
-            ServerMsg::ShipSpawn { id, team, name, owner, design, kin } => {
+            ServerMsg::ShipSpawn { id, team, name, design, kin } => {
                 let body = ShipBody::new(Arc::new(design));
                 let mut interp = Interp::default();
                 interp.push(Sample { tick: self.clock.latest, pos: kin.pos, rot: kin.rot, vel: kin.vel, flags: 0, throttle: 0, aim: blocktread_shared::flight::quantize_aim(kin.pos + kin.fwd() * 100.0) });
                 let ws = WeaponState::new(&body);
                 self.ships.insert(
                     id,
-                    CoreShip { id, team, name, owner, body, interp, shield_frac: 1.0, firing: false, boosting: false, thrusting: false, cutting: false, flipping: false, jumping: false, overdrive_until: 0, throttle: 0.7, ws, cos_tick: 0, pos: kin.pos, rot: kin.rot, vel: kin.vel },
+                    CoreShip { id, team, name, body, interp, shield_frac: 1.0, firing: false, boosting: false, thrusting: false, cutting: false, flipping: false, jumping: false, overdrive_until: 0, throttle: 0.7, ws, cos_tick: 0, pos: kin.pos, rot: kin.rot, vel: kin.vel },
                 );
                 self.events.push(CoreEvent::ShipSpawned(id));
             }
@@ -652,11 +701,9 @@ impl ClientCore {
                 self.clouds.push(c);
                 self.events.push(CoreEvent::Smoke(c));
             }
-            ServerMsg::Scores { rows, wave, enemies, limit, left, round, hill } => {
+            ServerMsg::Scores { rows, limit, left, round, hill } => {
                 self.hill = hill;
                 self.scores = rows;
-                self.wave = wave;
-                self.enemies = enemies;
                 self.limit = limit;
                 self.left = left;
                 self.round = round;

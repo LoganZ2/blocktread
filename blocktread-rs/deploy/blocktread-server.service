@@ -8,7 +8,7 @@ Wants=network-online.target
 [Service]
 # extra server flags (e.g. ARGS=--queue-wait 30), optional
 EnvironmentFile=-%h/blocktread-server/args.env
-ExecStart=%h/blocktread-server/current --bind 0.0.0.0 --port 4433 --status %h/blocktread-server/status.json $ARGS
+ExecStart=%h/blocktread-server/current --bind 0.0.0.0 --port 4433 --status %h/blocktread-server/status.json --data %h/blocktread-server/data $ARGS
 Restart=on-failure
 RestartSec=3
 

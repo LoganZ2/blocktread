@@ -3,6 +3,7 @@
 //! here; when the server finds a match the vehicle pick takes over.
 
 use super::Overlays;
+use crate::account::{Lobby, link_target, saved_token};
 use super::carousel::Carousel;
 use crate::flight::Session;
 use crate::hangar::Hangar;
@@ -17,9 +18,10 @@ use bevy::text::{EditableText, LetterSpacing};
 use std::time::Duration;
 use super::entry::{Pings, RegionPing, region};
 use super::matching::straight_in;
-use blocktread_client_core::{ClientCore, ConnState, Phase};
+use blocktread_client_core::{ClientCore, ConnState, Phase, Target};
 use blocktread_server::{HubConfig, ServerConfig};
-use blocktread_shared::protocol::Mode;
+use blocktread_shared::economy::economy;
+use blocktread_shared::protocol::{AuthReq, Mode};
 
 pub struct MenuPlugin;
 
@@ -27,7 +29,7 @@ impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LastLaunch>()
             .add_systems(OnEnter(Screen::Menu), spawn_menu)
-            .add_systems(Update, (menu_actions, menu_keys, menu_flow, refresh_ship, refresh_play, queue_line, show_last_error).chain().run_if(in_state(Screen::Menu)));
+            .add_systems(Update, (menu_actions, menu_keys, menu_flow, refresh_ship, refresh_play, queue_line, show_last_error, account_bar).chain().run_if(in_state(Screen::Menu)));
     }
 }
 
@@ -47,7 +49,13 @@ struct PlayBox;
 struct QueueLine;
 #[derive(Component)]
 struct NameField;
-/// The mode a settings key stands for ("coop" from older settings files plays free-for-all).
+/// The callsign label and field: a guest's name (hidden once logged in, the account's name is used).
+#[derive(Component)]
+struct CallsignBox;
+/// The top bar's account corner: log in, or who you are, your level and coins.
+#[derive(Component)]
+struct AccountBox;
+/// The mode a settings key stands for (anything unknown plays free-for-all).
 pub fn mode_of(key: &str) -> Mode {
     match key {
         "2v2" => Mode::Teams,
@@ -66,7 +74,15 @@ pub fn cost_label(cost: f32) -> String {
 
 /// Where to connect: `--server` if given, else the server picked on the entry page.
 fn server_addr(dev: &DevOpts, regions: &Regions, region: usize) -> String {
-    dev.server.clone().unwrap_or_else(|| regions.0[region].addr.clone())
+    server_target(dev, regions, region).addr
+}
+
+/// The server to play on: `--server`'s if given (no pin), else the region's.
+fn server_target(dev: &DevOpts, regions: &Regions, region: usize) -> Target {
+    match &dev.server {
+        Some(addr) => addr.into(),
+        None => regions.0[region].target(),
+    }
 }
 
 fn spawn_menu(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>) {
@@ -79,11 +95,13 @@ fn spawn_menu(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>
     commands.entity(top).insert(SlideIn::new(0.0, 0.0, -16.0));
     spawn_brand(&mut commands, f, top, 30.0);
     commands.spawn((Node { width: px(1), height: px(28), margin: UiRect::horizontal(px(GAP_S)), ..default() }, BackgroundColor(LINE_HI), ChildOf(top)));
-    commands.spawn((strong(f, "呼号", 13.0, MUTED), ChildOf(top)));
-    commands.spawn((tech(f, "CALLSIGN", 12.0, MUTED), LetterSpacing::Px(3.0), ChildOf(top)));
-    let name = spawn_field(&mut commands, f, top, &settings.name, 10.0);
+    let callsign = commands.spawn((Node { column_gap: px(GAP_S), align_items: AlignItems::Center, ..default() }, CallsignBox, ChildOf(top))).id();
+    commands.spawn((strong(f, "呼号", 13.0, MUTED), ChildOf(callsign)));
+    commands.spawn((tech(f, "CALLSIGN", 12.0, MUTED), LetterSpacing::Px(3.0), ChildOf(callsign)));
+    let name = spawn_field(&mut commands, f, callsign, &settings.name, 10.0);
     commands.entity(name).insert(NameField);
     commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(top)));
+    commands.spawn((Node { column_gap: px(GAP_S), align_items: AlignItems::Center, ..default() }, AccountBox, ChildOf(top)));
     spawn_btn(&mut commands, f, top, Kind::Normal, "设置", UiAction::OpenSettings, Some("S"));
     spawn_btn(&mut commands, f, top, Kind::Normal, "退出", UiAction::Quit, Some("Esc"));
 
@@ -237,9 +255,9 @@ fn refresh_play(
         set_enabled(&mut commands, b, !busy);
     }
     let desc = match mode {
-        Mode::Teams => "蓝红两队各 2 人，抢竞技场中央的高台：只有一方在台上时每秒得 1 分，击毁对手得 5 分，先到 100 分的队获胜。空位由 AI 补齐。",
+        Mode::Teams => "蓝红两队各 2 人，抢竞技场中央的高台：只有一方在台上时每秒得 1 分，击毁对手得 5 分，先到 100 分的队获胜。",
         Mode::Solo => "只有你自己：没有对手，不限时间，每次都是同一张沙漠地图。在本机运行，不连服务器。",
-        _ => "服务器上的混战房间，在封闭竞技场里打，随时进出，没有 AI，开着当前这辆车直接进场。场上有 2 人以上才开始计时，每局按击毁数排名。",
+        _ => "服务器上的混战房间，在封闭竞技场里打，随时进出，开着当前这辆车直接进场。场上有 2 人以上才开始计时，每局按击毁数排名。",
     };
     commands.spawn((para(f, desc, 12.0, MUTED), ChildOf(modes)));
 
@@ -275,7 +293,7 @@ fn refresh_play(
     let wb = spawn_btn(&mut commands, f, go, Kind::Normal, "观战", UiAction::Watch, Some("V"));
     commands.entity(wb).insert((
         Node { height: px(H_LG), padding: UiRect::horizontal(px(16)), ..btn_node(Kind::Normal) },
-        Tip("不驾驶，附身到其他玩家（或 AI）身上看他们打".into()),
+        Tip("不驾驶，附身到其他玩家身上看他们打".into()),
         TipDetail("混战房间里有人时看混战，没人时看正在打的 2v2；都没有的话在空房间里等人进来。\n← → 换一辆车，C 切换驾驶室视角。".into()),
     ));
     set_enabled(&mut commands, wb, !busy);
@@ -303,9 +321,9 @@ fn queue_line(session: Option<Res<Session>>, settings: Res<Settings>, mut line: 
     let want = match &s.core.phase {
         _ if mode_of(&settings.host_mode) == Mode::Solo => "正在启动试车场…".to_string(),
         _ if mode_of(&settings.host_mode) == Mode::Ffa => format!("正在进入自由混战 {}…", s.addr),
-        Phase::Queued { waited, players, fill_in, .. } => {
+        Phase::Queued { waited, players, .. } => {
             let t = format!("{}:{:02}", *waited as u32 / 60, *waited as u32 % 60);
-            if *fill_in > 0.5 { format!("正在匹配 {t} · 队列中 {players} 人 · {} 秒后 AI 补位", fill_in.ceil() as u32) } else { format!("正在匹配 {t} · 队列中 {players} 人 · 正在组建对局…") }
+            format!("正在匹配 {t} · 队列中 {players} 人")
         }
         _ => format!("正在连接 {}…", s.addr),
     };
@@ -317,9 +335,20 @@ fn queue_line(session: Option<Res<Session>>, settings: Res<Settings>, mut line: 
 }
 
 /// The session on this screen: queue once connected, and go to the vehicle pick when a match is found.
-fn menu_flow(session: Option<ResMut<Session>>, mut next: ResMut<NextState<Screen>>) {
+fn menu_flow(mut commands: Commands, session: Option<ResMut<Session>>, mut next: ResMut<NextState<Screen>>, mut toasts: ResMut<Toasts>) {
     let Some(mut s) = session else { return };
-    if s.core.state != ConnState::Lobby {
+    if let Some(text) = s.core.notice.take() {
+        toasts.push(text, ToastKind::Warn);
+    }
+    // the server turned the queue down (a level or tier not reached): say why, and stop waiting
+    if let Some(why) = s.core.refused.take() {
+        toasts.push(why, ToastKind::Warn);
+        s.core.leave();
+        commands.remove_resource::<Session>();
+        return;
+    }
+    // queue once logged in: the server holds a guest to a newcomer's rules
+    if s.core.state != ConnState::Lobby || s.core.authing {
         return;
     }
     match s.core.phase {
@@ -350,6 +379,7 @@ fn menu_actions(
     mut focus: ResMut<InputFocus>,
     mut modal: ResMut<ModalReq>,
     mut last: ResMut<LastLaunch>,
+    lobby: Res<Lobby>,
 ) {
     for m in msgs.read() {
         match m.clone() {
@@ -374,6 +404,14 @@ fn menu_actions(
                     toasts.push(format!("「{}」还没通过出车检查：{}", hangar.design.name, e.msg), ToastKind::Warn);
                     continue;
                 }
+                // what the server would turn down, said here first (the test range has no rules)
+                if !watch
+                    && lobby.ranked()
+                    && let Some(why) = progression_block(&lobby, mode_of(&settings.host_mode), &settings.host_budget, &hangar)
+                {
+                    toasts.push(why, ToastKind::Warn);
+                    continue;
+                }
                 last.watch = watch;
                 modal.0 = None;
                 let name: String = fields.iter().next().map(|e| e.value().to_string().trim().to_string()).unwrap_or_default().chars().take(12).collect();
@@ -389,8 +427,8 @@ fn menu_actions(
                         }
                     }
                 }
-                let addr = match dev.server.as_deref() {
-                    _ if solo => format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port()),
+                let target: Target = match dev.server.as_deref() {
+                    _ if solo => format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port()).into(),
                     Some("local") => {
                         if hosted.0.is_none() {
                             match host_local(&dev) {
@@ -401,13 +439,22 @@ fn menu_actions(
                                 }
                             }
                         }
-                        format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port())
+                        format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port()).into()
                     }
-                    _ => server_addr(&dev, &regions, region(&settings, &regions, pings.as_deref())),
+                    _ => server_target(&dev, &regions, region(&settings, &regions, pings.as_deref())),
                 };
+                let addr = target.addr.clone();
                 info!("{} {addr}", if watch { "watching" } else { "matchmaking on" });
                 let latency = Duration::from_millis(dev.latency_ms);
-                let core = if watch { ClientCore::watch(&addr, &settings.name, latency) } else { ClientCore::connect(&addr, &settings.name, latency) };
+                let mut core = if watch { ClientCore::watch(target, &settings.name, latency) } else { ClientCore::connect(target, &settings.name, latency) };
+                // the match connection logs in too, so the match pays the account
+                if !watch
+                    && !solo
+                    && let Some((key, _)) = link_target(&dev, &regions, &settings, pings.as_deref())
+                    && let Some(token) = saved_token(&settings, &key)
+                {
+                    core.auth(AuthReq::Resume { token });
+                }
                 let mode = mode_of(&settings.host_mode);
                 let tier = (!settings.host_budget.is_empty() && !straight_in(mode)).then(|| settings.host_budget.clone());
                 let want = (!watch).then_some((mode, tier));
@@ -422,17 +469,63 @@ fn menu_actions(
     }
 }
 
+/// Why the server would turn this down for the player's level and parts (None: it wouldn't).
+fn progression_block(lobby: &Lobby, mode: Mode, budget: &str, hangar: &Hangar) -> Option<String> {
+    let (e, level) = (economy(), lobby.level());
+    match mode {
+        Mode::Teams if level < e.teams_level => Some(format!("2v2 {} 级开放，你现在 {level} 级。先在自由混战里升级吧", e.teams_level)),
+        Mode::Teams if !e.tier_open((!budget.is_empty()).then_some(budget), level) => Some(format!("这个档位要 {} 级，你现在 {level} 级", e.tier_levels.get(budget).copied().unwrap_or(1))),
+        Mode::Ffa => {
+            let locked = e.locked(&hangar.design, lobby.unlocks());
+            if !locked.is_empty() {
+                let names: Vec<&str> = locked.iter().map(|t| t.info().name.as_str()).collect();
+                return Some(format!("「{}」用了还没解锁的部件：{}。可以先在试车场里试", hangar.design.name, names.join("、")));
+            }
+            match e.budget_at(level) {
+                Some(b) if hangar.analysis.stats.cost > b + 1e-3 => Some(format!("你现在 {level} 级，混战里最多开造价 {b:.0} 的车")),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The top bar's account corner and the callsign field, kept to who is logged in.
+fn account_bar(mut commands: Commands, lobby: Res<Lobby>, font: Res<UiFont>, boxes: Single<Entity, With<AccountBox>>, mut callsign: Single<&mut Node, With<CallsignBox>>, mut shown: Local<Option<(bool, Option<(String, u32, u32)>)>>) {
+    let now = (lobby.ranked(), lobby.account().map(|(u, p)| (u.clone(), lobby.level(), p.coins)));
+    if shown.as_ref() == Some(&now) {
+        return;
+    }
+    *shown = Some(now.clone());
+    let f = &*font;
+    let b = *boxes;
+    commands.entity(b).despawn_children();
+    callsign.display = if now.1.is_some() { Display::None } else { Display::Flex };
+    match now {
+        (false, _) => {}
+        (true, None) => {
+            spawn_btn(&mut commands, f, b, Kind::Accent, "登录 / 注册", UiAction::OpenAccount, Some("L"));
+        }
+        (true, Some((user, level, coins))) => {
+            commands.spawn((strong(f, user, 15.0, INK), ChildOf(b)));
+            commands.spawn((chip(f, format!("{level} 级"), ACCENT), ChildOf(b)));
+            commands.spawn((tech(f, format!("金币 {coins}"), 14.0, INK), ChildOf(b)));
+            spawn_btn(&mut commands, f, b, Kind::Normal, "账号", UiAction::OpenAccount, Some("L"));
+        }
+    }
+}
+
 /// The test range's server: inside this client, reachable from this machine only, on any free port.
 fn host_solo() -> anyhow::Result<blocktread_server::ServerHandle> {
     let hub = HubConfig { queue_wait: 0.0, ..HubConfig::default() };
-    blocktread_server::start(ServerConfig { bind: "127.0.0.1:0".parse().unwrap(), hub, verbose: false, status: None })
+    blocktread_server::start(ServerConfig { bind: "127.0.0.1:0".parse().unwrap(), hub, verbose: false, status: None, data: None })
 }
 
 /// A server inside this client (`--server local`): no queue wait, AI fills the match at once.
 fn host_local(dev: &DevOpts) -> anyhow::Result<blocktread_server::ServerHandle> {
     let host = if dev.local_only { "127.0.0.1" } else { "0.0.0.0" };
     let hub = HubConfig { queue_wait: 0.0, ..HubConfig::default() };
-    let at = |port: u16| ServerConfig { bind: format!("{host}:{port}").parse().unwrap(), hub: hub.clone(), verbose: false, status: None };
+    let at = |port: u16| ServerConfig { bind: format!("{host}:{port}").parse().unwrap(), hub: hub.clone(), verbose: false, status: None, data: None };
     match blocktread_server::start(at(dev.port.unwrap_or(blocktread_shared::DEFAULT_PORT))) {
         Ok(h) => Ok(h),
         // the port is taken (another server on this machine): any free one will do
@@ -494,6 +587,7 @@ fn menu_keys(
     for (k, a) in [
         (KeyCode::KeyH, UiAction::Goto(Screen::Hangar)),
         (KeyCode::KeyS, UiAction::OpenSettings),
+        (KeyCode::KeyL, UiAction::OpenAccount),
         (KeyCode::KeyV, UiAction::Watch),
         (KeyCode::ArrowLeft, UiAction::CarouselStep(-1)),
         (KeyCode::Comma, UiAction::CarouselStep(-1)),

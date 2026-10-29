@@ -13,3 +13,7 @@ rand = "0.10.3"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 blocktread_net = { version = "0.1.0", path = "../net" }
 blocktread_shared = { version = "0.1.0", path = "../shared" }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+argon2 = "0.6.0"
+ring = "0.17.14"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
