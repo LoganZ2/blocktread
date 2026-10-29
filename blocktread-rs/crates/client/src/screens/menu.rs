@@ -52,7 +52,7 @@ struct NameField;
 /// The callsign label and field: a guest's name (hidden once logged in, the account's name is used).
 #[derive(Component)]
 struct CallsignBox;
-/// The top bar's account corner: log in, or who you are, your level and coins.
+/// The top bar's account corner: who you are, your level and coins (a guest: just that).
 #[derive(Component)]
 struct AccountBox;
 /// The mode a settings key stands for (anything unknown plays free-for-all).
@@ -503,8 +503,9 @@ fn account_bar(mut commands: Commands, lobby: Res<Lobby>, font: Res<UiFont>, box
     callsign.display = if now.1.is_some() { Display::None } else { Display::Flex };
     match now {
         (false, _) => {}
+        // a guest chose to be one on the login page: no prompt here, just what they are
         (true, None) => {
-            spawn_btn(&mut commands, f, b, Kind::Accent, "登录 / 注册", UiAction::OpenAccount, Some("L"));
+            commands.spawn((chip(f, "游客", MUTED), Tip("没有登录：不记录进度、没有收益，只能用初始部件。要登录，回到入口页重新开始游戏".into()), ChildOf(b)));
         }
         (true, Some((user, level, coins))) => {
             commands.spawn((strong(f, user, 15.0, INK), ChildOf(b)));

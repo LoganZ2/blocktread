@@ -1,10 +1,11 @@
 //! Accounts in the client. Each server (region) keeps its own accounts, so the account belongs to
 //! the server picked on the entry page.
 //!
-//! From the lobby on, the client keeps a quiet connection to that server (`Lobby`) for the
-//! account: logging in (with the saved token, or a name and password), its coins, level and
-//! parts, and buying parts. The match connection logs in with the same token so the match pays
-//! the account. A server inside this client (`--server local`, the test range) has no accounts.
+//! Past the entry page the client keeps a quiet connection to that server (`Lobby`) for the
+//! account: the login page logs in on it (with the saved token, or a name and password), the
+//! lobby shows its level and coins, the garage buys parts on it. The match connection logs in
+//! with the same token so the match pays the account. A server inside this client (`--server
+//! local`, the test range) has no accounts.
 
 use crate::screens::Overlays;
 use crate::screens::entry::{Pings, region};
@@ -24,11 +25,16 @@ pub struct AccountPlugin;
 
 impl Plugin for AccountPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Lobby>().add_systems(Update, (keep_link, account_actions, render_account, auth_status, mask_secrets).chain().run_if(linked_screen));
+        app.init_resource::<Lobby>().add_systems(Update, (keep_link, account_actions, render_account, mask_secrets).chain().in_set(AccountSystems).run_if(linked_screen));
     }
 }
 
-/// Screens with a server picked: the lobby and on.
+/// The account connection's systems: screens that read `Lobby` run after them, so they see this
+/// frame's state of it.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AccountSystems;
+
+/// Screens with a server picked: the login page and on.
 fn linked_screen(s: Res<State<Screen>>) -> bool {
     !matches!(s.get(), Screen::Boot | Screen::Entry)
 }
@@ -36,24 +42,55 @@ fn linked_screen(s: Res<State<Screen>>) -> bool {
 /// Seconds between tries to reconnect a dropped account connection.
 const RETRY_SECS: f64 = 5.0;
 
+/// Where the account connection stands, for the login page to show.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Link {
+    /// No accounts to have: a server inside this client, or one that doesn't keep them.
+    None,
+    Connecting,
+    /// The connection failed (it is tried again shortly), and why.
+    Down(String),
+    /// Connected; a login is on its way if `authing`.
+    Up { authing: bool },
+}
+
 /// The account connection to the server picked.
 #[derive(Resource, Default)]
 pub struct Lobby {
     core: Option<ClientCore>,
     /// What the connection is for (`link_target`'s key); empty: none.
     key: String,
-    /// The saved token was sent: a failure means it is stale.
+    /// The saved token was sent (or there was none to send): a failure now means it is stale.
     resuming: bool,
     retry_at: f64,
-    /// What the account panel was last built for: whether it is open, whether the server keeps
-    /// accounts, and the account's name.
-    built: Option<(bool, bool, Option<String>)>,
+    /// The server answered that it keeps no accounts.
+    no_accounts: bool,
+    /// Why the last connection failed.
+    down: Option<String>,
+    /// What the account panel was last built for: whether it is open, and the account.
+    built: Option<(bool, Option<(String, Profile)>)>,
 }
 
 impl Lobby {
     /// Whether this server keeps accounts (progression rules apply to play on it).
     pub fn ranked(&self) -> bool {
         self.core.is_some()
+    }
+
+    pub fn link(&self) -> Link {
+        match &self.core {
+            _ if self.no_accounts || self.key.is_empty() => Link::None,
+            None => self.down.clone().map_or(Link::Connecting, Link::Down),
+            Some(c) => match &c.state {
+                ConnState::Connecting => Link::Connecting,
+                _ => Link::Up { authing: c.authing || !self.resuming },
+            },
+        }
+    }
+
+    /// The server's key (`link_target`), empty when there is none.
+    pub fn key(&self) -> &str {
+        &self.key
     }
 
     pub fn account(&self) -> Option<&(String, Profile)> {
@@ -72,13 +109,31 @@ impl Lobby {
         economy().level(self.profile().xp).0
     }
 
+    /// Log in or sign up (`account` or `auth_error` follows).
+    pub fn auth(&mut self, req: AuthReq) {
+        if let Some(c) = &mut self.core {
+            self.resuming = true;
+            c.auth(req);
+        }
+    }
+
+    /// Why the last login failed, if it did.
+    pub fn auth_error(&self) -> Option<&str> {
+        self.core.as_ref().and_then(|c| c.auth_error.as_deref())
+    }
+
+    pub fn set_auth_error(&mut self, why: impl Into<String>) {
+        if let Some(c) = &mut self.core {
+            c.auth_error = Some(why.into());
+        }
+    }
+
     /// Buy a part (the profile follows, or a notice says why not).
     pub fn unlock(&mut self, ty: blocktread_shared::blocks::BlockType) {
         if let Some(c) = &mut self.core {
             c.unlock(ty);
         }
     }
-
 }
 
 /// The server play goes to, and the key its account is saved under; None for a server inside
@@ -111,9 +166,14 @@ fn keep_link(mut lobby: ResMut<Lobby>, dev: Res<DevOpts>, regions: Res<Regions>,
         }
         lobby.key = key.clone();
         lobby.retry_at = 0.0;
+        lobby.no_accounts = false;
+        lobby.down = None;
         lobby.built = None;
     }
     let Some((key, target)) = want else { return };
+    if lobby.no_accounts {
+        return;
+    }
     if lobby.core.is_none() {
         if now < lobby.retry_at {
             return;
@@ -127,17 +187,22 @@ fn keep_link(mut lobby: ResMut<Lobby>, dev: Res<DevOpts>, regions: Res<Regions>,
     // the server has no accounts: no rules, nothing to log in to
     if core.auth_error.as_deref() == Some("这台服务器不开放账号") {
         lobby.core = None;
-        lobby.retry_at = f64::MAX;
+        lobby.no_accounts = true;
         return;
     }
     match &core.state {
-        ConnState::Lobby if !lobby.resuming && core.account.is_none() && !core.authing => {
-            lobby.resuming = true;
-            if let Some(token) = saved_token(&settings, &key) {
-                core.auth(AuthReq::Resume { token });
+        ConnState::Lobby => {
+            lobby.down = None;
+            // in: log back in with the saved token, if there is one
+            if !lobby.resuming && core.account.is_none() && !core.authing {
+                lobby.resuming = true;
+                if let Some(token) = saved_token(&settings, &key) {
+                    core.auth(AuthReq::Resume { token });
+                }
             }
         }
-        ConnState::Closed(_) | ConnState::Rejected(_) => {
+        ConnState::Closed(why) | ConnState::Rejected(why) => {
+            lobby.down = Some(why.clone());
             lobby.core = None;
             lobby.retry_at = now + RETRY_SECS;
             return;
@@ -160,26 +225,15 @@ fn keep_link(mut lobby: ResMut<Lobby>, dev: Res<DevOpts>, regions: Res<Regions>,
             toasts.push(format!("升到 {level} 级！"), ToastKind::Ok);
         }
     }
-    // a token that no longer works is forgotten; other failures show in the account panel
-    if lobby.resuming && core.auth_error.is_some() && core.account.is_none() && settings.accounts.contains_key(&key) && !core.authing {
-        let why = core.auth_error.clone().unwrap_or_default();
-        if why.contains("失效") {
-            settings.accounts.remove(&key);
-            settings::save_settings(&settings);
-            toasts.push(why, ToastKind::Warn);
-            core.auth_error = None;
-        }
+    // a token that no longer works is forgotten (the login page says so)
+    if core.auth_error.as_deref().is_some_and(|e| e.contains("失效")) && settings.accounts.contains_key(&key) {
+        settings.accounts.remove(&key);
+        settings::save_settings(&settings);
     }
 }
 
 #[derive(Component)]
 struct AccountRoot;
-#[derive(Component)]
-struct UserField;
-#[derive(Component)]
-struct PassField;
-#[derive(Component)]
-struct AuthStatus;
 
 #[allow(clippy::too_many_arguments)]
 fn account_actions(
@@ -187,55 +241,38 @@ fn account_actions(
     mut overlays: ResMut<Overlays>,
     mut lobby: ResMut<Lobby>,
     mut settings: ResMut<Settings>,
-    users: Query<&EditableText, With<UserField>>,
-    passes: Query<&EditableText, With<PassField>>,
     mut modal: ResMut<ModalReq>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut next: ResMut<NextState<Screen>>,
     dev: Res<DevOpts>,
     time: Res<Time>,
     mut forced: Local<bool>,
 ) {
     // dev: open the panel (screenshots of it)
-    if !*forced && dev.forced("account", time.elapsed_secs()) {
+    if !*forced && dev.forced("account", time.elapsed_secs()) && lobby.account().is_some() {
         *forced = true;
         overlays.account = true;
     }
-    // the panel takes these keys: the screen under it doesn't see them (Enter logs in)
-    let mut acts: Vec<UiAction> = Vec::new();
-    if overlays.account && !modal.open() {
-        if keys.clear_just_pressed(KeyCode::Escape) {
-            overlays.account = false;
-        }
-        if keys.clear_just_pressed(KeyCode::Enter) && lobby.account().is_none() {
-            acts.push(UiAction::Login);
-        }
+    // the panel takes Esc: the screen under it doesn't see it
+    if overlays.account && !modal.open() && keys.clear_just_pressed(KeyCode::Escape) {
+        overlays.account = false;
     }
-    acts.extend(msgs.read().cloned());
-    for m in acts {
-        match m {
-            UiAction::OpenAccount => {
+    for m in msgs.read() {
+        match m.clone() {
+            UiAction::OpenAccount if lobby.account().is_some() => {
                 modal.0 = None;
                 overlays.account = true;
             }
             UiAction::CloseAccount => overlays.account = false,
-            a @ (UiAction::Login | UiAction::Register) => {
-                let user = users.iter().next().map(|e| e.value().to_string().trim().to_string()).unwrap_or_default();
-                let pass = passes.iter().next().map(|e| e.value().to_string()).unwrap_or_default();
-                let Some(core) = &mut lobby.core else { continue };
-                if user.is_empty() || pass.is_empty() {
-                    core.auth_error = Some("填上用户名和密码".into());
-                    continue;
-                }
-                lobby.resuming = false;
-                let core = lobby.core.as_mut().unwrap();
-                core.auth(if a == UiAction::Login { AuthReq::Login { user, pass } } else { AuthReq::Register { user, pass } });
-            }
+            // logged out: back to the login page, to log in as someone else or go on as a guest
             UiAction::Logout => {
                 let key = lobby.key.clone();
                 if let (Some(core), Some(saved)) = (&mut lobby.core, settings.accounts.remove(&key)) {
                     core.logout(saved.token);
                 }
                 settings::save_settings(&settings);
+                overlays.account = false;
+                next.set(Screen::Login);
             }
             UiAction::Unlock(t) => {
                 modal.0 = None;
@@ -246,9 +283,10 @@ fn account_actions(
     }
 }
 
-/// The account panel: log in or sign up as a guest; who you are, your level and coins once in.
-fn render_account(mut commands: Commands, overlays: Res<Overlays>, mut lobby: ResMut<Lobby>, roots: Query<Entity, With<AccountRoot>>, font: Res<UiFont>, regions: Res<Regions>, settings: Res<Settings>) {
-    let want = (overlays.account, lobby.ranked(), lobby.account().map(|a| a.0.clone()));
+/// The account panel, for a logged-in player: who, where, the level and how far into it, the
+/// coins and parts, and what the next levels open.
+fn render_account(mut commands: Commands, overlays: Res<Overlays>, mut lobby: ResMut<Lobby>, roots: Query<Entity, With<AccountRoot>>, font: Res<UiFont>, regions: Res<Regions>) {
+    let want = (overlays.account, lobby.account().cloned());
     if lobby.built.as_ref() == Some(&want) {
         return;
     }
@@ -256,75 +294,57 @@ fn render_account(mut commands: Commands, overlays: Res<Overlays>, mut lobby: Re
     for e in &roots {
         commands.entity(e).despawn();
     }
-    let (open, _, user) = want;
-    if !open {
-        return;
-    }
+    let (true, Some((user, pr))) = want else { return };
     let f = &*font;
-    let (o, p) = spawn_overlay(&mut commands, f, "账号", 440.0);
+    let e = economy();
+    let (o, p) = spawn_overlay(&mut commands, f, "账号", 480.0);
     commands.entity(o).insert((AccountRoot, GlobalZIndex(60)));
-    let server = regions.0.iter().find(|r| r.key == lobby.key).map_or(lobby.key.clone(), |r| format!("{}服务器", r.name));
-    if !lobby.ranked() {
-        commands.spawn((para(f, "这台服务器不开放账号：在这里玩不记录进度。", 14.0, MUTED), ChildOf(p)));
-    } else if let Some(user) = user {
-        let pr = lobby.profile();
-        let (level, into, span) = economy().level(pr.xp);
-        let have = blocktread_shared::blocks::BlockType::ALL.iter().filter(|&&t| economy().price(t).is_some() && Unlocks(pr.unlocks).has(t)).count();
-        let total = economy().prices.len();
-        commands.spawn((para(f, format!("{server} · 账号只在这个大区有效"), 13.0, MUTED), ChildOf(p)));
-        commands.spawn((heading(f, user, 20.0, INK), ChildOf(p)));
-        let (gauge, val) = spawn_stat(&mut commands, f, p, &format!("{level} 级"), ACCENT);
-        commands.entity(gauge).insert(Plate::gauge(ACCENT, 24.0, into as f32 / span as f32));
-        commands.entity(val).insert(Text::new(format!("{into} / {span}")));
-        commands.spawn((text(f, format!("金币 {}  ·  已解锁 {have} / {total} 种部件", pr.coins), 15.0, INK), ChildOf(p)));
-        let e = economy();
-        let next = [(e.teams_level, "2v2"), (e.tier_levels.get("medium").copied().unwrap_or(1), "中型档"), (e.tier_levels.get("heavy").copied().unwrap_or(1), "重型档")]
-            .into_iter()
-            .filter(|(l, _)| *l > level)
-            .map(|(l, what)| format!("{l} 级开放{what}"))
-            .collect::<Vec<_>>();
-        if !next.is_empty() {
-            commands.spawn((para(f, next.join(" · "), 13.0, MUTED), ChildOf(p)));
-        }
-        let r = commands.spawn((Node { column_gap: px(GAP_S), justify_content: JustifyContent::FlexEnd, margin: UiRect::top(px(GAP_S)), ..default() }, ChildOf(p))).id();
-        spawn_btn(&mut commands, f, r, Kind::Danger, "退出登录", UiAction::Logout, None);
-        spawn_btn(&mut commands, f, r, Kind::Accent, "完成", UiAction::CloseAccount, Some("Esc"));
-        return;
-    } else {
-        commands.spawn((para(f, format!("{server}的账号：进度只在这个大区有效。不登录也能玩，只是没有收益，也只能用初始部件。"), 13.0, MUTED), ChildOf(p)));
-        commands.spawn((strong(f, "用户名", 13.0, MUTED), ChildOf(p)));
-        let saved = settings.accounts.get(&lobby.key).map_or(String::new(), |s| s.user.clone());
-        let u = spawn_field(&mut commands, f, p, &saved, 16.0);
-        commands.entity(u).insert((UserField, bevy::input_focus::AutoFocus));
-        commands.spawn((strong(f, "密码", 13.0, MUTED), ChildOf(p)));
-        let pw = spawn_secret_field(&mut commands, f, p, 16.0);
-        commands.entity(pw).insert(PassField);
-        commands.spawn((text(f, "", 13.0, DANGER), AuthStatus, ChildOf(p)));
-        let r = commands.spawn((Node { column_gap: px(GAP_S), justify_content: JustifyContent::FlexEnd, margin: UiRect::top(px(GAP_S)), ..default() }, ChildOf(p))).id();
-        spawn_btn(&mut commands, f, r, Kind::Ghost, "关闭", UiAction::CloseAccount, Some("Esc"));
-        spawn_btn(&mut commands, f, r, Kind::Normal, "注册", UiAction::Register, None);
-        spawn_btn(&mut commands, f, r, Kind::Primary, "登录", UiAction::Login, None);
-        return;
-    }
-    let r = commands.spawn((Node { justify_content: JustifyContent::FlexEnd, ..default() }, ChildOf(p))).id();
-    spawn_btn(&mut commands, f, r, Kind::Accent, "完成", UiAction::CloseAccount, Some("Esc"));
-}
+    let server = regions.0.iter().find(|r| r.key == lobby.key).map_or(lobby.key.clone(), |r| format!("{} {}", r.name, r.code));
 
-/// The login form's status line: working on it, or why it didn't go through.
-fn auth_status(lobby: Res<Lobby>, mut q: Query<(&mut Text, &mut TextColor), With<AuthStatus>>) {
-    let Some(core) = &lobby.core else { return };
-    for (mut t, mut c) in &mut q {
-        let (s, col) = match (&core.auth_error, core.authing, &core.state) {
-            (_, true, _) => ("正在验证…".to_string(), MUTED),
-            (Some(e), _, _) => (e.clone(), DANGER),
-            (None, _, ConnState::Connecting) => ("正在连接服务器…".to_string(), MUTED),
-            _ => (String::new(), MUTED),
-        };
-        if t.0 != s {
-            t.0 = s;
-        }
-        c.0 = col;
+    // who, and the server the account belongs to
+    let who = commands.spawn((Node { column_gap: px(GAP_S), align_items: AlignItems::Center, ..default() }, ChildOf(p))).id();
+    commands.spawn((heading(f, user, 24.0, INK), ChildOf(who)));
+    commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(who)));
+    commands.spawn((chip(f, server, MUTED), ChildOf(who)));
+    commands.spawn((para(f, "账号属于这台服务器，进度只在这个大区有效。", 12.0, MUTED), ChildOf(p)));
+
+    // the level, and the way to the next
+    let (level, into, span) = e.level(pr.xp);
+    let lv = spawn_section(&mut commands, f, p, "等级|LEVEL");
+    let line = commands.spawn((Node { align_items: AlignItems::Center, ..default() }, ChildOf(lv))).id();
+    commands.spawn((strong(f, format!("{level} 级"), 16.0, ACCENT), ChildOf(line)));
+    commands.spawn((Node { flex_grow: 1.0, ..default() }, ChildOf(line)));
+    commands.spawn((tech(f, format!("{into} / {span} 经验"), 13.0, MUTED), ChildOf(line)));
+    commands.spawn((Node { height: px(8), ..default() }, Plate::gauge(ACCENT, 24.0, into as f32 / span as f32), ChildOf(lv)));
+
+    // coins and parts, side by side
+    let have = blocktread_shared::blocks::BlockType::ALL.iter().filter(|&&t| e.price(t).is_some() && Unlocks(pr.unlocks).has(t)).count();
+    let tiles = commands.spawn((Node { column_gap: px(GAP_S), ..default() }, ChildOf(p))).id();
+    for (label, value) in [("金币", pr.coins.to_string()), ("已解锁部件", format!("{have} / {}", e.prices.len()))] {
+        let t = commands
+            .spawn((Node { flex_grow: 1.0, flex_basis: px(0), flex_direction: FlexDirection::Column, row_gap: px(4), padding: px(12).all(), ..default() }, BackgroundColor(tone(Color::WHITE, 0.04)), ChildOf(tiles)))
+            .id();
+        commands.spawn((text(f, label, 12.0, MUTED), ChildOf(t)));
+        commands.spawn((tech(f, value, 24.0, INK), ChildOf(t)));
     }
+
+    // what the next levels open
+    let next: Vec<(u32, &str)> = [(e.teams_level, "开放 2v2 占点战"), (e.tier_levels.get("medium").copied().unwrap_or(1), "开放中型档"), (e.tier_levels.get("heavy").copied().unwrap_or(1), "开放重型档")]
+        .into_iter()
+        .filter(|(l, _)| *l > level)
+        .collect();
+    if !next.is_empty() {
+        let up = spawn_section(&mut commands, f, p, "升级解锁|NEXT");
+        for (l, what) in next {
+            let r = commands.spawn((Node { column_gap: px(GAP_S), align_items: AlignItems::Center, ..default() }, ChildOf(up))).id();
+            commands.spawn((chip(f, format!("{l} 级"), MUTED), ChildOf(r)));
+            commands.spawn((text(f, what, 13.0, INK), ChildOf(r)));
+        }
+    }
+
+    let r = commands.spawn((Node { justify_content: JustifyContent::SpaceBetween, margin: UiRect::top(px(GAP_S)), ..default() }, ChildOf(p))).id();
+    spawn_btn(&mut commands, f, r, Kind::Danger, "退出登录", UiAction::Logout, None);
+    spawn_btn(&mut commands, f, r, Kind::Accent, "完成", UiAction::CloseAccount, Some("Esc"));
 }
 
 /// Dots over a secret field, one per character: the field's own text is drawn clear.

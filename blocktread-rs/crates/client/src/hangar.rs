@@ -794,8 +794,8 @@ fn hangar_actions(mut msgs: MessageReader<UiAction>, mut hangar: ResMut<Hangar>,
                     Some((_, p)) => modal.show(format!("{name}还没解锁"), format!("解锁要 {price} 金币，你有 {}。打几局再来吧；在试车场里可以先开着试试。", p.coins), vec![("好", UiAction::CloseModal, Kind::Accent)], None),
                     None => modal.show(
                         format!("{name}还没解锁"),
-                        format!("登录后用金币解锁（{price} 金币）。在试车场里可以先开着试试。"),
-                        vec![("取消", UiAction::CloseModal, Kind::Normal), ("登录 / 注册", UiAction::OpenAccount, Kind::Accent)],
+                        format!("游客不能解锁部件：登录后用金币解锁（{price} 金币）。在试车场里可以先开着试试。"),
+                        vec![("取消", UiAction::CloseModal, Kind::Normal), ("去登录", UiAction::Goto(Screen::Login), Kind::Accent)],
                         None,
                     ),
                 }

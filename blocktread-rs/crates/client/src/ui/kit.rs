@@ -249,12 +249,12 @@ fn animate_buttons(
         let h1 = h.min(1.0);
         let press = (h - 1.0).max(0.0) * 4.0;
         let white = |a: f32| Color::srgba(1.0, 1.0, 1.0, a);
-        // flat colours only, and the fill never changes on hover: hover shows as an amber line
-        // (the bar at the left, or the hazard band widening on the main action), pressing dims
-        // a little. (fill, edge, label ink, accent strip along the top)
+        // flat colours only. Hover shows as an amber line (the bar at the left); the filled amber
+        // buttons light up instead, with a pale frame (and the main action's hazard band widens);
+        // pressing dims a little. (fill, edge, label ink, accent strip along the top)
         let (fill, edge, ink, accent) = match b.kind {
             Kind::Primary | Kind::Accent if disabled => (tone(Color::WHITE, 0.08), Color::NONE, MUTED, 0.0),
-            Kind::Primary | Kind::Accent => (ACCENT.mix(&ON_ACCENT, press * 0.12), if focused { INK } else { Color::NONE }, ON_ACCENT, 0.0),
+            Kind::Primary | Kind::Accent => (ACCENT.mix(&ACCENT_HI, h1).mix(&ON_ACCENT, press * 0.12), if focused { INK } else { INK.with_alpha(0.9 * h1) }, ON_ACCENT, 0.0),
             Kind::Ghost => (Color::NONE, Color::NONE, MUTED.mix(&INK, h1), 0.0),
             Kind::Danger => (tone(DANGER, 0.14 + 0.08 * press), DANGER.with_alpha(0.5 + 0.4 * h1), INK, 0.0),
             Kind::Menu => (tone(Color::WHITE, 0.05 + 0.04 * press).with_alpha(0.85 * h1), Color::NONE, MUTED.mix(&INK, (0.4 + h).min(1.0)), 0.0),

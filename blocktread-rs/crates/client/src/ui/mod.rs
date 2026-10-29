@@ -28,6 +28,8 @@ pub const INK: Color = Color::srgb(0.925, 0.902, 0.827);
 pub const MUTED: Color = Color::srgb(0.659, 0.639, 0.557);
 /// Signal amber.
 pub const ACCENT: Color = Color::srgb(0.941, 0.659, 0.188);
+/// The accent lit up: filled amber buttons under the pointer.
+pub const ACCENT_HI: Color = Color::srgb(1.0, 0.78, 0.38);
 pub const ON_ACCENT: Color = Color::srgb(0.09, 0.09, 0.059);
 /// Targets and highlights that must stand apart from the amber.
 pub const SIGNAL: Color = Color::srgb(1.0, 0.48, 0.24);
@@ -210,10 +212,13 @@ pub enum UiAction {
     /// After the results: queue again (or watch the next match).
     PlayAgain,
     // accounts
+    /// The account panel (logged in only).
     OpenAccount,
     CloseAccount,
-    Login,
-    Register,
+    /// The login page: its 登录 / 注册 tab (true: sign up), send the form, play as a guest.
+    AuthTab(bool),
+    SubmitAuth,
+    PlayAsGuest,
     Logout,
     /// Spend coins on this part.
     Unlock(BlockType),
