@@ -8,6 +8,7 @@ mod conn;
 pub mod game;
 pub mod hub;
 mod names;
+pub mod store;
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -131,10 +132,11 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
     })?;
     let addr = ready_rx.recv()??;
     let stop_sim = stop.clone();
-    let hub_cfg = cfg.hub.clone();
+    // the hub first: if its accounts can't be opened, the server doesn't start
+    let hub = hub::Hub::new(cfg.hub.clone())?;
     let (verbose, status) = (cfg.verbose, cfg.status.clone());
     let fp = fingerprint.clone();
-    std::thread::Builder::new().name("blocktread-sim".into()).spawn(move || run(hub_cfg, net_rx, stop_sim, verbose, status, fp))?;
+    std::thread::Builder::new().name("blocktread-sim".into()).spawn(move || run(hub, net_rx, stop_sim, verbose, status, fp))?;
     Ok(ServerHandle { addr, fingerprint, stop })
 }
 
@@ -154,8 +156,7 @@ fn write_status(path: &std::path::Path, hub: &hub::Hub, fingerprint: &str) {
 }
 
 /// The 60 Hz loop: network events in, one hub tick (every match steps), sleep to the next tick.
-fn run(cfg: HubConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: bool, status: Option<PathBuf>, fingerprint: String) {
-    let mut hub = hub::Hub::new(cfg);
+fn run(mut hub: hub::Hub, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: bool, status: Option<PathBuf>, fingerprint: String) {
     let step = Duration::from_secs_f64(1.0 / TICK_RATE as f64);
     let mut next = Instant::now();
     let (mut worst, mut total, mut n) = (Duration::ZERO, Duration::ZERO, 0u32);

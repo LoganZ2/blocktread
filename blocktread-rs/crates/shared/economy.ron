@@ -1,0 +1,49 @@
+// Progression: what a match pays, what parts cost, what levels open.
+//
+// The server decides with these numbers; the client only shows them. Rewards are the same
+// whoever was on the other side (players and AI alike).
+//
+// Pace: an average 2v2 or free-for-all round pays about 130 coins, and the parts on sale come to
+// 13 900, so all of them take about a hundred matches.
+(
+    // everyone has these from the start: enough for the 越野车 (rover) preset and to build with
+    starter: [
+        Cockpit, Hull, Armor, Frame, Lamp,
+        Wheel, SmallWheel, DualWheel,
+        Engine, Thruster,
+        Cannon, Laser,
+        Reactor, JumpJet,
+    ],
+
+    // coins to unlock each of the rest (once, then as many as you like)
+    prices: {
+        BigWheel: 600, Ram: 600, Smoke: 600, Capacitor: 600,
+        GiantWheel: 1000, Hover: 1000, Flak: 1000, Saw: 1000, Flipper: 1000, Shield: 1000, Plasma: 1000,
+        Missile: 1500, Railgun: 1500, MineLayer: 1500,
+    },
+
+    // XP from one level to the next: level_base + level_step × (level − 1)
+    level_base: 200,
+    level_step: 100,
+    // coins on reaching each new level
+    level_up_coins: 100,
+
+    // the level each budget tier opens at; light is open from the start
+    tier_levels: { "medium": 3, "heavy": 6 },
+    // the level 2v2 opens at (the free-for-all room and the test range are always open)
+    teams_level: 2,
+
+    rewards: (
+        // for each minute in the match (a free-for-all round: the minutes of it you were in)
+        per_minute: 10,
+        per_kill: 10,
+        // 2v2: the winning side
+        win: 40,
+        // the free-for-all round's first, second and third place
+        places: [40, 25, 15],
+        // the first win (or top-three round) of the day, on top
+        daily_first_win: 150,
+        // XP is the coins times this
+        xp_per_coin: 1.0,
+    ),
+)

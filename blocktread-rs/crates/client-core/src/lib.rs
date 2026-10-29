@@ -174,6 +174,16 @@ pub struct ClientCore {
     pub queued_for: Option<(Mode, Option<String>)>,
     /// A message from the server to show (a pick refused, say); the screen takes it.
     pub notice: Option<String>,
+    /// Logged in: the account's name and progress (None: a guest).
+    pub account: Option<(String, Profile)>,
+    /// A login came through with this token: the screen saves it (and takes it).
+    pub new_token: Option<String>,
+    /// A login failed, and why; the screen takes it.
+    pub auth_error: Option<String>,
+    /// A login is on its way.
+    pub authing: bool,
+    /// What the last match paid: coins, XP, and the level reached if it went up.
+    pub reward: Option<(u32, u32, Option<u32>)>,
     pub pid: Option<u16>,
     pub mode: Option<Mode>,
     pub my_ship: Option<u16>,
@@ -223,6 +233,11 @@ impl ClientCore {
             phase: Phase::Idle,
             queued_for: None,
             notice: None,
+            account: None,
+            new_token: None,
+            auth_error: None,
+            authing: false,
+            reward: None,
             pid: None,
             mode: None,
             my_ship: None,
@@ -257,6 +272,24 @@ impl ClientCore {
     }
 
     /// Look for a match. Ignored unless idle (or reading the last match's results).
+    /// Sign up, log in, or come back with a token (`account` or `auth_error` follows).
+    pub fn auth(&mut self, req: AuthReq) {
+        self.authing = true;
+        self.auth_error = None;
+        self.net.send(ClientMsg::Auth(req));
+    }
+
+    /// Log out: the token stops working, and this connection is a guest's again.
+    pub fn logout(&mut self, token: String) {
+        self.net.send(ClientMsg::Logout { token });
+        self.account = None;
+    }
+
+    /// Buy a part (the profile comes back with it, or a notice says why not).
+    pub fn unlock(&mut self, block: blocktread_shared::blocks::BlockType) {
+        self.net.send(ClientMsg::Unlock { block });
+    }
+
     pub fn queue(&mut self, mode: Mode, tier: Option<String>) {
         if !matches!(self.phase, Phase::Idle | Phase::Over { .. }) || self.watching {
             return;
@@ -515,6 +548,21 @@ impl ClientCore {
 
     fn on_msg(&mut self, msg: ServerMsg) {
         match msg {
+            ServerMsg::Account { user, token, profile } => {
+                self.account = Some((user, profile));
+                self.new_token = Some(token);
+                self.authing = false;
+            }
+            ServerMsg::AuthFailed { reason } => {
+                self.auth_error = Some(reason);
+                self.authing = false;
+            }
+            ServerMsg::Profile(p) => {
+                if let Some(a) = &mut self.account {
+                    a.1 = p;
+                }
+            }
+            ServerMsg::Rewarded { coins, xp, level_up } => self.reward = Some((coins, xp, level_up)),
             ServerMsg::Welcome { pid, tick, mode, seed, map } => {
                 self.reset_world();
                 self.pid = Some(pid);

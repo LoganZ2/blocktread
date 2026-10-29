@@ -7,6 +7,7 @@ pub mod arena;
 pub mod balance;
 pub mod blocks;
 pub mod drive;
+pub mod economy;
 pub mod flight;
 pub mod gadgets;
 pub mod grid;

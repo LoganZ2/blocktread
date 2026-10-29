@@ -10,8 +10,9 @@ const USAGE: &str = "用法: blocktread-server [--port 4433] [--bind 0.0.0.0] [-
   --match-secs S    2v2 一局的时长，也是自由混战每局的时长（默认 480 秒）
   --win-points N    2v2 占点战中先拿到这么多分的队伍获胜（默认 100）
   --status FILE     每 5 秒把在线人数等写进这个 JSON 文件（部署时据此判断能不能重启）
-  --data DIR        服务器的数据目录：证书（cert.der、key.der）放在这里，第一次启动时生成，以后一直用同一张，
-                    客户端按它的指纹认这台服务器。不给的话每次启动换一张新证书（只适合本机测试）
+  --data DIR        服务器的数据目录：证书（cert.der、key.der）和账号数据库（accounts.sqlite）放在这里。
+                    证书第一次启动时生成，以后一直用同一张，客户端按它的指纹认这台服务器。
+                    不给的话每次启动换一张新证书，账号也只存在内存里（只适合本机测试）
   --fingerprint     打印证书指纹后退出（配合 --data）
 
 自由混战：服务器上只有一个房间，玩家随进随出，没有 AI；场上有 2 人以上才计时，每局按击毁数排名。
@@ -53,6 +54,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let bind: SocketAddr = format!("{host}:{port}").parse().with_context(|| format!("--bind 地址无效：{host}"))?;
+    // accounts: in the data directory, or (a dev server without one) in memory until it stops
+    hub.accounts = match &data {
+        Some(dir) => blocktread_server::store::Accounts::File(dir.join("accounts.sqlite")),
+        None => blocktread_server::store::Accounts::Memory,
+    };
     let handle = start(ServerConfig { bind, hub: hub.clone(), verbose: true, status, data })?;
     println!(
         "方块战车服务器 {BUILD} 已启动：{} · 自由混战每局 {} 秒 · 2v2 匹配最多等 {} 秒、每局 {} 秒或 {} 分 · UDP 端口 {}",

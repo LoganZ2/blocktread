@@ -8,7 +8,7 @@ use blocktread_shared::presets::preset;
 use blocktread_shared::protocol::*;
 
 fn hub(queue_wait: f32, match_secs: f32) -> Hub {
-    Hub::new(HubConfig { queue_wait, match_secs, win_points: 100 })
+    Hub::new(HubConfig { queue_wait, match_secs, win_points: 100, ..HubConfig::default() }).unwrap()
 }
 
 fn connect(h: &mut Hub, pid: u16, name: &str) -> UnboundedReceiver<Outgoing> {

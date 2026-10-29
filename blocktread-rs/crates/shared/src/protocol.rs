@@ -1,7 +1,7 @@
 //! Wire format. Reliable messages travel on one ordered QUIC stream per direction; snapshots and
 //! inputs travel as unreliable QUIC datagrams.
 
-use crate::blocks::Design;
+use crate::blocks::{BlockType, Design};
 use crate::flight::{InputCmd, Kin};
 use crate::terrain::Map;
 use glam::{Quat, Vec3};
@@ -81,6 +81,29 @@ pub enum ClientMsg {
     /// During the ship pick: the ship this player would fly (can change until `Ready`).
     Pick { design: Design },
     Ready,
+    /// Sign up, log in, or come back with a session token. Answered with `Account` or
+    /// `AuthFailed`. Without it a player is a guest: they play, but earn nothing.
+    Auth(AuthReq),
+    /// End that session (the token stops working).
+    Logout { token: String },
+    /// Spend coins on a part (answered with `Profile`, or a `Notice` saying why not).
+    Unlock { block: BlockType },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum AuthReq {
+    Register { user: String, pass: String },
+    Login { user: String, pass: String },
+    Resume { token: String },
+}
+
+/// An account's progress: coins, XP (the level follows from it, see `economy::Economy::level`)
+/// and the parts bought (`economy::Unlocks`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    pub coins: u32,
+    pub xp: u32,
+    pub unlocks: u64,
 }
 
 /// The version in a hello this build can't otherwise read (an older client's), so the server can
@@ -152,6 +175,13 @@ pub enum ServerMsg {
     /// A cloud of smoke `radius` round `pos`, until server tick `until`; a newcomer gets
     /// every cloud still hanging.
     Smoke { pos: Vec3, radius: f32, until: u32 },
+    /// Logged in as `user`; `token` logs in again next time without the password.
+    Account { user: String, token: String, profile: Profile },
+    AuthFailed { reason: String },
+    /// The account's progress changed (a part bought, a reward).
+    Profile(Profile),
+    /// What the last match (or free-for-all round) paid, and the level reached if it went up.
+    Rewarded { coins: u32, xp: u32, level_up: Option<u32> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

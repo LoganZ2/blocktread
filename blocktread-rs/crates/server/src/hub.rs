@@ -15,8 +15,14 @@
 //! room's `Game` runs its rounds (see `Game::rounds`).
 //!
 //! The test range is the same one-seat pick, into a game of its own with nobody else.
+//!
+//! Accounts (when the server keeps them, `HubConfig::accounts`): a connection may log in, and is
+//! a guest until it does. Matches pay coins and XP to the accounts in them; coins unlock parts,
+//! levels open the bigger budget tiers and 2v2. A guest is held to a newcomer's rules and earns
+//! nothing. The test range has no rules at all: anything can be tried there.
 
 use crate::game::{Game, GameConfig, SOLO_SEED};
+use crate::store::{Accounts, Done, Job, StoreThread};
 use crate::{NetEvent, Outgoing};
 use bytes::Bytes;
 use std::collections::{BTreeMap, HashMap};
@@ -24,6 +30,7 @@ use blocktread_shared::analysis::analyze;
 use blocktread_shared::arena::HILL_WIN;
 use blocktread_shared::balance::balance;
 use blocktread_shared::blocks::Design;
+use blocktread_shared::economy::{Showing, Unlocks, economy};
 use blocktread_shared::presets::{PRESETS, preset, rover};
 use blocktread_shared::protocol::*;
 use blocktread_shared::rng::Rng;
@@ -45,13 +52,18 @@ pub struct HubConfig {
     /// A 2v2 match's length (and a free-for-all round's), and the points that win a 2v2.
     pub match_secs: f32,
     pub win_points: u32,
+    /// Where accounts are kept; `Off` for a server with none (and no progression rules).
+    pub accounts: Accounts,
 }
 
 impl Default for HubConfig {
     fn default() -> Self {
-        HubConfig { queue_wait: 15.0, match_secs: 480.0, win_points: HILL_WIN }
+        HubConfig { queue_wait: 15.0, match_secs: 480.0, win_points: HILL_WIN, accounts: Accounts::Off }
     }
 }
+
+/// Failed logins a connection gets before it can't try again.
+const MAX_AUTH_FAILS: u8 = 5;
 
 type Out = tokio::sync::mpsc::UnboundedSender<Outgoing>;
 /// Who waits for what: (mode, tier) → (queued since, pid), oldest first.
@@ -84,6 +96,22 @@ struct Conn {
     name: String,
     out: Out,
     at: Where,
+    /// The account it is logged in as: id and progress.
+    account: Option<(i64, Profile)>,
+    /// A login is being checked.
+    authing: bool,
+    auth_fails: u8,
+}
+
+impl Conn {
+    /// Progress to hold it to: the account's, or a newcomer's for a guest.
+    fn profile(&self) -> Profile {
+        self.account.map_or_else(Profile::default, |a| a.1)
+    }
+
+    fn level(&self) -> u32 {
+        economy().level(self.profile().xp).0
+    }
 }
 
 struct Slot {
@@ -133,12 +161,22 @@ pub struct Hub {
     next_match: u32,
     fills: Fills,
     rng: Rng,
+    store: Option<StoreThread>,
+    /// When this hub started (seconds): with a match's id, a name for it no other run reuses.
+    boot: u64,
 }
 
 impl Hub {
-    pub fn new(cfg: HubConfig) -> Self {
+    /// Fails only if the accounts can't be opened.
+    pub fn new(cfg: HubConfig) -> anyhow::Result<Self> {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7);
-        Hub { cfg, tick: 0, conns: BTreeMap::new(), matches: BTreeMap::new(), next_match: 1, fills: Fills::new(), rng: Rng::new(seed) }
+        let store = StoreThread::start(&cfg.accounts)?;
+        Ok(Hub { cfg, tick: 0, conns: BTreeMap::new(), matches: BTreeMap::new(), next_match: 1, fills: Fills::new(), rng: Rng::new(seed), store, boot: seed / 1_000_000_000 })
+    }
+
+    /// Whether progression rules apply here (a server that keeps accounts).
+    fn ranked(&self) -> bool {
+        self.store.is_some()
     }
 
     /// For the server log: connections, matches, players waiting.
@@ -154,7 +192,7 @@ impl Hub {
                     name = format!("车长{pid}");
                 }
                 send(&out, &ServerMsg::Connected { pid });
-                self.conns.insert(pid, Conn { name, out, at: Where::Idle });
+                self.conns.insert(pid, Conn { name, out, at: Where::Idle, account: None, authing: false, auth_fails: 0 });
                 if watch {
                     self.watch(pid);
                 }
@@ -170,6 +208,22 @@ impl Hub {
                 }
                 ClientMsg::Pick { design } => self.pick(pid, design),
                 ClientMsg::Ready => self.ready(pid),
+                ClientMsg::Auth(req) => self.auth(pid, req),
+                ClientMsg::Logout { token } => {
+                    if let Some(c) = self.conns.get_mut(&pid) {
+                        c.account = None;
+                    }
+                    if let Some(s) = &self.store {
+                        s.send(Job::Logout { token });
+                    }
+                }
+                ClientMsg::Unlock { block } => {
+                    let Some(c) = self.conns.get(&pid) else { return };
+                    match (&self.store, c.account) {
+                        (Some(s), Some((account, _))) => s.send(Job::Unlock { pid, account, block }),
+                        _ => send(&c.out, &ServerMsg::Notice { text: "登录以后才能解锁部件".into() }),
+                    }
+                }
                 // a spectator whose match ended watches the next one
                 ClientMsg::Watch { .. } if self.conns.get(&pid).is_some_and(|c| c.at == Where::Idle) => self.watch(pid),
                 _ => {}
@@ -185,20 +239,110 @@ impl Hub {
         }
     }
 
+    fn auth(&mut self, pid: u16, req: AuthReq) {
+        let Some(c) = self.conns.get_mut(&pid) else { return };
+        let Some(store) = &self.store else {
+            send(&c.out, &ServerMsg::AuthFailed { reason: "这台服务器不开放账号".into() });
+            return;
+        };
+        if c.authing {
+            return;
+        }
+        if c.auth_fails >= MAX_AUTH_FAILS {
+            send(&c.out, &ServerMsg::AuthFailed { reason: "失败次数太多，请重新连接后再试".into() });
+            return;
+        }
+        c.authing = true;
+        store.send(Job::Auth { pid, req });
+    }
+
+    /// What the store has finished: logins, purchases, rewards.
+    fn store_results(&mut self) {
+        let Some(store) = &self.store else { return };
+        for done in store.ready() {
+            match done {
+                Done::Auth { pid, result } => {
+                    let Some(c) = self.conns.get_mut(&pid) else { continue };
+                    c.authing = false;
+                    match result {
+                        Ok(s) => {
+                            c.account = Some((s.id, s.profile));
+                            c.name = s.user.clone();
+                            send(&c.out, &ServerMsg::Account { user: s.user, token: s.token, profile: s.profile });
+                        }
+                        Err(reason) => {
+                            c.auth_fails += 1;
+                            send(&c.out, &ServerMsg::AuthFailed { reason });
+                        }
+                    }
+                }
+                Done::Unlock { pid, account, result } => match result {
+                    Ok(p) => self.tell_account(account, p, None),
+                    Err(text) => {
+                        if let Some(c) = self.conns.get(&pid) {
+                            send(&c.out, &ServerMsg::Notice { text });
+                        }
+                    }
+                },
+                Done::Reward { account, reward, profile, level_up } => {
+                    self.tell_account(account, profile, Some(ServerMsg::Rewarded { coins: reward.coins, xp: reward.xp, level_up }));
+                }
+            }
+        }
+    }
+
+    /// An account's new progress, to every connection logged in as it (and `also` with it).
+    fn tell_account(&mut self, account: i64, p: Profile, also: Option<ServerMsg>) {
+        for c in self.conns.values_mut().filter(|c| c.account.is_some_and(|a| a.0 == account)) {
+            c.account = Some((account, p));
+            if let Some(m) = &also {
+                send(&c.out, m);
+            }
+            send(&c.out, &ServerMsg::Profile(p));
+        }
+    }
+
+    /// Pay the accounts among `showings` for game `game`.
+    fn pay(&self, game: String, showings: Vec<(u16, Showing)>) {
+        let Some(store) = &self.store else { return };
+        for (pid, showing) in showings {
+            if let Some((account, _)) = self.conns.get(&pid).and_then(|c| c.account) {
+                store.send(Job::Reward { account, game: game.clone(), showing });
+            }
+        }
+    }
+
     fn queue(&mut self, pid: u16, mode: Mode, tier: Option<String>) {
         let now = self.tick;
+        let ranked = self.ranked();
         let Some(c) = self.conns.get_mut(&pid) else { return };
         if c.at != Where::Idle {
             return;
         }
         // only 2v2 is matched by budget: the room and the test range take any vehicle
         let tier = tier.filter(|k| mode == Mode::Teams && balance().tier(k).is_some());
+        if ranked && mode == Mode::Teams {
+            let (e, level) = (economy(), c.level());
+            let refuse = if level < e.teams_level {
+                Some(format!("2v2 {} 级开放，你现在 {level} 级。先在自由混战里升级吧", e.teams_level))
+            } else if !e.tier_open(tier.as_deref(), level) {
+                let t = tier.as_deref().and_then(|k| balance().tier(k)).map_or("", |t| t.name.as_str());
+                Some(format!("{t}档 {} 级开放，你现在 {level} 级", e.tier_levels.get(tier.as_deref().unwrap_or("")).copied().unwrap_or(1)))
+            } else {
+                None
+            };
+            if let Some(text) = refuse {
+                send(&c.out, &ServerMsg::Notice { text });
+                return;
+            }
+        }
         c.at = Where::Queued { mode, tier, since: now };
         self.queue_status();
     }
 
     pub fn tick(&mut self) {
         self.tick += 1;
+        self.store_results();
         if self.tick % 15 == 0 {
             self.matchmake();
         }
@@ -374,8 +518,16 @@ impl Hub {
             return;
         }
         let a = analyze(&design);
-        let refuse = match (a.first_error(), m.budget()) {
+        // the progression rules (never on the test range): parts bought, and in the room a cost
+        // the player's level allows
+        let c = &self.conns[&pid];
+        let ranked = self.ranked() && m.mode != Mode::Solo;
+        let locked = if ranked { economy().locked(&design, Unlocks(c.profile().unlocks)) } else { Vec::new() };
+        let level_cap = if ranked && m.mode == Mode::Ffa { economy().budget_at(c.level()) } else { None };
+        let refuse = match (a.first_error(), m.budget().or(level_cap)) {
             (Some(e), _) => Some(format!("这辆没有通过出车检查：{}", e.msg)),
+            _ if !locked.is_empty() => Some(format!("这辆用了还没解锁的部件：{}", locked.iter().map(|t| t.info().name.as_str()).collect::<Vec<_>>().join("、"))),
+            (None, Some(b)) if a.stats.cost > b + 1e-3 && m.budget().is_none() => Some(format!("这辆造价 {:.0}，你的等级最多开造价 {b:.0} 的车", a.stats.cost)),
             (None, Some(b)) if a.stats.cost > b + 1e-3 => Some(format!("这辆造价 {:.0}，超出本局上限 {b:.0}", a.stats.cost)),
             _ => None,
         };
@@ -477,6 +629,7 @@ impl Hub {
         let now = self.tick;
         let Some(m) = self.matches.get_mut(&id) else { return };
         let all_in = m.slots.iter().all(|s| s.ready);
+        let mut paid = None;
         let next = match &mut m.phase {
             Phase::Pick { until } if all_in || now >= *until => Next::Start,
             Phase::Pick { .. } => {
@@ -485,6 +638,11 @@ impl Hub {
             }
             Phase::Play(g) => {
                 g.tick();
+                // the room's rounds pay as each one ends
+                let (round, done) = g.take_results();
+                if !done.is_empty() {
+                    paid = Some((format!("{}-{id}-{round}", self.boot), done));
+                }
                 let best = g.points().values().copied().max().unwrap_or(0);
                 if !g.has_players() {
                     // everyone left: nobody to finish it for
@@ -496,6 +654,9 @@ impl Hub {
                 }
             }
         };
+        if let Some((game, showings)) = paid {
+            self.pay(game, showings);
+        }
         match next {
             Next::Wait => {}
             Next::Start => self.start(id),
@@ -579,6 +740,14 @@ impl Hub {
             (_, [t]) => m.slots.iter().find(|s| s.team == *t).map_or("平局".to_string(), |s| format!("{} 获胜", s.name)),
         };
         g.broadcast(&ServerMsg::MatchOver { winner, rows: g.scores() });
+        // a 2v2 pays the players still in it at the end (one who left handed their seat to AI)
+        if m.mode == Mode::Teams {
+            let won = match leaders.as_slice() {
+                [t] => Some(*t),
+                _ => None,
+            };
+            self.pay(format!("{}-{id}", self.boot), g.showings(won));
+        }
         for pid in m.slots.iter().filter_map(|s| s.pid).chain(m.watchers.iter().copied()) {
             if let Some(c) = self.conns.get_mut(&pid) {
                 c.at = Where::Idle;

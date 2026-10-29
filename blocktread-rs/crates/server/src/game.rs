@@ -7,6 +7,7 @@ use blocktread_shared::ai::{AiPilot, Contact, Skill};
 use blocktread_shared::analysis::analyze;
 use blocktread_shared::balance::balance;
 use blocktread_shared::blocks::{BlockType, DamageKind, Design, Melee, MeleeSpec};
+use blocktread_shared::economy::Showing;
 use blocktread_shared::drive::{saw_bites, spawn_height, step_drive};
 use blocktread_shared::flight::{InputCmd, Kin, NO_LOCK, collide_rocks, look_rotation};
 use blocktread_shared::gadgets::{Cloud, MINE_ARM, hidden};
@@ -51,6 +52,8 @@ struct Player {
     deaths: u32,
     score: u32,
     respawn_at: Option<u32>,
+    /// The tick they came in.
+    since: u32,
 }
 
 impl Player {
@@ -260,6 +263,11 @@ pub struct Game {
     pub rounds: Option<f32>,
     round: Round,
     round_end: u32,
+    /// The free-for-all room's rounds so far, and the tick the current one started.
+    round_no: u32,
+    round_start: u32,
+    /// How each player did in rounds that have ended, for the hub to pay out (`take_results`).
+    results: Vec<(u16, Showing)>,
     /// The tick each of the arena's pick-up pads is back up (up now once it has passed).
     pads: Vec<u32>,
     /// 2v2 in the arena: the fight over the hill (None in the other modes).
@@ -366,6 +374,9 @@ impl Game {
             rounds: None,
             round: Round::None,
             round_end: 0,
+            round_no: 0,
+            round_start: 0,
+            results: Vec::new(),
             pads,
             hill,
             mines: Vec::new(),
@@ -462,6 +473,7 @@ impl Game {
             deaths: 0,
             score: 0,
             respawn_at: None,
+            since: self.tick,
         };
         p.send(&ServerMsg::Welcome { pid, tick: self.tick, mode: self.cfg.mode, seed: self.seed, map: self.terrain.map });
         // bring the newcomer up to date with every ship, including blocks already shot off
@@ -1436,6 +1448,8 @@ impl Game {
         self.team_kills.clear();
         self.repair_players();
         self.round = Round::Running;
+        self.round_no += 1;
+        self.round_start = self.tick;
         self.round_end = self.tick + secs(len);
         self.scores_dirty = true;
         self.announce("开战", format!("{} 人混战 · {} 内击毁最多的人获胜", self.pilots(), span(len)));
@@ -1446,6 +1460,13 @@ impl Game {
         self.round_end = self.tick + secs(ROUND_BREAK_SECS);
         self.scores_dirty = true;
         let rows = self.scores();
+        // each player's showing: the minutes of the round they were in, their kills, their place
+        for (place, r) in rows.iter().enumerate() {
+            if let Some(p) = self.players.get(&r.pid) {
+                let secs = self.tick.saturating_sub(p.since.max(self.round_start)) as f32 / TICK_RATE as f32;
+                self.results.push((r.pid, Showing { secs, kills: r.kills, won: false, place: Some(place) }));
+            }
+        }
         let next = format!("{:.0} 秒后开始下一局", ROUND_BREAK_SECS);
         let Some(top) = rows.first().filter(|r| r.kills > 0) else {
             self.announce("本局结束", format!("没有人击毁对手 · {next}"));
@@ -1459,6 +1480,24 @@ impl Game {
             (format!("{} 获胜", top.name), format!("击毁 {} · 阵亡 {} · {next}", top.kills, top.deaths))
         };
         self.announce(&title, sub);
+    }
+
+    /// Showings from the rounds that ended since the last call, with the round each was in.
+    pub fn take_results(&mut self) -> (u32, Vec<(u16, Showing)>) {
+        (self.round_no, std::mem::take(&mut self.results))
+    }
+
+    /// How each player still in it did over the whole game (a 2v2 at its end): `winner` is the
+    /// winning team, if one won.
+    pub fn showings(&self, winner: Option<u16>) -> Vec<(u16, Showing)> {
+        self.players
+            .iter()
+            .filter(|(_, p)| !p.watching())
+            .map(|(&pid, p)| {
+                let secs = self.tick.saturating_sub(p.since) as f32 / TICK_RATE as f32;
+                (pid, Showing { secs, kills: p.kills, won: winner.is_some_and(|w| p.team == Some(w)), place: None })
+            })
+            .collect()
     }
 
     /// For someone driving into the room: where its round stands (None when one starts right away).
