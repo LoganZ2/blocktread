@@ -27,6 +27,8 @@ pub enum Screen {
     Boot,
     /// The entry page: pick a server (with its ping), start.
     Entry,
+    /// Log in to the server picked, sign up, or go on as a guest.
+    Login,
     /// The lobby: your ship on display, the mode to play, matchmaking.
     Menu,
     Hangar,
@@ -88,8 +90,8 @@ impl DevOpts {
 }
 
 const USAGE: &str = "用法: blocktread-client [--name 名字] [--server 地址:端口|local]
-开发用: [--launch ffa|2v2|solo|watch] [--local] [--autopilot] [--latency 毫秒] [--screen lobby|error|hangar|settings]
-       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|overview|hillcam|ventcam|boom|gadgets|tip|revert|next|hover|hit|shieldhit|kill|nohud|serverlist|account:秒] [--frame-stats] [--port 端口] [--mute]";
+开发用: [--launch ffa|2v2|solo|watch] [--local] [--autopilot] [--latency 毫秒] [--screen lobby|login|error|hangar|settings]
+       [--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]] [--offscreen] [--force pause|board|side|overview|hillcam|ventcam|boom|gadgets|tip|revert|next|hover|hit|shieldhit|kill|nohud|serverlist|account|register:秒] [--frame-stats] [--port 端口] [--mute]";
 
 fn main() {
     let mut s = settings::load_settings();
@@ -189,6 +191,7 @@ fn boot(mut next: ResMut<NextState<Screen>>, dev: Res<DevOpts>, mut overlays: Re
     }
     next.set(match dev.start.as_deref() {
         Some("hangar") => Screen::Hangar,
+        Some("login") => Screen::Login,
         // straight to the lobby for unattended runs
         Some("lobby" | "error") => Screen::Menu,
         _ if dev.auto_launch.is_some() => Screen::Menu,

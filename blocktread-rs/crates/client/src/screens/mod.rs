@@ -5,6 +5,7 @@
 
 pub mod carousel;
 pub mod entry;
+pub mod login;
 pub mod matching;
 pub mod menu;
 
@@ -29,7 +30,7 @@ pub struct ScreensPlugin;
 
 impl Plugin for ScreensPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((entry::EntryPlugin, menu::MenuPlugin, carousel::CarouselPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
+        app.add_plugins((entry::EntryPlugin, login::LoginPlugin, menu::MenuPlugin, carousel::CarouselPlugin, matching::MatchPlugin, FrameTimeDiagnosticsPlugin::default()))
             .init_resource::<Overlays>()
             .init_resource::<Showcase>()
             // the lobby's vehicles are the carousel's
@@ -37,10 +38,14 @@ impl Plugin for ScreensPlugin {
             .add_systems(OnEnter(Screen::Entry), |c: Commands, a: Res<Stage>, s: Res<DaySky>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
                 spawn_showcase(c, a, s, art, m, h, cam, Screen::Entry)
             })
+            // the login page keeps the entry page's look: the parked vehicle beside its column
+            .add_systems(OnEnter(Screen::Login), |c: Commands, a: Res<Stage>, s: Res<DaySky>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
+                spawn_showcase(c, a, s, art, m, h, cam, Screen::Login)
+            })
             .add_systems(OnEnter(Screen::Match), |c: Commands, a: Res<Stage>, s: Res<DaySky>, art: ResMut<BlockArt>, m: ResMut<Assets<StandardMaterial>>, h: Res<Hangar>, cam: Single<(Entity, &mut Projection), With<MainCamera>>| {
                 spawn_showcase(c, a, s, art, m, h, cam, Screen::Match)
             })
-            .add_systems(Update, showcase_camera.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Match | Screen::Entry)))
+            .add_systems(Update, showcase_camera.run_if(|s: Res<State<Screen>>| matches!(s.get(), Screen::Match | Screen::Entry | Screen::Login)))
             .add_systems(Update, (global_actions, refresh_showcase, render_settings, display_banner, apply_settings, fps_text));
     }
 }
@@ -142,7 +147,7 @@ fn refresh_showcase(
 /// The camera on the parked vehicle: on the entry page it sits right of the page's column.
 fn showcase_camera(time: Res<Time>, state: Res<State<Screen>>, ship: Query<&ShowcaseShip>, mut cam: Single<&mut Transform, With<MainCamera>>) {
     let Ok(s) = ship.single() else { return };
-    let shift = if *state.get() == Screen::Entry { Vec2::new(0.3, 0.0) } else { Vec2::ZERO };
+    let shift = if matches!(state.get(), Screen::Entry | Screen::Login) { Vec2::new(0.3, 0.0) } else { Vec2::ZERO };
     **cam = parked_view(s.0, time.elapsed_secs(), shift);
 }
 

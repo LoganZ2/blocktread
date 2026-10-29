@@ -1,6 +1,7 @@
 //! The entry page, first after starting the game: the title in a column down the left over your
 //! vehicle parked on the field, the server to play on in a dropdown (each with its live ping), and
-//! 开始游戏 into the lobby. The lobby plays on that server; its 更换 comes back here.
+//! 开始游戏 on to the login page (accounts are the server's) and then the lobby. The lobby plays
+//! on that server; its 更换 comes back here.
 
 use super::Overlays;
 use crate::settings::{self, Regions, Settings};
@@ -293,7 +294,7 @@ fn entry_actions(
                 let at = current(&chosen, &settings, &regions, pings.as_deref());
                 settings.region = regions.0[at].key.clone();
                 settings::save_settings(&settings);
-                next.set(Screen::Menu);
+                next.set(Screen::Login);
             }
             _ => {}
         }
