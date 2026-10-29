@@ -202,7 +202,7 @@ fn the_test_range_is_yours_alone_until_you_leave() {
     msg(&mut h, 1, ClientMsg::Ready);
     ticks(&mut h, 2);
     let m = drain(&mut a);
-    assert!(m.iter().any(|m| matches!(m, ServerMsg::Welcome { mode: Mode::Solo, asteroid_seed, .. } if *asteroid_seed == blocktread_server::game::SOLO_SEED)), "the same map every time: {m:?}");
+    assert!(m.iter().any(|m| matches!(m, ServerMsg::Welcome { mode: Mode::Solo, seed, .. } if *seed == blocktread_server::game::SOLO_SEED)), "the same map every time: {m:?}");
     assert_eq!(m.iter().filter(|m| matches!(m, ServerMsg::ShipSpawn { .. })).count(), 1, "only your own vehicle");
     // well past the match length: nobody else turns up, and it doesn't end
     ticks(&mut h, 20 * 60);

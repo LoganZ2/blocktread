@@ -21,7 +21,7 @@ use blocktread_shared::protocol::*;
 use blocktread_shared::ship::ShipBody;
 use blocktread_shared::weapons::{MISSILE_ACCEL, MISSILE_TOP, Shot, WeaponState, missile_ahead, step_weapons};
 use blocktread_shared::terrain::{Map, Terrain};
-use blocktread_shared::world::{Asteroid, generate_boulders, tick_time};
+use blocktread_shared::world::{Rock, generate_boulders, tick_time};
 use blocktread_shared::{DT, PROTOCOL_VERSION, SNAPSHOT_INTERVAL, TICK_RATE};
 
 pub struct CoreShip {
@@ -181,12 +181,10 @@ pub struct ClientCore {
     pub ships: BTreeMap<u16, CoreShip>,
     pub missiles: BTreeMap<u16, MissileView>,
     pub terrain: Arc<Terrain>,
-    pub rocks: Vec<Asteroid>,
+    pub rocks: Vec<Rock>,
     pub clock: ServerClock,
     pub pred: Option<Predictor>,
     pub scores: Vec<ScoreRow>,
-    pub wave: u32,
-    pub enemies: u32,
     /// Kills that win the match (0 = none) and seconds left on its clock (0 = no clock).
     pub limit: u32,
     pub left: f32,
@@ -235,8 +233,6 @@ impl ClientCore {
             clock: ServerClock::default(),
             pred: None,
             scores: Vec::new(),
-            wave: 0,
-            enemies: 0,
             limit: 0,
             left: 0.0,
             round: Round::None,
@@ -344,10 +340,10 @@ impl ClientCore {
         s.overdrive_until.saturating_sub(self.clock.latest) as f32 / TICK_RATE as f32
     }
 
-    /// Server time (seconds) to turn the asteroids to when drawing them: the predicted tick while
-    /// flying, so the rocks sit exactly where the predicted ship collides with them; the
-    /// interpolated time otherwise.
-    pub fn rock_time(&self) -> f64 {
+    /// Server time (seconds) to draw the arena's saws and vents at: the predicted tick while
+    /// driving, so they sit exactly where the predicted vehicle meets them; the interpolated time
+    /// otherwise.
+    pub fn arena_time(&self) -> f64 {
         match &self.pred {
             Some(p) => tick_time(p.tick),
             None => self.clock.render_tick() / TICK_RATE as f64,
@@ -522,13 +518,13 @@ impl ClientCore {
 
     fn on_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::Welcome { pid, tick, mode, asteroid_seed, map } => {
+            ServerMsg::Welcome { pid, tick, mode, seed, map } => {
                 self.reset_world();
                 self.pid = Some(pid);
                 self.mode = Some(mode);
-                self.terrain = Arc::new(Terrain::for_map(map, asteroid_seed));
+                self.terrain = Arc::new(Terrain::for_map(map, seed));
                 self.pads = vec![0; self.terrain.arena.as_ref().map_or(0, |a| a.pads.len())];
-                self.rocks = if map == Map::Desert { generate_boulders(asteroid_seed, &self.terrain) } else { Vec::new() };
+                self.rocks = if map == Map::Desert { generate_boulders(seed, &self.terrain) } else { Vec::new() };
                 self.clock.sync(tick);
                 self.state = ConnState::InGame;
                 self.phase = Phase::Playing;
@@ -652,11 +648,9 @@ impl ClientCore {
                 self.clouds.push(c);
                 self.events.push(CoreEvent::Smoke(c));
             }
-            ServerMsg::Scores { rows, wave, enemies, limit, left, round, hill } => {
+            ServerMsg::Scores { rows, limit, left, round, hill } => {
                 self.hill = hill;
                 self.scores = rows;
-                self.wave = wave;
-                self.enemies = enemies;
                 self.limit = limit;
                 self.left = left;
                 self.round = round;

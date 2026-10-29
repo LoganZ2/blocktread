@@ -5,16 +5,14 @@ pub struct Preset {
     pub key: &'static str,
     pub name: &'static str,
     pub desc: &'static str,
-    /// Relative cost when the server builds enemy waves.
-    pub cost: f32,
 }
 
 pub const PRESETS: [Preset; 5] = [
-    Preset { key: "rover", name: "越野车", desc: "轻型侦察车", cost: 1.0 },
-    Preset { key: "wasp", name: "黄蜂", desc: "悬浮侦察车", cost: 1.0 },
-    Preset { key: "bison", name: "野牛", desc: "六轮装甲车", cost: 2.0 },
-    Preset { key: "scorpion", name: "毒蝎", desc: "导弹车", cost: 2.0 },
-    Preset { key: "rhino", name: "犀牛", desc: "重型炮车", cost: 4.0 },
+    Preset { key: "rover", name: "越野车", desc: "轻型侦察车" },
+    Preset { key: "wasp", name: "黄蜂", desc: "悬浮侦察车" },
+    Preset { key: "bison", name: "野牛", desc: "六轮装甲车" },
+    Preset { key: "scorpion", name: "毒蝎", desc: "导弹车" },
+    Preset { key: "rhino", name: "犀牛", desc: "重型炮车" },
 ];
 
 struct Mk(Vec<Block>);

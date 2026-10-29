@@ -183,8 +183,6 @@ impl Hub {
         if c.at != Where::Idle {
             return;
         }
-        // co-op waves aren't matched (yet): queue for free-for-all instead
-        let mode = if mode == Mode::Coop { Mode::Ffa } else { mode };
         // only 2v2 is matched by budget: the room and the test range take any vehicle
         let tier = tier.filter(|k| mode == Mode::Teams && balance().tier(k).is_some());
         c.at = Where::Queued { mode, tier, since: now };

@@ -105,9 +105,8 @@ jobs:
             aarch64|arm64) arch=aarch64 ;;
             *) echo "::error::服务器的 CPU 架构不支持"; exit 1 ;;
           esac
-          # releases from before the rename call it voxwing-server: rolling back to one still works
-          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "*-server-$arch-linux" -D bin
-          bin=$(ls bin/*-server-"$arch"-linux | head -1)
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "blocktread-server-$arch-linux" -D bin
+          bin="bin/blocktread-server-$arch-linux"
           ssh "${opts[@]}" -p "$PORT" "$at" "mkdir -p blocktread-server/releases/$TAG"
           scp "${opts[@]}" -P "$PORT" "$bin" "$at:blocktread-server/releases/$TAG/blocktread-server"
           scp "${opts[@]}" -P "$PORT" blocktread-rs/deploy/remote-deploy.sh blocktread-rs/deploy/blocktread-server.service "$at:blocktread-server/"

@@ -1,6 +1,6 @@
 use crate::analysis::Stats;
 use crate::ship::ShipBody;
-use crate::world::Asteroid;
+use crate::world::Rock;
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
@@ -130,19 +130,16 @@ pub struct Impact {
     pub speed: f32,
 }
 
-/// Push the ship out of any asteroid it overlaps (per block, not just its bounding sphere).
-/// Returns hard impacts so the server can apply damage; prediction ignores them.
-/// Push the ship out of any asteroid it overlaps at `t` seconds of server time (the rocks turn),
-/// testing every live block against the rock's actual surface.
-pub fn collide_asteroids(k: &mut Kin, body: &ShipBody, asteroids: &[Asteroid], t: f64) -> Option<Impact> {
+/// Push the vehicle out of any rock it overlaps, testing every live block against the rock's
+/// actual surface. Returns hard impacts so the server can apply damage; prediction ignores them.
+pub fn collide_rocks(k: &mut Kin, body: &ShipBody, rocks: &[Rock]) -> Option<Impact> {
     /// Blocks collide as spheres of this radius (a cube's faces are 0.5 from its centre).
     const BLOCK_R: f32 = 0.55;
     let mut out = None;
-    for a in asteroids {
+    for a in rocks {
         if k.pos.distance(a.pos) > body.radius + a.r {
             continue;
         }
-        let rot = a.rotation(t);
         let mut pen = 0.0;
         let mut contact = Vec3::ZERO;
         let mut n = Vec3::Y;
@@ -151,7 +148,7 @@ pub fn collide_asteroids(k: &mut Kin, body: &ShipBody, asteroids: &[Asteroid], t
                 continue;
             }
             let w = body.world(k.pos, k.rot, i);
-            let (dist, normal) = a.surface(w, rot);
+            let (dist, normal) = a.surface(w);
             let p = BLOCK_R - dist;
             if p > pen {
                 pen = p;

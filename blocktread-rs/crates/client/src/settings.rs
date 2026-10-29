@@ -50,17 +50,10 @@ impl Default for Settings {
     }
 }
 
-/// The first time, it starts as a copy of what the game kept under its old name in ~/.voxwing
-/// (left in place for the flying version, which still reads it).
 fn dir() -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?);
     let d = home.join(".blocktread");
-    if !d.is_dir() {
-        std::fs::create_dir_all(&d).ok()?;
-        for f in ["settings.json", FLEET_FILE, "servers.json"] {
-            let _ = std::fs::copy(home.join(".voxwing").join(f), d.join(f));
-        }
-    }
+    std::fs::create_dir_all(&d).ok()?;
     Some(d)
 }
 
@@ -169,7 +162,7 @@ struct Packed {
 }
 
 fn pack(d: &Design) -> Packed {
-    Packed { n: d.name.clone(), b: d.blocks.iter().map(|b| (b.x as i32, b.y as i32, b.z as i32, b.ty.index(), b.color)).collect() }
+    Packed { n: d.name.clone(), b: d.blocks.iter().map(|b| (b.x as i32, b.y as i32, b.z as i32, b.ty.code() as usize, b.color)).collect() }
 }
 
 fn unpack(p: Packed) -> Design {
@@ -177,7 +170,7 @@ fn unpack(p: Packed) -> Design {
         .b
         .into_iter()
         .filter_map(|(x, y, z, t, c)| {
-            let ty = BlockType::from_index(t)?;
+            let ty = BlockType::from_code(t)?;
             in_grid(blocktread_shared::glam::IVec3::new(x, y, z)).then(|| Block::new(x, y, z, ty, Some(c)))
         })
         .collect();
@@ -185,7 +178,6 @@ fn unpack(p: Packed) -> Design {
 }
 
 /// Your vehicles in the order the garage shows them, and which one is selected (`vehicles.json`).
-/// The flight version's planes stay in `ships.json`, untouched.
 #[derive(Clone, Debug)]
 pub struct Fleet {
     pub ships: Vec<Design>,
@@ -216,8 +208,7 @@ pub fn save_fleet(f: &Fleet) {
     write(FLEET_FILE, &FleetFile { current: f.current, ships: f.ships.iter().map(pack).collect() });
 }
 
-/// Share codes: `BT1.` and the design as base64 JSON. (The flight version's `VW1.` codes hold
-/// planes, which can't drive.)
+/// Share codes: `BT1.` and the design as base64 JSON.
 const SHARE: &str = "BT1.";
 
 pub fn encode_share(d: &Design) -> String {
@@ -226,9 +217,6 @@ pub fn encode_share(d: &Design) -> String {
 
 pub fn decode_share(code: &str) -> Result<Design, String> {
     let s: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    if s.starts_with("VW1.") {
-        return Err("这是飞机版的分享码，飞机开不了".into());
-    }
     let body = s.strip_prefix(SHARE).ok_or(format!("分享码应该以 {SHARE} 开头"))?;
     let bytes = B64.decode(body).map_err(|_| "分享码不完整")?;
     let p: Packed = serde_json::from_slice(&bytes).map_err(|_| "分享码内容无法识别")?;

@@ -47,7 +47,7 @@ struct PlayBox;
 struct QueueLine;
 #[derive(Component)]
 struct NameField;
-/// The mode a settings key stands for ("coop" from older settings files plays free-for-all).
+/// The mode a settings key stands for (anything unknown plays free-for-all).
 pub fn mode_of(key: &str) -> Mode {
     match key {
         "2v2" => Mode::Teams,

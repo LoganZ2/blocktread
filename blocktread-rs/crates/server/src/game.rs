@@ -8,7 +8,7 @@ use blocktread_shared::analysis::analyze;
 use blocktread_shared::balance::balance;
 use blocktread_shared::blocks::{BlockType, DamageKind, Design, Melee, MeleeSpec};
 use blocktread_shared::drive::{saw_bites, spawn_height, step_drive};
-use blocktread_shared::flight::{InputCmd, Kin, NO_LOCK, collide_asteroids, look_rotation};
+use blocktread_shared::flight::{InputCmd, Kin, NO_LOCK, collide_rocks, look_rotation};
 use blocktread_shared::gadgets::{Cloud, MINE_ARM, hidden};
 use blocktread_shared::presets::{PRESETS, enemy_colors, preset};
 use blocktread_shared::protocol::*;
@@ -17,7 +17,7 @@ use blocktread_shared::ship::ShipBody;
 use blocktread_shared::weapons::{MISSILE_ACCEL, MISSILE_TOP, MISSILE_TURN, Shot, WeaponState, step_weapons};
 use blocktread_shared::arena::{HILL_HALF, HILL_KILL, HILL_TOP, KILL_Y, OVERDRIVE_MUL, OVERDRIVE_SECS, PadKind, SAW_DMG, VENT_DPS, VENT_HIGH};
 use blocktread_shared::terrain::{Map, Terrain};
-use blocktread_shared::world::{Asteroid, PLAYER_SPAWN, generate_boulders, tick_time};
+use blocktread_shared::world::{Rock, SPAWN, generate_boulders, tick_time};
 use blocktread_shared::{DT, HISTORY_TICKS, SNAPSHOT_INTERVAL, TICK_RATE};
 
 pub struct GameConfig {
@@ -51,7 +51,6 @@ struct Player {
     deaths: u32,
     score: u32,
     respawn_at: Option<u32>,
-    order: u32,
 }
 
 impl Player {
@@ -228,9 +227,6 @@ struct Bolt {
 }
 
 enum Timer {
-    StartWave,
-    RepairPlayers,
-    Restart,
     SpawnBot,
 }
 
@@ -244,17 +240,13 @@ pub struct Game {
     bolts: Vec<Bolt>,
     next_bolt: u16,
     terrain: Arc<Terrain>,
-    rocks: Vec<Asteroid>,
+    rocks: Vec<Rock>,
     seed: u64,
-    wave: u32,
-    between: bool,
-    wiped: bool,
     timers: Vec<(u32, Timer)>,
     pending_bots: u32,
     seats: Vec<BotSeat>,
     events: Vec<ServerMsg>,
     scores_dirty: bool,
-    joins: u32,
     shots: Vec<Shot>,
     /// Kills scored by each team (a free-for-all seat is a team of one).
     team_kills: BTreeMap<u16, u32>,
@@ -335,7 +327,7 @@ impl Game {
     pub fn with_seed(cfg: GameConfig, seed: u64) -> Self {
         let map = match cfg.mode {
             Mode::Ffa | Mode::Teams => Map::Cage,
-            Mode::Coop | Mode::Solo => Map::Desert,
+            Mode::Solo => Map::Desert,
         };
         Self::with_map(cfg, seed, map)
     }
@@ -358,15 +350,11 @@ impl Game {
             rocks: if map == Map::Desert { generate_boulders(seed, &terrain) } else { Vec::new() },
             terrain,
             seed,
-            wave: 0,
-            between: true,
-            wiped: false,
             timers: Vec::new(),
             pending_bots: 0,
             seats: Vec::new(),
             events: Vec::new(),
             scores_dirty: true,
-            joins: 0,
             shots: Vec::new(),
             team_kills: BTreeMap::new(),
             limit: 0,
@@ -453,7 +441,6 @@ impl Game {
         if name.is_empty() {
             name = format!("车长{pid}");
         }
-        self.joins += 1;
         // what happened before this join goes to those already here: the newcomer gets the world
         // as it is now (several join between two ticks when a match starts)
         self.send_events();
@@ -471,9 +458,8 @@ impl Game {
             deaths: 0,
             score: 0,
             respawn_at: None,
-            order: self.joins,
         };
-        p.send(&ServerMsg::Welcome { pid, tick: self.tick, mode: self.cfg.mode, asteroid_seed: self.seed, map: self.terrain.map });
+        p.send(&ServerMsg::Welcome { pid, tick: self.tick, mode: self.cfg.mode, seed: self.seed, map: self.terrain.map });
         // bring the newcomer up to date with every ship, including blocks already shot off
         for s in self.ships.values() {
             p.send(&spawn_msg(s));
@@ -513,20 +499,6 @@ impl Game {
         self.feed(format!("{name} 加入了战场"), false);
         self.scores_dirty = true;
         match self.cfg.mode {
-            Mode::Coop => {
-                if !self.wiped {
-                    self.spawn_player(pid);
-                }
-                if self.wave == 0 && self.between && !self.timers.iter().any(|t| matches!(t.1, Timer::StartWave)) {
-                    self.announce("准备战斗", "第一波敌车即将抵达".into());
-                    self.after(3.0, Timer::StartWave);
-                } else if !self.wiped {
-                    let sub = format!("第 {} 波进行中", self.wave);
-                    if let Some(p) = self.players.get(&pid) {
-                        p.send(&ServerMsg::Announce { title: "合作波次".into(), sub });
-                    }
-                }
-            }
             Mode::Ffa | Mode::Teams => {
                 self.spawn_player(pid);
                 let sub = match (self.cfg.mode, self.limit) {
@@ -653,19 +625,12 @@ impl Game {
         if p.ship.is_some() {
             return;
         }
-        let (name, order) = (p.name.clone(), p.order);
-        let team = p.team.unwrap_or(match self.cfg.mode {
-            Mode::Coop => 0,
-            Mode::Ffa | Mode::Teams | Mode::Solo => 1000 + pid,
-        });
+        let name = p.name.clone();
+        let team = p.team.unwrap_or(1000 + pid);
         let (pos, rot) = match self.cfg.mode {
-            Mode::Coop => {
-                let side = (order as f32 - 1.0) * 28.0 * if order % 2 == 0 { 1.0 } else { -1.0 };
-                (PLAYER_SPAWN + Vec3::new(side, (order % 3) as f32 * 8.0, 0.0), Quat::IDENTITY)
-            }
             Mode::Ffa | Mode::Teams => self.spawn_point(team),
             // the test range: always the same spot, facing the middle of the map
-            Mode::Solo => (PLAYER_SPAWN, Quat::IDENTITY),
+            Mode::Solo => (SPAWN, Quat::IDENTITY),
         };
         let id = self.add_ship(design, name, team, Some(pid), pos, rot, None);
         if let Some(p) = self.players.get_mut(&pid) {
@@ -718,57 +683,12 @@ impl Game {
                 return (pos, rot);
             }
         }
-        (PLAYER_SPAWN, Quat::IDENTITY)
+        (SPAWN, Quat::IDENTITY)
     }
 
     /// No rock within `gap` of (x, z).
     fn clear_ground(&self, pos: Vec3, gap: f32) -> bool {
         self.rocks.iter().all(|a| a.pos.with_y(0.0).distance(pos.with_y(0.0)) > a.r + gap)
-    }
-
-    fn start_wave(&mut self) {
-        if !self.players.values().any(|p| p.ship.is_some()) {
-            return;
-        }
-        self.wave += 1;
-        let w = self.wave;
-        let mut budget = 1.5 + w as f32 * 1.3 + (self.pilots().saturating_sub(1)) as f32 * 1.5;
-        let mut picks: Vec<usize> = Vec::new();
-        let cap = (w as usize + self.pilots().max(1)).min(10);
-        while picks.len() < cap {
-            let opts: Vec<usize> = (0..PRESETS.len()).filter(|&i| PRESETS[i].cost <= budget && (PRESETS[i].key != "rhino" || w >= 3)).collect();
-            if opts.is_empty() {
-                break;
-            }
-            let i = opts[self.rng.below(opts.len())];
-            budget -= PRESETS[i].cost;
-            picks.push(i);
-        }
-        if picks.is_empty() {
-            picks.push(1);
-        }
-        let centre = self.player_centre();
-        let fwd = Vec3::NEG_Z;
-        let side = Vec3::X;
-        let n = picks.len();
-        for (k, &i) in picks.iter().enumerate() {
-            let off = k as f32 - (n as f32 - 1.0) / 2.0;
-            let mut pos = centre + fwd * self.rng.range(650.0, 850.0) + side * (off * 60.0 + self.rng.range(-20.0, 20.0)) + Vec3::Y * self.rng.range(-60.0, 60.0);
-            if pos.length() > blocktread_shared::ARENA_R * 0.9 {
-                pos = pos.normalize() * blocktread_shared::ARENA_R * 0.85;
-            }
-            let rot = look_rotation(pos, centre, Vec3::Y);
-            let d = Arc::new(enemy_colors(&preset(PRESETS[i].key)));
-            self.add_ship(d, format!("敌方·{}", PRESETS[i].name), 1, None, pos, rot, Some(Skill::for_wave(w)));
-        }
-        self.between = false;
-        self.announce(&format!("第 {w} 波"), format!("{n} 辆敌车来袭"));
-        self.scores_dirty = true;
-    }
-
-    fn player_centre(&self) -> Vec3 {
-        let ps: Vec<Vec3> = self.players.values().filter_map(|p| p.ship).filter_map(|id| self.ships.get(&id)).map(|s| s.kin.pos).collect();
-        if ps.is_empty() { PLAYER_SPAWN } else { ps.iter().copied().sum::<Vec3>() / ps.len() as f32 }
     }
 
     /// Every player's vehicle as good as new, and those without one back in.
@@ -806,21 +726,6 @@ impl Game {
         };
         for t in due {
             match t {
-                Timer::StartWave => self.start_wave(),
-                Timer::RepairPlayers => {
-                    self.repair_players();
-                    self.feed("战车已完全修复".into(), false);
-                }
-                Timer::Restart => {
-                    self.wiped = false;
-                    self.wave = 0;
-                    let pids: Vec<u16> = self.players.keys().copied().collect();
-                    for pid in pids {
-                        self.spawn_player(pid);
-                    }
-                    self.announce("重新开始", "第一波敌车即将抵达".into());
-                    self.after(3.0, Timer::StartWave);
-                }
                 Timer::SpawnBot => {
                     self.pending_bots = self.pending_bots.saturating_sub(1);
                     let seat = self.free_seat();
@@ -874,7 +779,7 @@ impl Game {
         let (mut laid, mut smoke) = (Vec::new(), Vec::new());
         for s in self.ships.values_mut() {
             let knock = step_drive(&mut s.kin, &s.body, &s.input, &self.terrain, DT);
-            let rock = collide_asteroids(&mut s.kin, &s.body, &self.rocks, tick_time(t));
+            let rock = collide_rocks(&mut s.kin, &s.body, &self.rocks);
             // the harder of a wall's knock and a rock's
             if let Some(imp) = knock.into_iter().chain(rock).max_by(|a, b| a.speed.total_cmp(&b.speed))
                 && s.collide_cd <= 0.0
@@ -969,10 +874,7 @@ impl Game {
             self.kill(id, by, Fate::Wrecked);
         }
 
-        match self.cfg.mode {
-            Mode::Coop => self.coop_logic(),
-            Mode::Ffa | Mode::Teams | Mode::Solo => self.ffa_logic(),
-        }
+        self.ffa_logic();
         self.flush(t);
     }
 
@@ -1261,7 +1163,7 @@ impl Game {
             }
             if !dead {
                 for a in &self.rocks {
-                    if let Some(tt) = a.hit_segment(b.prev, b.pos, a.rotation(tick_time(t))) {
+                    if let Some(tt) = a.hit_segment(b.prev, b.pos) {
                         if spec.splash > 0.0 {
                             self.events.push(ServerMsg::Explosion { pos: b.prev.lerp(b.pos, tt), size: 0.7 });
                         }
@@ -1358,9 +1260,7 @@ impl Game {
             p.deaths += counts as u32;
             p.ship = None;
             p.send(&ServerMsg::YourShip { id: None });
-            if matches!(self.cfg.mode, Mode::Ffa | Mode::Teams | Mode::Solo) {
-                p.respawn_at = Some(self.tick + secs(4.0));
-            }
+            p.respawn_at = Some(self.tick + secs(4.0));
         }
         let text = match (killer_name, fate) {
             (Some(k), Fate::Wrecked) => format!("{k} 击毁了 {}", victim.name),
@@ -1448,58 +1348,6 @@ impl Game {
                 self.scores_dirty = true;
             }
         }
-    }
-
-    fn coop_logic(&mut self) {
-        // spectators alone don't keep a co-op game going: the waves only fight pilots
-        if self.pilots() == 0 {
-            if self.wave > 0 || !self.ships.is_empty() {
-                let ids: Vec<u16> = self.ships.keys().copied().collect();
-                for id in ids {
-                    self.ships.remove(&id);
-                    self.events.push(ServerMsg::ShipRemoved { id });
-                }
-                self.bolts.clear();
-                self.timers.clear();
-                self.wave = 0;
-                self.between = true;
-                self.wiped = false;
-            }
-            return;
-        }
-        let players_alive = self.players.values().any(|p| p.ship.is_some());
-        if !players_alive && !self.wiped && self.wave > 0 {
-            self.wiped = true;
-            self.between = true;
-            self.timers.retain(|t| !matches!(t.1, Timer::StartWave | Timer::RepairPlayers));
-            let w = self.wave;
-            self.announce("全军覆没", format!("坚持到第 {w} 波，6 秒后重新开始"));
-            let ids: Vec<u16> = self.ships.keys().copied().collect();
-            for id in ids {
-                self.ships.remove(&id);
-                self.events.push(ServerMsg::ShipRemoved { id });
-            }
-            self.bolts.clear();
-            self.after(6.0, Timer::Restart);
-            return;
-        }
-        if self.between || self.wiped {
-            return;
-        }
-        if self.ships.values().any(|s| s.team != 0) {
-            return;
-        }
-        self.between = true;
-        let bonus = 200 * self.wave;
-        for p in self.players.values_mut() {
-            if p.ship.is_some() {
-                p.score += bonus;
-            }
-        }
-        self.scores_dirty = true;
-        self.announce("波次清除", format!("奖励 +{bonus} · 正在修复战车"));
-        self.after(2.2, Timer::RepairPlayers);
-        self.after(5.5, Timer::StartWave);
     }
 
     fn ffa_logic(&mut self) {
@@ -1596,13 +1444,12 @@ impl Game {
 
     /// The scoreboard: players and bot seats, best first.
     pub fn scores(&self) -> Vec<ScoreRow> {
-        let mode = self.cfg.mode;
         let mut rows: Vec<ScoreRow> = self
             .players
             .iter()
             .filter(|(_, p)| !p.watching())
             .map(|(&pid, p)| {
-                let team = p.team.unwrap_or(if mode == Mode::Coop { 0 } else { 1000 + pid });
+                let team = p.team.unwrap_or(1000 + pid);
                 ScoreRow { pid, name: p.name.clone(), kills: p.kills, deaths: p.deaths, score: p.score, alive: p.ship.is_some(), team }
             })
             .chain(self.seats.iter().enumerate().map(|(i, s)| ScoreRow {
@@ -1615,12 +1462,8 @@ impl Game {
                 team: s.team.unwrap_or(BOT_PID_BASE + i as u16),
             }))
             .collect();
-        // co-op by points; the others by kills, then fewer deaths
-        if mode == Mode::Coop {
-            rows.sort_by(|a, b| b.score.cmp(&a.score).then(b.kills.cmp(&a.kills)));
-        } else {
-            rows.sort_by(|a, b| b.kills.cmp(&a.kills).then(a.deaths.cmp(&b.deaths)).then(b.score.cmp(&a.score)));
-        }
+        // by kills, then fewer deaths
+        rows.sort_by(|a, b| b.kills.cmp(&a.kills).then(a.deaths.cmp(&b.deaths)).then(b.score.cmp(&a.score)));
         rows
     }
 
@@ -1640,7 +1483,6 @@ impl Game {
         if self.scores_dirty && t % 15 == 0 {
             self.scores_dirty = false;
             let rows = self.scores();
-            let enemies = self.ships.values().filter(|s| s.owner.is_none()).count() as u32;
             let end = match self.round {
                 Round::Running | Round::Over => Some(self.round_end),
                 Round::Waiting => None,
@@ -1648,7 +1490,7 @@ impl Game {
             };
             let left = end.map_or(0.0, |e| e.saturating_sub(self.tick) as f32 / TICK_RATE as f32);
             let hill = self.hill.as_ref().map(|h| HillState { points: [1, 2].map(|t| h.points.get(&t).copied().unwrap_or(0)), holder: h.holder, contested: h.contested });
-            self.events.push(ServerMsg::Scores { rows, wave: self.wave, enemies, limit: self.limit, left, round: self.round, hill });
+            self.events.push(ServerMsg::Scores { rows, limit: self.limit, left, round: self.round, hill });
         }
         self.send_events();
         if t % SNAPSHOT_INTERVAL != 0 {
@@ -1704,7 +1546,7 @@ pub struct Duel {
 }
 
 /// A headless 1v1 for balance testing: two AI pilots of the same skill fly `a` and `b` at each
-/// other in the normal arena, asteroids and all, until one goes down or `max_secs` pass. Run it
+/// other in the normal arena, rocks and all, until one goes down or `max_secs` pass. Run it
 /// many times with different seeds; one fight says little.
 pub fn duel(a: &Design, b: &Design, seed: u64, max_secs: f32) -> Duel {
     let mut g = Game::with_map(GameConfig { mode: Mode::Ffa, bots: 0, budget: None, verbose: false }, seed, Map::Desert);

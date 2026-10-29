@@ -3,7 +3,7 @@
 //!
 //!   cargo run --release -p blocktread-server --example duel -- [--games 60] [--secs 150] [--weapons]
 //!
-//! `--weapons` adds 游隼 variants with its four guns swapped for four of each weapon type.
+//! `--weapons` adds 野牛 variants with all of its guns swapped for each weapon type in turn.
 //! `--equal-cost` then tops every variant up with armour and hull under its belly to the same
 //! cost, which is the fair question: on the same budget, is some weapon simply better?
 //! Set BLOCKTREAD_BALANCE to a copy of balance.ron to try numbers without rebuilding.

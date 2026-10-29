@@ -66,9 +66,6 @@ const KEYED: [BlockType; 12] = [
     BlockType::Missile,
 ];
 
-/// Flight parts the garage doesn't offer: nothing on a vehicle uses lift or attitude control.
-const FLIGHT_ONLY: [BlockType; 4] = [BlockType::Wing, BlockType::Fin, BlockType::Gyro, BlockType::Rcs];
-
 #[derive(Resource)]
 pub struct Hangar {
     /// All your ships; `design` is the selected one being edited, written back on every change.
@@ -487,8 +484,8 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
         commands.entity(b).insert(Node { height: px(H_MD), flex_grow: 1.0, flex_basis: px(0), padding: UiRect::horizontal(px(10)), column_gap: px(6), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() });
     }
     let four_cols = || Node { display: Display::Grid, grid_template_columns: RepeatedGridTrack::flex(4, 1.0), column_gap: px(GAP_S), row_gap: px(GAP_S), ..default() };
-    // the keyed parts first, in key order, then the rest; flight parts left out
-    let order: Vec<BlockType> = KEYED.iter().copied().chain(BlockType::ALL.into_iter().filter(|t| !KEYED.contains(t) && !FLIGHT_ONLY.contains(t))).collect();
+    // the keyed parts first, in key order, then the rest
+    let order: Vec<BlockType> = KEYED.iter().copied().chain(BlockType::ALL.into_iter().filter(|t| !KEYED.contains(t))).collect();
     for cat in Category::ALL {
         let parts: Vec<BlockType> = order.iter().copied().filter(|t| t.info().cat == cat).collect();
         if parts.is_empty() {

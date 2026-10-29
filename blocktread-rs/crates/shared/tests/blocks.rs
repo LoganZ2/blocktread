@@ -30,7 +30,7 @@ fn every_type_has_a_name_and_round_trips() {
         assert!(!t.info().name.is_empty());
     }
     // the wire format carries the new types
-    let d = with(preset("rover"), &[(0, -1, 1, BlockType::Capacitor), (0, 2, 3, BlockType::Fin)]);
+    let d = with(preset("rover"), &[(0, -1, 1, BlockType::Capacitor), (0, 2, 3, BlockType::Lamp)]);
     let msg = ServerMsg::ShipSpawn { id: 1, team: 0, name: "x".into(), owner: None, design: d.clone(), kin: Kin::new(Vec3::ZERO, Quat::IDENTITY, &stats(&d)) };
     match decode::<ServerMsg>(&encode(&msg)).unwrap() {
         ServerMsg::ShipSpawn { design, .. } => assert_eq!(design, d),
@@ -111,5 +111,20 @@ fn reactors_decide_how_long_the_guns_keep_firing() {
         if let Some(w) = t.weapon() {
             assert!(w.energy > 0.0, "{} fires for free", t.info().name);
         }
+    }
+}
+
+#[test]
+fn saved_codes_never_move() {
+    // vehicles.json and share codes keep these numbers; the flying version's parts left gaps
+    for (t, code) in [(BlockType::Cockpit, 0), (BlockType::Engine, 2), (BlockType::Frame, 12), (BlockType::Thruster, 15), (BlockType::Railgun, 17), (BlockType::Smoke, 31)] {
+        assert_eq!(t.code(), code);
+        assert_eq!(BlockType::from_code(code as usize), Some(t));
+    }
+    for gone in [1, 11, 14, 16, 32] {
+        assert_eq!(BlockType::from_code(gone), None);
+    }
+    for t in BlockType::ALL {
+        assert_eq!(BlockType::from_code(t.code() as usize), Some(t));
     }
 }

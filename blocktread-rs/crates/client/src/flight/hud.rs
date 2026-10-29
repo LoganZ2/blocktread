@@ -459,7 +459,6 @@ pub fn update_hud(
             El::Mode => {
                 let mine = core.scores.iter().find(|r| Some(r.pid) == core.pid);
                 let mode = match core.mode {
-                    Some(Mode::Coop) => format!("合作波次 · 第 {} 波", core.wave),
                     Some(Mode::Teams) => format!("{}{}", Mode::Teams.label(), mine.map_or(String::new(), |r| format!(" · {}", team_label(r.team)))),
                     Some(Mode::Ffa) => "自由混战".into(),
                     Some(Mode::Solo) => "试车场 · 只有你".into(),
@@ -574,7 +573,6 @@ pub fn update_hud(
             }
             El::Info => {
                 let line = match core.mode {
-                    Some(Mode::Coop) => format!("剩余敌车 {} · 延迟 {:.0} ms", core.enemies, core.rtt() * 1000.0),
                     Some(Mode::Solo) => "本机运行".into(),
                     _ => format!("在线 {} 人 · 延迟 {:.0} ms", core.scores.iter().filter(|r| !r.is_bot()).count(), core.rtt() * 1000.0),
                 };

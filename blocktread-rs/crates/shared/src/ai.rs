@@ -9,7 +9,7 @@ use crate::ship::ShipBody;
 use crate::solid::Solid;
 use crate::terrain::Terrain;
 use crate::weapons::intercept;
-use crate::world::{Asteroid, tick_time};
+use crate::world::{Rock, tick_time};
 use glam::{Quat, Vec3};
 
 #[derive(Clone, Copy, Debug)]
@@ -23,10 +23,6 @@ pub struct Skill {
 }
 
 impl Skill {
-    pub fn for_wave(w: u32) -> Skill {
-        let w = w as f32;
-        Skill { aim_err: (0.04 - w * 0.005).max(0.012), cone: 0.05, react: 5.0 + w * 0.6, dmg_mul: (0.42 + w * 0.1).min(1.0) }
-    }
     pub fn ffa_bot() -> Skill {
         Skill { aim_err: 0.022, cone: 0.05, react: 7.0, dmg_mul: 0.8 }
     }
@@ -352,7 +348,7 @@ impl AiPilot {
 
     /// The input for server tick `tick`.
     #[allow(clippy::too_many_arguments)]
-    pub fn think(&mut self, me: &Kin, body: &ShipBody, recent_dmg: f32, my_team: u16, others: &[Contact], rocks: &[Asteroid], ground: &Terrain, tick: u32) -> InputCmd {
+    pub fn think(&mut self, me: &Kin, body: &ShipBody, recent_dmg: f32, my_team: u16, others: &[Contact], rocks: &[Rock], ground: &Terrain, tick: u32) -> InputCmd {
         let (dt, now) = (DT, tick_time(tick));
         let k = self.skill;
         let fwd = me.fwd();

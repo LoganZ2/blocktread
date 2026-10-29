@@ -166,7 +166,7 @@ fn spectators_join_with_their_own_message() {
 fn hit_confirms_come_last_so_older_clients_skip_them() {
     // postcard numbers enum variants in order: the messages an older client knows keep theirs,
     // and the new one carries a number it has never seen, which its decode turns down
-    let scores = ServerMsg::Scores { rows: vec![], wave: 0, enemies: 0, limit: 0, left: 0.0, round: Round::None, hill: None };
+    let scores = ServerMsg::Scores { rows: vec![], limit: 0, left: 0.0, round: Round::None, hill: None };
     assert_eq!(encode(&scores)[0], 20);
     let hit = encode(&ServerMsg::HitConfirm { target: 7, shield: true });
     assert_eq!(hit[0], 21);

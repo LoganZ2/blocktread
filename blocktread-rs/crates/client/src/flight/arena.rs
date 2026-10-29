@@ -495,7 +495,7 @@ pub fn update_hill_light(session: Res<Session>, light: Option<Res<HillLight>>, m
 /// one: they run along their slots spinning. (The vents' fire is `fire::update_fire`'s.)
 pub fn update_traps(session: Res<Session>, mut blades: Query<(&SawBlade, &mut Transform)>) {
     let Some(arena) = &session.core.terrain.arena else { return };
-    let t = session.core.rock_time();
+    let t = session.core.arena_time();
     for (b, mut tf) in &mut blades {
         let saw = &arena.saws[b.0];
         tf.translation = saw.at(t);

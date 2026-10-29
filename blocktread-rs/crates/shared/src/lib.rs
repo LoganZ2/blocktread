@@ -37,7 +37,9 @@ pub const SNAPSHOT_INTERVAL: u32 = 2;
 ///    don't (two new ones), and turning by the sides.
 /// 9: missiles carry the team and the ship that fired them; maps (the welcome names one); the
 ///    arena's pads and hill, close-quarters blocks and gadgets.
-pub const PROTOCOL_VERSION: u32 = 9;
+/// 10: the handshake says blocktread; co-op waves, spinning rocks and the flying version's
+///     wing, gyro, fin and attitude thruster are gone.
+pub const PROTOCOL_VERSION: u32 = 10;
 pub const DEFAULT_PORT: u16 = 4433;
 /// The arena's reach from its centre (the ground is a square of twice this).
 pub const ARENA_R: f32 = terrain::HALF;

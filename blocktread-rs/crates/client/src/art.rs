@@ -383,7 +383,6 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let dome = m(Sphere::new(0.2).mesh().ico(2).unwrap());
     let ring = m(Torus { minor_radius: 0.07, major_radius: 0.3 }.into());
     let ring_s = m(Torus { minor_radius: 0.045, major_radius: 0.31 }.into());
-    let ring_l = m(Torus { minor_radius: 0.045, major_radius: 0.43 }.into());
     let sphere = m(Sphere::new(1.0).mesh().ico(2).unwrap());
     let nozzle_s = m(ConicalFrustum { radius_top: 0.28, radius_bottom: 0.22, height: 0.24 }.into());
     let disc_s = m(Circle::new(0.21).into());
@@ -439,7 +438,6 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let g_green = fixed(StandardMaterial { base_color: Color::BLACK, emissive: glow(0x44ff99, 30.0), ..default() });
     let g_blue = fixed(StandardMaterial { base_color: Color::BLACK, emissive: glow(0x4aa8ff, 25.0), ..default() });
     let g_yellow = fixed(StandardMaterial { base_color: Color::BLACK, emissive: glow(0xffc84a, 25.0), ..default() });
-    let g_purple = fixed(StandardMaterial { base_color: Color::BLACK, emissive: glow(0xb070ff, 25.0), ..default() });
     let g_cyan = fixed(StandardMaterial { base_color: Color::BLACK, emissive: glow(0x7fe8ff, 22.0), ..default() });
 
     let p = |mesh: &Handle<Mesh>, mat: &PartMat, pos: [f32; 3], rot: [f32; 3], scale: [f32; 3]| Part {
@@ -472,10 +470,6 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         // visor stands 0.01 proud of the hull face: a coplanar face would z-fight
         p(&cube, &dark, [0.0, 0.12, -0.47], z, [0.86, 0.12, 0.08]),
     ];
-    // trailing-edge strip: 0.02 past the wing's back face and 1% wider, so no face of it is
-    // coplanar with the wing (coplanar faces z-fight and flicker as the ship moves); the
-    // overlap with a neighbouring strip is the same colour and invisible
-    parts[Wing.index()] = vec![p(&cube, &paint, z, z, [1.0, 0.26, 1.0]), p(&cube, &dark, [0.0, 0.0, 0.44], z, [1.02, 0.28, 0.16])];
     parts[Engine.index()] = vec![
         p(&cube, &paint, [0.0, 0.0, -0.1], z, [0.94, 0.94, 0.8]),
         p(&nozzle, &dark, [0.0, 0.0, 0.42], [HP, 0.0, 0.0], one),
@@ -515,11 +509,6 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
         p(&dome, &g_blue, [0.0, 0.3, 0.0], z, one),
         p(&ring_s, &dark, [0.0, 0.3, 0.0], z, one),
     ];
-    parts[Gyro.index()] = vec![
-        p(&cube, &paint, z, z, [0.84, 0.84, 0.84]),
-        p(&ring_l, &g_purple, z, z, one),
-        p(&ring_l, &dark, z, [0.0, 0.0, HP], one),
-    ];
     // an open truss: edges plus a diagonal brace on each side
     let mut frame = edges(&paint, 0.42, 0.14);
     for x in [-0.42, 0.42] {
@@ -529,21 +518,12 @@ pub fn build_block_art(meshes: &mut Assets<Mesh>, mats: &mut Assets<StandardMate
     let mut lamp = vec![p(&cube, &PartMat::Glow, z, z, [0.8, 0.8, 0.8])];
     lamp.extend(edges(&dark, 0.43, 0.12));
     parts[Lamp.index()] = lamp;
-    parts[Fin.index()] = vec![p(&cube, &paint, z, z, [0.22, 1.0, 1.0]), p(&cube, &dark, [0.0, 0.0, 0.44], z, [0.24, 1.02, 0.16])];
     parts[Thruster.index()] = vec![
         p(&cube, &paint, [0.0, 0.0, -0.12], z, [0.72, 0.72, 0.76]),
         p(&cube, &dark, [0.0, 0.0, -0.42], z, [0.9, 0.9, 0.14]),
         p(&nozzle_s, &dark, [0.0, 0.0, 0.36], [HP, 0.0, 0.0], one),
         p(&disc_s, &g_engine, [0.0, 0.0, 0.485], z, one),
     ];
-    // a body with a thruster pod sunk into each face
-    let mut rcs = vec![p(&cube, &paint, z, z, [0.8, 0.8, 0.8])];
-    for (pos, scale) in [([0.42, 0.0, 0.0], [0.1, 0.26, 0.26]), ([0.0, 0.42, 0.0], [0.26, 0.1, 0.26]), ([0.0, 0.0, 0.42], [0.26, 0.26, 0.1])] {
-        let neg = [-pos[0], -pos[1], -pos[2]];
-        rcs.push(p(&cube, &dark, pos, z, scale));
-        rcs.push(p(&cube, &dark, neg, z, scale));
-    }
-    parts[Rcs.index()] = rcs;
     let mut rail = vec![p(&cube, &paint, z, z, [0.46, 0.4, 0.62]), p(&cube, &g_cyan, [0.0, 0.0, -0.8], z, [0.05, 0.05, 1.0]), p(&cube, &dark, [0.0, 0.0, -1.32], z, [0.36, 0.22, 0.08])];
     for x in [-0.11, 0.11] {
         rail.push(p(&cube, &dark, [x, 0.0, -0.8], z, [0.07, 0.14, 1.0]));

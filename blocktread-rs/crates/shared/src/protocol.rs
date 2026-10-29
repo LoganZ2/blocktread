@@ -7,14 +7,8 @@ use crate::terrain::Map;
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-/// Still the game's old name: the connection handshake has to match what released clients and
-/// servers send, so an outdated one still connects far enough to be told to update.
-pub const ALPN: &[u8] = b"voxwing/1";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mode {
-    /// Everyone against waves of AI ships.
-    Coop,
     /// Free-for-all: one room on the server that players drive in and out of, no AI. Its clock
     /// runs while two or more are in; each round is ranked by kills.
     Ffa,
@@ -27,7 +21,6 @@ pub enum Mode {
 impl Mode {
     pub fn label(self) -> &'static str {
         match self {
-            Mode::Coop => "合作波次",
             Mode::Ffa => "自由混战",
             Mode::Teams => "2v2 占点战",
             Mode::Solo => "试车场",
@@ -38,7 +31,7 @@ impl Mode {
     /// takes players one at a time, and the test range is one player's.
     pub fn slots(self) -> usize {
         match self {
-            Mode::Teams | Mode::Coop => 4,
+            Mode::Teams => 4,
             Mode::Ffa | Mode::Solo => 1,
         }
     }
@@ -47,7 +40,7 @@ impl Mode {
 /// Where the free-for-all room's round stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Round {
-    /// No rounds here (2v2, co-op, the test range).
+    /// No rounds here (2v2, the test range).
     #[default]
     None,
     /// Fewer than two players in: no clock.
@@ -120,7 +113,7 @@ impl ScoreRow {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMsg {
     /// The game starts (or a spectator is let in): the client's simulation begins here.
-    Welcome { pid: u16, tick: u32, mode: Mode, asteroid_seed: u64, map: Map },
+    Welcome { pid: u16, tick: u32, mode: Mode, seed: u64, map: Map },
     Reject { reason: String },
     /// The connection is accepted; this is the player's id.
     Connected { pid: u16 },
@@ -152,7 +145,7 @@ pub enum ServerMsg {
     /// `limit`: kills (on the hill, points) that win the match (0 = none); `left`: seconds until
     /// it ends (0 = no clock), or in the free-for-all room until the round (or the break after
     /// it) ends.
-    Scores { rows: Vec<ScoreRow>, wave: u32, enemies: u32, limit: u32, left: f32, round: Round, hill: Option<HillState> },
+    Scores { rows: Vec<ScoreRow>, limit: u32, left: f32, round: Round, hill: Option<HillState> },
     /// To the shooter only: one of their rounds landed on `target`, on its shield or its hull.
     /// Last, so the variants before it keep their numbers and older clients skip it unread.
     HitConfirm { target: u16, shield: bool },
