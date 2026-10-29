@@ -2,6 +2,7 @@
 //! connection's first RTT estimate comes from it, then the client hangs up with `PING_CLOSE`. It
 //! uses the game's own port, so whatever lets players in lets pings in.
 
+use blocktread_net::Target;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,16 +24,17 @@ pub struct Pinger {
 }
 
 impl Pinger {
-    /// Start measuring `addrs` (host:port) now and then every `every`.
-    pub fn start(addrs: Vec<String>, every: Duration) -> Pinger {
-        let results = Arc::new(Mutex::new(vec![Ping::Pending; addrs.len()]));
+    /// Start measuring `servers` now and then every `every`. One whose certificate isn't the one
+    /// pinned counts as unreachable.
+    pub fn start(servers: Vec<Target>, every: Duration) -> Pinger {
+        let results = Arc::new(Mutex::new(vec![Ping::Pending; servers.len()]));
         let stop = Arc::new(AtomicBool::new(false));
         let (r, s) = (results.clone(), stop.clone());
         let spawned = std::thread::Builder::new().name("blocktread-ping".into()).spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
             rt.block_on(async move {
                 while !s.load(Ordering::Relaxed) {
-                    let all = futures_join(addrs.iter().map(|a| measure(a.clone())).collect()).await;
+                    let all = futures_join(servers.iter().map(|t| measure(t.clone())).collect()).await;
                     *r.lock().unwrap() = all;
                     // sleep in small steps so dropping the pinger ends the thread promptly
                     let mut left = every;
@@ -72,10 +74,10 @@ async fn futures_join(tasks: Vec<impl std::future::Future<Output = Ping> + Send 
     out
 }
 
-async fn measure(addr: String) -> Ping {
+async fn measure(server: Target) -> Ping {
     let attempt = async {
-        let target = tokio::net::lookup_host(addr.as_str()).await.ok()?.next()?;
-        let ep = blocktread_net::client_endpoint(target).ok()?;
+        let target = tokio::net::lookup_host(server.addr.as_str()).await.ok()?.next()?;
+        let ep = blocktread_net::client_endpoint(target, server.pin).ok()?;
         let conn = ep.connect(target, "blocktread").ok()?.await.ok()?;
         let rtt = conn.rtt();
         conn.close(blocktread_net::PING_CLOSE.into(), b"ping");

@@ -57,6 +57,9 @@ pub struct ServerConfig {
     pub verbose: bool,
     /// A JSON file kept up to date with who is online (for deploys: restart only when empty).
     pub status: Option<PathBuf>,
+    /// Where the server keeps what outlives a restart: its certificate (whose fingerprint clients
+    /// pin). None: a fresh certificate each run, kept nowhere (local play, tests).
+    pub data: Option<PathBuf>,
 }
 
 /// This build: the release tag CI builds it for (`BLOCKTREAD_BUILD`), else the crate version.
@@ -67,6 +70,8 @@ pub const BUILD: &str = match option_env!("BLOCKTREAD_BUILD") {
 
 pub struct ServerHandle {
     pub addr: SocketAddr,
+    /// Its certificate's fingerprint, for clients to pin.
+    pub fingerprint: String,
     stop: Arc<AtomicBool>,
 }
 
@@ -88,6 +93,11 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<SocketAddr>>();
     let stop_net = stop.clone();
     let bind = cfg.bind;
+    let identity = match &cfg.data {
+        Some(dir) => blocktread_net::Identity::load_or_create(dir)?,
+        None => blocktread_net::Identity::generate()?,
+    };
+    let fingerprint = identity.fingerprint();
     std::thread::Builder::new().name("blocktread-net".into()).spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
             Ok(rt) => rt,
@@ -97,7 +107,7 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
             }
         };
         rt.block_on(async move {
-            let ep = match blocktread_net::server_endpoint(bind) {
+            let ep = match blocktread_net::server_endpoint(bind, identity) {
                 Ok(ep) => ep,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
@@ -123,17 +133,18 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
     let stop_sim = stop.clone();
     let hub_cfg = cfg.hub.clone();
     let (verbose, status) = (cfg.verbose, cfg.status.clone());
-    std::thread::Builder::new().name("blocktread-sim".into()).spawn(move || run(hub_cfg, net_rx, stop_sim, verbose, status))?;
-    Ok(ServerHandle { addr, stop })
+    let fp = fingerprint.clone();
+    std::thread::Builder::new().name("blocktread-sim".into()).spawn(move || run(hub_cfg, net_rx, stop_sim, verbose, status, fp))?;
+    Ok(ServerHandle { addr, fingerprint, stop })
 }
 
-/// Write the status file: build, protocol, who is online. Written whole and renamed into place,
+/// Write the status file: build, protocol, certificate fingerprint, who is online. Written whole and renamed into place,
 /// so a reader never sees half of it.
-fn write_status(path: &std::path::Path, hub: &hub::Hub) {
+fn write_status(path: &std::path::Path, hub: &hub::Hub, fingerprint: &str) {
     let (conns, matches, queued) = hub.census();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let json = format!(
-        "{{\"build\":\"{BUILD}\",\"protocol\":{},\"connections\":{conns},\"matches\":{matches},\"queued\":{queued},\"updated\":{now}}}\n",
+        "{{\"build\":\"{BUILD}\",\"protocol\":{},\"fingerprint\":\"{fingerprint}\",\"connections\":{conns},\"matches\":{matches},\"queued\":{queued},\"updated\":{now}}}\n",
         blocktread_shared::PROTOCOL_VERSION
     );
     let tmp = path.with_extension("tmp");
@@ -143,7 +154,7 @@ fn write_status(path: &std::path::Path, hub: &hub::Hub) {
 }
 
 /// The 60 Hz loop: network events in, one hub tick (every match steps), sleep to the next tick.
-fn run(cfg: HubConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: bool, status: Option<PathBuf>) {
+fn run(cfg: HubConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: bool, status: Option<PathBuf>, fingerprint: String) {
     let mut hub = hub::Hub::new(cfg);
     let step = Duration::from_secs_f64(1.0 / TICK_RATE as f64);
     let mut next = Instant::now();
@@ -155,7 +166,7 @@ fn run(cfg: HubConfig, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose: b
         if let Some(p) = &status
             && status_at.elapsed() >= Duration::from_secs(5)
         {
-            write_status(p, &hub);
+            write_status(p, &hub, &fingerprint);
             status_at = Instant::now();
         }
         while let Ok(ev) = rx.try_recv() {

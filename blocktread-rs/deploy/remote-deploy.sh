@@ -19,12 +19,6 @@ players() {
   echo "${n:-0}"
 }
 
-# the service as this release has it, and its flags
-mkdir -p "$HOME/.config/systemd/user"
-cp "$base/blocktread-server.service" "$HOME/.config/systemd/user/"
-[ -f "$base/args.env" ] || echo 'ARGS=' > "$base/args.env"
-systemctl --user daemon-reload
-
 # never restart under players: wait for the server to empty, up to wait_max
 start=$SECONDS
 while [ "$(players)" != 0 ]; do
@@ -37,6 +31,14 @@ while [ "$(players)" != 0 ]; do
 done
 
 prev="$(readlink "$base/current" || true)"
+# the service as this release has it, and its flags; the one before it is kept, since an older
+# release may not take this one's flags and a rollback needs it
+mkdir -p "$HOME/.config/systemd/user"
+unit="$HOME/.config/systemd/user/blocktread-server.service"
+if [ -f "$unit" ]; then cp "$unit" "$base/blocktread-server.service.prev"; fi
+cp "$base/blocktread-server.service" "$unit"
+[ -f "$base/args.env" ] || echo 'ARGS=' > "$base/args.env"
+systemctl --user daemon-reload
 ln -sfn "$new" "$base/current.new" && mv -Tf "$base/current.new" "$base/current"
 t0=$(date +%s)
 systemctl --user enable blocktread-server
@@ -57,6 +59,10 @@ echo "::error::release $name did not come up; rolling back"
 journalctl --user-unit blocktread-server -n 40 --no-pager || true
 if [ -n "$prev" ]; then
   ln -sfn "$prev" "$base/current.new" && mv -Tf "$base/current.new" "$base/current"
+  if [ -f "$base/blocktread-server.service.prev" ]; then
+    cp "$base/blocktread-server.service.prev" "$unit"
+    systemctl --user daemon-reload
+  fi
   systemctl --user restart blocktread-server
 fi
 exit 1

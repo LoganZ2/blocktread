@@ -11,6 +11,7 @@ use glam::{Quat, Vec3};
 use interp::{Interp, Sample, ServerClock};
 use net::{NetClient, NetIn};
 use predict::{Predictor, TARGET_LEAD};
+pub use blocktread_net::Target;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -204,19 +205,20 @@ pub struct ClientCore {
 
 impl ClientCore {
     /// Connect to play: then `queue`, `pick` and `ready` take the player into a match.
-    pub fn connect(addr: &str, name: &str, latency: Duration) -> Self {
-        Self::start(addr, ClientMsg::Hello { version: PROTOCOL_VERSION, name: name.to_string(), balance: blocktread_shared::balance::hash() }, latency)
+    /// Join `server` (an address, or an address and the certificate it must show).
+    pub fn connect(server: impl Into<Target>, name: &str, latency: Duration) -> Self {
+        Self::start(server.into(), ClientMsg::Hello { version: PROTOCOL_VERSION, name: name.to_string(), balance: blocktread_shared::balance::hash() }, latency)
     }
 
     /// Join to watch instead of fly.
-    pub fn watch(addr: &str, name: &str, latency: Duration) -> Self {
-        Self::start(addr, ClientMsg::Watch { version: PROTOCOL_VERSION, name: name.to_string(), balance: blocktread_shared::balance::hash() }, latency)
+    pub fn watch(server: impl Into<Target>, name: &str, latency: Duration) -> Self {
+        Self::start(server.into(), ClientMsg::Watch { version: PROTOCOL_VERSION, name: name.to_string(), balance: blocktread_shared::balance::hash() }, latency)
     }
 
-    fn start(addr: &str, hello: ClientMsg, latency: Duration) -> Self {
+    fn start(server: Target, hello: ClientMsg, latency: Duration) -> Self {
         ClientCore {
             watching: matches!(hello, ClientMsg::Watch { .. }),
-            net: NetClient::connect(addr.to_string(), hello, latency),
+            net: NetClient::connect(server, hello, latency),
             state: ConnState::Connecting,
             phase: Phase::Idle,
             queued_for: None,

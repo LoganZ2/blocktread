@@ -17,7 +17,7 @@ use bevy::text::{EditableText, LetterSpacing};
 use std::time::Duration;
 use super::entry::{Pings, RegionPing, region};
 use super::matching::straight_in;
-use blocktread_client_core::{ClientCore, ConnState, Phase};
+use blocktread_client_core::{ClientCore, ConnState, Phase, Target};
 use blocktread_server::{HubConfig, ServerConfig};
 use blocktread_shared::protocol::Mode;
 
@@ -66,7 +66,15 @@ pub fn cost_label(cost: f32) -> String {
 
 /// Where to connect: `--server` if given, else the server picked on the entry page.
 fn server_addr(dev: &DevOpts, regions: &Regions, region: usize) -> String {
-    dev.server.clone().unwrap_or_else(|| regions.0[region].addr.clone())
+    server_target(dev, regions, region).addr
+}
+
+/// The server to play on: `--server`'s if given (no pin), else the region's.
+fn server_target(dev: &DevOpts, regions: &Regions, region: usize) -> Target {
+    match &dev.server {
+        Some(addr) => addr.into(),
+        None => regions.0[region].target(),
+    }
 }
 
 fn spawn_menu(mut commands: Commands, font: Res<UiFont>, settings: Res<Settings>) {
@@ -389,8 +397,8 @@ fn menu_actions(
                         }
                     }
                 }
-                let addr = match dev.server.as_deref() {
-                    _ if solo => format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port()),
+                let target: Target = match dev.server.as_deref() {
+                    _ if solo => format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port()).into(),
                     Some("local") => {
                         if hosted.0.is_none() {
                             match host_local(&dev) {
@@ -401,13 +409,14 @@ fn menu_actions(
                                 }
                             }
                         }
-                        format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port())
+                        format!("127.0.0.1:{}", hosted.0.as_ref().unwrap().addr.port()).into()
                     }
-                    _ => server_addr(&dev, &regions, region(&settings, &regions, pings.as_deref())),
+                    _ => server_target(&dev, &regions, region(&settings, &regions, pings.as_deref())),
                 };
+                let addr = target.addr.clone();
                 info!("{} {addr}", if watch { "watching" } else { "matchmaking on" });
                 let latency = Duration::from_millis(dev.latency_ms);
-                let core = if watch { ClientCore::watch(&addr, &settings.name, latency) } else { ClientCore::connect(&addr, &settings.name, latency) };
+                let core = if watch { ClientCore::watch(target, &settings.name, latency) } else { ClientCore::connect(target, &settings.name, latency) };
                 let mode = mode_of(&settings.host_mode);
                 let tier = (!settings.host_budget.is_empty() && !straight_in(mode)).then(|| settings.host_budget.clone());
                 let want = (!watch).then_some((mode, tier));
@@ -425,14 +434,14 @@ fn menu_actions(
 /// The test range's server: inside this client, reachable from this machine only, on any free port.
 fn host_solo() -> anyhow::Result<blocktread_server::ServerHandle> {
     let hub = HubConfig { queue_wait: 0.0, ..HubConfig::default() };
-    blocktread_server::start(ServerConfig { bind: "127.0.0.1:0".parse().unwrap(), hub, verbose: false, status: None })
+    blocktread_server::start(ServerConfig { bind: "127.0.0.1:0".parse().unwrap(), hub, verbose: false, status: None, data: None })
 }
 
 /// A server inside this client (`--server local`): no queue wait, AI fills the match at once.
 fn host_local(dev: &DevOpts) -> anyhow::Result<blocktread_server::ServerHandle> {
     let host = if dev.local_only { "127.0.0.1" } else { "0.0.0.0" };
     let hub = HubConfig { queue_wait: 0.0, ..HubConfig::default() };
-    let at = |port: u16| ServerConfig { bind: format!("{host}:{port}").parse().unwrap(), hub: hub.clone(), verbose: false, status: None };
+    let at = |port: u16| ServerConfig { bind: format!("{host}:{port}").parse().unwrap(), hub: hub.clone(), verbose: false, status: None, data: None };
     match blocktread_server::start(at(dev.port.unwrap_or(blocktread_shared::DEFAULT_PORT))) {
         Ok(h) => Ok(h),
         // the port is taken (another server on this machine): any free one will do

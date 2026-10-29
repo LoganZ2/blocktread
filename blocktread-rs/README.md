@@ -52,9 +52,11 @@ cargo run -p blocktread-client --release
 ```json
 [
   { "key": "na", "addr": "10.0.0.10:4433" },
-  { "key": "lab", "name": "测试", "code": "LAB", "addr": "192.168.1.20:4433" }
+  { "key": "lab", "name": "测试", "code": "LAB", "addr": "192.168.1.20:4433", "fingerprint": "64 位十六进制" }
 ]
 ```
+
+`fingerprint` 是那台服务器证书的指纹：写了以后客户端只认这张证书，别人冒充不了这台服务器；不写就什么证书都接受（只适合自己局域网里的服务器）。改了内置服务器的 `addr` 而没给新的 `fingerprint`，就当作没有指纹。
 
 `key` 是内置服务器的（`na`、`asia`）就只改给出的字段，其他照旧；新的 `key` 就加一个服务器（`addr` 必填，`name`、`code` 不填就用 key）。文件写错时用内置列表，并在启动日志里说明原因。比如在家里时路由器不能从内网绕回自己的公网 IP，就把北美改成家里服务器的内网地址。（开发时还可以用 `--server` 直接指定地址，`--server local` 在客户端里跑一个不等人的服务器，离线也能玩。）
 
@@ -78,6 +80,8 @@ cargo run -p blocktread-server --release
 | `--queue-wait 15` | 排队多少秒还凑不齐人就用 AI 补位 |
 | `--match-secs 480` | 一局的时长 |
 | `--win-points 100` | 2v2 占点战中先拿到这么多分的一方获胜 |
+| `--data 目录` | 数据目录：证书放在这里，第一次启动时生成，以后一直用同一张（不给的话每次启动换一张，只适合本机测试） |
+| `--fingerprint` | 和 `--data` 一起用：打印证书指纹后退出 |
 
 模式和造价上限由玩家在客户端里选，服务器不用配置。
 
@@ -98,9 +102,11 @@ cargo run -p blocktread-server --release
 
 **GitHub 上只有一个 secret**：Settings → Secrets and variables → Actions 里的 `DEPLOY_SSH_KEY`，所有服务器都接受的那把私钥的完整内容。没设置时部署会跳过并给出警告，发版本身不受影响。想每次部署前手动确认，在 Settings → Environments → production 里加上审批人。
 
-服务器的额外参数（比如 `ARGS=--queue-wait 30 --match-secs 600`）写在服务器上的 `~/blocktread-server/args.env`。服务器每 5 秒把版本和在线人数写进 `~/blocktread-server/status.json`。服务器和客户端的协议版本要一致：升了协议的版本，客户端和服务器要一起发（打同一个标签就是一起发）。
+服务器的额外参数（比如 `ARGS=--queue-wait 30 --match-secs 600`）写在服务器上的 `~/blocktread-server/args.env`。服务器每 5 秒把版本、证书指纹和在线人数写进 `~/blocktread-server/status.json`。
 
-客户端内置的服务器写在 `crates/client/src/settings.rs` 的 `BUILT_IN` 里（key、名称、代号、地址）。加正式服务器时 `deploy/servers.json` 和这里各加一项；玩家自己的改动放在 `~/.blocktread/servers.json`。
+**证书**：服务器的证书放在 `~/blocktread-server/data/`（`cert.der`、`key.der`），第一次以新版本启动时自动生成，以后每次启动、每个新版本都用同一张。客户端按证书指纹认服务器，所以这个目录不要删；换机器时连目录一起搬过去，指纹就不变。指纹在部署日志最后一行的 `fingerprint` 里，或者在服务器上运行 `~/blocktread-server/current --data ~/blocktread-server/data --fingerprint`。服务器和客户端的协议版本要一致：升了协议的版本，客户端和服务器要一起发（打同一个标签就是一起发）。
+
+客户端内置的服务器写在 `crates/client/src/settings.rs` 的 `BUILT_IN` 里（key、名称、代号、地址、证书指纹）。加正式服务器时 `deploy/servers.json` 和这里各加一项，第一次部署后把指纹填进来；玩家自己的改动放在 `~/.blocktread/servers.json`。
 
 **开发机（手动）**：`./deploy.sh 用户名@地址 [服务器参数]` 同步源码、在那台机器上编译，在 tmux 会话 `blocktread` 里重启服务器，日志在 `~/blocktread-server.log`。那台机器需要 `build-essential` 和用户目录里的 Rust。
 

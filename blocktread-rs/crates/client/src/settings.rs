@@ -4,6 +4,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
+use blocktread_client_core::Target;
+use blocktread_net::{Pin, parse_pin};
 use std::path::PathBuf;
 use blocktread_shared::blocks::{Block, BlockType, Design};
 use blocktread_shared::presets::{PRESETS, preset};
@@ -78,11 +80,20 @@ pub struct Region {
     pub name: String,
     pub code: String,
     pub addr: String,
+    /// The fingerprint of its certificate: with one, only that server is accepted at `addr`.
+    pub pin: Option<Pin>,
+}
+
+impl Region {
+    pub fn target(&self) -> Target {
+        Target { addr: self.addr.clone(), pin: self.pin }
+    }
 }
 
 /// The built-in servers (`deploy/servers.json` lists the same machines for CI): key, name, code,
-/// address.
-const BUILT_IN: &[(&str, &str, &str, &str)] = &[("na", "北美", "NA", "99.246.198.62:4433"), ("asia", "亚洲", "ASIA", "38.92.8.110:4433")];
+/// address, and certificate fingerprint (`blocktread-server --data ~/blocktread-server/data
+/// --fingerprint` on that machine, or the deploy log; empty until the server keeps a certificate).
+const BUILT_IN: &[(&str, &str, &str, &str, &str)] = &[("na", "北美", "NA", "99.246.198.62:4433", ""), ("asia", "亚洲", "ASIA", "38.92.8.110:4433", "")];
 
 /// The servers on offer: the built-in ones, as changed or added to by `~/.blocktread/servers.json`.
 #[derive(Resource, Clone, Debug)]
@@ -96,10 +107,11 @@ struct RegionFile {
     addr: Option<String>,
     name: Option<String>,
     code: Option<String>,
+    fingerprint: Option<String>,
 }
 
 fn built_in() -> Vec<Region> {
-    BUILT_IN.iter().map(|&(key, name, code, addr)| Region { key: key.into(), name: name.into(), code: code.into(), addr: addr.into() }).collect()
+    BUILT_IN.iter().map(|&(key, name, code, addr, fp)| Region { key: key.into(), name: name.into(), code: code.into(), addr: addr.into(), pin: parse_pin(fp) }).collect()
 }
 
 pub fn load_regions() -> Regions {
@@ -119,8 +131,19 @@ fn regions_from(text: &str) -> Result<Vec<Region>, String> {
     let entries: Vec<RegionFile> = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let mut list = built_in();
     for e in entries {
+        let pin = match e.fingerprint.as_deref() {
+            Some(fp) => Some(parse_pin(fp).ok_or_else(|| format!("「{}」的 fingerprint 不是 64 位十六进制", e.key))?),
+            None => None,
+        };
         match list.iter_mut().find(|r| r.key == e.key) {
             Some(r) => {
+                // a new address is another machine: the built-in fingerprint is not its
+                if e.addr.is_some() {
+                    r.pin = None;
+                }
+                if pin.is_some() {
+                    r.pin = pin;
+                }
                 if let Some(a) = e.addr {
                     r.addr = a;
                 }
@@ -132,7 +155,7 @@ fn regions_from(text: &str) -> Result<Vec<Region>, String> {
                 }
             }
             None => match e.addr {
-                Some(addr) => list.push(Region { name: e.name.unwrap_or_else(|| e.key.clone()), code: e.code.unwrap_or_else(|| e.key.to_uppercase()), key: e.key, addr }),
+                Some(addr) => list.push(Region { name: e.name.unwrap_or_else(|| e.key.clone()), code: e.code.unwrap_or_else(|| e.key.to_uppercase()), key: e.key, addr, pin }),
                 None => eprintln!("servers.json：新服务器「{}」没有 addr，跳过", e.key),
             },
         }
@@ -243,5 +266,13 @@ mod tests {
         // a new server without an address is left out; a broken file is an error
         assert_eq!(regions_from(r#"[{"key": "x"}]"#).unwrap().len(), BUILT_IN.len());
         assert!(regions_from("{ not json").is_err());
+    }
+
+    #[test]
+    fn servers_json_can_pin_a_certificate() {
+        let fp = "ab".repeat(32);
+        let list = regions_from(&format!(r#"[{{"key": "lab", "addr": "127.0.0.1:4499", "fingerprint": "{fp}"}}]"#)).unwrap();
+        assert_eq!(list.iter().find(|r| r.key == "lab").unwrap().pin, Some([0xab; 32]));
+        assert!(regions_from(r#"[{"key": "lab", "addr": "127.0.0.1:4499", "fingerprint": "nope"}]"#).is_err(), "a broken fingerprint is an error, not no pin");
     }
 }

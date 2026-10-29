@@ -34,7 +34,7 @@ pub struct Pings(pub Pinger);
 
 fn start_pings(mut commands: Commands, pings: Option<Res<Pings>>, regions: Res<Regions>) {
     if pings.is_none() {
-        commands.insert_resource(Pings(Pinger::start(regions.0.iter().map(|r| r.addr.clone()).collect(), Duration::from_secs(3))));
+        commands.insert_resource(Pings(Pinger::start(regions.0.iter().map(|r| r.target()).collect(), Duration::from_secs(3))));
     }
 }
 
