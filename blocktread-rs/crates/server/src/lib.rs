@@ -140,13 +140,14 @@ pub fn start(cfg: ServerConfig) -> Result<ServerHandle> {
     Ok(ServerHandle { addr, fingerprint, stop })
 }
 
-/// Write the status file: build, protocol, certificate fingerprint, who is online. Written whole and renamed into place,
-/// so a reader never sees half of it.
+/// Write the status file: build, protocol, certificate fingerprint, who is online. Written whole
+/// and renamed into place, so a reader never sees half of it. `connections` counts those playing,
+/// queued or watching (deploys wait for it to be 0); `lobby` those idle between matches.
 fn write_status(path: &std::path::Path, hub: &hub::Hub, fingerprint: &str) {
-    let (conns, matches, queued) = hub.census();
+    let (conns, matches, queued, lobby) = hub.census();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let json = format!(
-        "{{\"build\":\"{BUILD}\",\"protocol\":{},\"fingerprint\":\"{fingerprint}\",\"connections\":{conns},\"matches\":{matches},\"queued\":{queued},\"updated\":{now}}}\n",
+        "{{\"build\":\"{BUILD}\",\"protocol\":{},\"fingerprint\":\"{fingerprint}\",\"connections\":{conns},\"matches\":{matches},\"queued\":{queued},\"lobby\":{lobby},\"updated\":{now}}}\n",
         blocktread_shared::PROTOCOL_VERSION
     );
     let tmp = path.with_extension("tmp");
@@ -180,9 +181,9 @@ fn run(mut hub: hub::Hub, rx: Receiver<NetEvent>, stop: Arc<AtomicBool>, verbose
         total += el;
         n += 1;
         if verbose && report.elapsed() > Duration::from_secs(10) {
-            let (conns, matches, queued) = hub.census();
+            let (conns, matches, queued, lobby) = hub.census();
             println!(
-                "[server] connections {conns} · matches {matches} · queued {queued} · tick avg {:.2} ms, worst {:.2} ms",
+                "[server] connections {conns} (+{lobby} in the lobby) · matches {matches} · queued {queued} · tick avg {:.2} ms, worst {:.2} ms",
                 total.as_secs_f64() * 1000.0 / n as f64,
                 worst.as_secs_f64() * 1000.0
             );

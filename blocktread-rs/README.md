@@ -225,7 +225,9 @@ cargo run --release -p blocktread-server --example duel -- --games 150 --weapons
 
 **入口页快捷键**：↑ ↓ 换服务器（下拉菜单开着或关着都行），Enter 开始游戏（菜单开着时是选定），S 设置，Esc 关菜单或退出。
 
-**大厅快捷键**：Enter 开始 / 取消匹配，← → 或 , . 滑到上一辆 / 下一辆，H 车库，S 设置，V 观战，Esc 取消匹配或回到入口页。
+**大厅快捷键**：Enter 开始 / 取消匹配，← → 或 , . 滑到上一辆 / 下一辆，H 车库，S 设置，L 账号（登录 / 注册，或看等级和金币），V 观战，Esc 取消匹配或回到入口页。
+
+**账号**：大厅右上角登录或注册（账号属于入口页选的那台服务器）。登录后客户端只记住会话令牌（`~/.blocktread/settings.json`），下次自动登录。车库里没解锁的部件盖着价格，点它可以用金币解锁；本局收益在每局结束时弹出提示。
 
 **观战**：大厅里的「观战」按钮（或按 V）不驾驶，附身到场上的战车上看它打。
 - 混战房间里有人就看混战；没有的话看正在打的 2v2；都没有就进空的混战房间，等有人进来。看完一局 2v2 可以「继续观战」下一局。
@@ -324,6 +326,6 @@ cargo run -p blocktread_shared --example stats   # 各预设战车的数值，�
 | `--screenshot 路径 --after 秒 [--count N --every 秒] [--exit]` | 定时截图 |
 | `--offscreen` | 渲染到离屏图像（大小取设置里的窗口尺寸）并隐藏窗口：屏幕锁定时也能截图，也不会弹窗打扰。同时静音（等于 `--mute`） |
 | `--mute` | 完全不出声，连音频设备都不打开 |
-| `--force pause\|board\|side\|tip\|revert\|next\|hover\|hit\|shieldhit\|kill\|nohud:秒` | 到时间后强制显示暂停菜单、记分板、悬停提示、显示设置的还原倒计时，切到车身侧面的镜头，（next）每 2 秒让大厅轮播向右滑一格，（hover）把大厅的箭头和加号显示成悬停状态，（hit / shieldhit / kill）一直亮着对应的命中提示，或（nohud）隐藏整个 HUD 截干净的场景图。可以写多个 `--force` |
+| `--force pause\|board\|side\|tip\|revert\|next\|hover\|hit\|shieldhit\|kill\|nohud\|account:秒` | 到时间后强制显示暂停菜单、记分板、悬停提示、显示设置的还原倒计时，切到车身侧面的镜头，（next）每 2 秒让大厅轮播向右滑一格，（hover）把大厅的箭头和加号显示成悬停状态，（hit / shieldhit / kill）一直亮着对应的命中提示，或（nohud）隐藏整个 HUD 截干净的场景图，或（account）打开账号面板。可以写多个 `--force` |
 | `--frame-stats` | 每 5 秒打印帧节奏统计（见上面「帧率上限」） |
 | `--port 端口` | `--server local` 的 UDP 端口（默认 4433，被占用时自动换一个空闲端口） |

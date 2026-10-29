@@ -6,6 +6,7 @@ use bevy::prelude::Resource;
 use serde::{Deserialize, Serialize};
 use blocktread_client_core::Target;
 use blocktread_net::{Pin, parse_pin};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use blocktread_shared::blocks::{Block, BlockType, Design};
 use blocktread_shared::presets::{PRESETS, preset};
@@ -15,6 +16,8 @@ use blocktread_shared::grid::in_grid;
 #[serde(default)]
 pub struct Settings {
     pub name: String,
+    /// The account logged in on each server (by its `Regions` key, or the `--server` address).
+    pub accounts: BTreeMap<String, SavedLogin>,
     /// The mode to queue for: "ffa" or "2v2".
     pub host_mode: String,
     /// Budget tier to queue in (`balance.ron` key); empty = no limit.
@@ -46,9 +49,16 @@ pub struct Settings {
     pub show_help: bool,
 }
 
+/// An account to log back in as: its name and session token (never the password).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SavedLogin {
+    pub user: String,
+    pub token: String,
+}
+
 impl Default for Settings {
     fn default() -> Self {
-        Settings { name: "车长".into(), host_mode: "ffa".into(), host_budget: String::new(), region: String::new(), invert_y: false, sound: true, volume: 0.8, music: 0.6, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true }
+        Settings { name: "车长".into(), accounts: BTreeMap::new(), host_mode: "ffa".into(), host_budget: String::new(), region: String::new(), invert_y: false, sound: true, volume: 0.8, music: 0.6, sensitivity: 1.0, bloom: true, display: "windowed".into(), window_size: [1440, 900], fullscreen_size: [0, 0], vsync: true, fps_cap: 0, fullscreen: false, show_fps: false, show_help: true }
     }
 }
 

@@ -3,6 +3,7 @@
 use crate::art::{BlockArt, srgb};
 use crate::flight::ground;
 use crate::audio::{Sfx, Sounds};
+use crate::account::Lobby;
 use crate::screens::Overlays;
 use crate::settings;
 use crate::thumbs::PartThumbs;
@@ -19,6 +20,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, Button, observe};
 use bevy::window::PrimaryWindow;
+use blocktread_shared::economy::economy;
 use blocktread_shared::analysis::{Analysis, Level, MAX_BLOCKS, analyze, place_reason};
 use blocktread_shared::blocks::{Block, BlockType, Category, Design};
 use blocktread_shared::glam::IVec3;
@@ -33,7 +35,7 @@ impl Plugin for HangarPlugin {
             .init_resource::<OrbitCam>()
             .add_systems(OnEnter(Screen::Hangar), enter_hangar)
             .add_systems(OnExit(Screen::Hangar), leave_hangar)
-            .add_systems(Update, (orbit_and_pick, edit_keys, hangar_actions, sync_ship_name, rebuild_model, refresh_ui, draw_gizmos).chain().run_if(in_state(Screen::Hangar)))
+            .add_systems(Update, (orbit_and_pick, edit_keys, hangar_actions, sync_ship_name, rebuild_model, refresh_ui, draw_gizmos, show_locks).chain().run_if(in_state(Screen::Hangar)))
             .add_systems(Update, keep_analysis);
     }
 }
@@ -494,6 +496,18 @@ fn spawn_ui(commands: &mut Commands, font: &UiFont, hangar: &Hangar, thumbs: &Pa
             let key = KEYED.iter().position(|&k| k == t).map_or("", |i| KEYS[i]);
             let tile = spawn_part_tile(commands, f, grid, thumbs.0[t.index()].clone(), key, UiAction::SelectType(t));
             commands.entity(tile).insert((Tip(t.info().name.to_string()), TipDetail(part_detail(t))));
+            // a part not bought: dimmed, with its price (shown only on a server with accounts)
+            if let Some(price) = economy().price(t) {
+                commands.spawn((
+                    Node { position_type: PositionType::Absolute, left: px(0), right: px(0), top: px(0), bottom: px(0), justify_content: JustifyContent::Center, align_items: AlignItems::FlexEnd, padding: UiRect::bottom(px(4)), ..default() },
+                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.62)),
+                    Pickable::IGNORE,
+                    Visibility::Hidden,
+                    PartLock(t),
+                    ChildOf(tile),
+                    children![(tech(f, format!("{price}"), 11.0, ACCENT), Pickable::IGNORE)],
+                ));
+            }
         }
     }
     commands.spawn((text(f, "悬停看名称 · 按住 Shift 看详情", 12.0, MUTED), ChildOf(left)));
@@ -750,10 +764,42 @@ fn edit_keys(keys: Res<ButtonInput<KeyCode>>, focus: Res<InputFocus>, editing: Q
     }
 }
 
+/// A palette tile's lock: over a part not bought yet.
+#[derive(Component)]
+struct PartLock(BlockType);
+
+fn show_locks(lobby: Res<Lobby>, mut q: Query<(&PartLock, &mut Visibility)>) {
+    let have = lobby.unlocks();
+    for (l, mut v) in &mut q {
+        let want = if lobby.ranked() && !have.has(l.0) { Visibility::Inherited } else { Visibility::Hidden };
+        v.set_if_neq(want);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn hangar_actions(mut msgs: MessageReader<UiAction>, mut hangar: ResMut<Hangar>, mut toasts: ResMut<Toasts>, mut modal: ResMut<ModalReq>) {
+fn hangar_actions(mut msgs: MessageReader<UiAction>, mut hangar: ResMut<Hangar>, mut toasts: ResMut<Toasts>, mut modal: ResMut<ModalReq>, lobby: Res<Lobby>) {
     for m in msgs.read() {
         match m.clone() {
+            // a part not bought can't be placed: buy it first (or try it on the test range)
+            UiAction::SelectType(t) if lobby.ranked() && !lobby.unlocks().has(t) => {
+                let price = economy().price(t).unwrap_or(0);
+                let name = &t.info().name;
+                match lobby.account() {
+                    Some((_, p)) if p.coins >= price => modal.show(
+                        format!("解锁{name}"),
+                        format!("花 {price} 金币解锁{name}，以后随便用。你有 {} 金币。", p.coins),
+                        vec![("取消", UiAction::CloseModal, Kind::Normal), ("解锁", UiAction::Unlock(t), Kind::Accent)],
+                        None,
+                    ),
+                    Some((_, p)) => modal.show(format!("{name}还没解锁"), format!("解锁要 {price} 金币，你有 {}。打几局再来吧；在试车场里可以先开着试试。", p.coins), vec![("好", UiAction::CloseModal, Kind::Accent)], None),
+                    None => modal.show(
+                        format!("{name}还没解锁"),
+                        format!("登录后用金币解锁（{price} 金币）。在试车场里可以先开着试试。"),
+                        vec![("取消", UiAction::CloseModal, Kind::Normal), ("登录 / 注册", UiAction::OpenAccount, Kind::Accent)],
+                        None,
+                    ),
+                }
+            }
             UiAction::SelectType(t) => {
                 hangar.ty = t;
                 hangar.tool = Tool::Place;

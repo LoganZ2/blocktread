@@ -179,9 +179,12 @@ impl Hub {
         self.store.is_some()
     }
 
-    /// For the server log: connections, matches, players waiting.
-    pub fn census(&self) -> (usize, usize, usize) {
-        (self.conns.len(), self.matches.len(), self.conns.values().filter(|c| matches!(c.at, Where::Queued { .. })).count())
+    /// For the server log and status: connections busy (queued, in a match, watching), matches,
+    /// players waiting, and connections idle in the lobby (an account's quiet link, which a
+    /// restart only makes reconnect).
+    pub fn census(&self) -> (usize, usize, usize, usize) {
+        let idle = self.conns.values().filter(|c| c.at == Where::Idle).count();
+        (self.conns.len() - idle, self.matches.len(), self.conns.values().filter(|c| matches!(c.at, Where::Queued { .. })).count(), idle)
     }
 
     pub fn handle(&mut self, ev: NetEvent) {
